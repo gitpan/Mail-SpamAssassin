@@ -1,7 +1,7 @@
 # SpamAssassin rules file: tests.
 ###########################################################################
 
-header NO_REAL_NAME		From =~ /^\s*\<?\S+\@\S+\>?\s*$/
+header NO_REAL_NAME		From =~ /^["\s]*\<?\S+\@\S+\>?\s*$/
 describe NO_REAL_NAME		From: does not include a real name
 
 header FROM_ENDS_IN_NUMS	From =~ /\d\d\@/
@@ -19,6 +19,9 @@ describe TO_NO_USER		To: has no local-part before @ sign
 
 header TO_MALFORMED		To !~ /(?:(?:\"[^\"]+\"|\S+)\@\S+\.\S+|undisclosed-recipients:)/ [if-unset: unset@unset.unset]
 describe TO_MALFORMED		To: has a malformed address
+
+header TO_LOCALPART_EQ_REAL     To =~ /^\s*(\"?)([\w%\+\-=_\.]+)\1\s*<\2\@[\w%\+\-=_\.]+>/i
+describe TO_LOCALPART_EQ_REAL   To: repeats local-part as real name
 
 header FROM_MALFORMED		From !~ /(?:\"[^\"]+\"|\S+)\@\S+\.\S+/ [if-unset: unset@unset.unset]
 describe FROM_MALFORMED		From: has a malformed address
@@ -44,7 +47,7 @@ describe FAKED_UNDISC_RECIPS	Faked To "Undisclosed-Recipients"
 header TO_INVESTORS		To =~ /\bInvestors\@/
 describe TO_INVESTORS		To: non-existent 'Investors' address
 
-header SUBJ_ALL_CAPS		Subject =~ /^[A-Z0-9\W]{6,}[^a-z]+$/
+header SUBJ_ALL_CAPS		Subject =~ /^[^a-z]*$/
 describe SUBJ_ALL_CAPS		Subject is all capitals
 
 # (allow this test to pass if there's no Message-Id header)
@@ -103,9 +106,6 @@ describe X_PMFLAGS_PRESENT	Found an X-PMFLAGS: (all caps) header
 header X_UIDL_SPAMSIGN		X-UIDL =~ /[^\s\x21-\x7E]/
 describe X_UIDL_SPAMSIGN	X-UIDL: header contains invalid chars
 
-header A_FROM_IN_AUTO_WLIST	eval:check_for_auto_whitelist()
-describe A_FROM_IN_AUTO_WLIST	have seen non-spam mail from same From: address
-
 header NO_MX_FOR_FROM		eval:check_for_from_mx()
 describe NO_MX_FOR_FROM		No MX records for the From: domain
 
@@ -145,6 +145,9 @@ describe RCVD_IN_OSIRUSOFT_COM	Received via a relay in relays.osirusoft.com
 
 header RCVD_IN_ORBZ		eval:check_rbl('relay', 'inputs.orbz.org.')
 describe RCVD_IN_ORBZ		Received via a relay in inputs.orbz.org
+
+header RCVD_IN_VISI		eval:check_rbl('relay', 'relays.visi.com.')
+describe RCVD_IN_VISI		Received via a relay in relays.visi.com
 
 header RCVD_IN_RFCI		eval:check_rbl('rfci', 'ipwhois.rfc-ignorant.org.')
 describe RCVD_IN_RFCI		Received via a relay in ipwhois.rfc-ignorant.org

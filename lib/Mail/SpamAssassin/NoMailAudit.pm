@@ -19,7 +19,7 @@ use Mail::SpamAssassin::Message;
 use Fcntl qw(:DEFAULT :flock);
 
 @Mail::SpamAssassin::NoMailAudit::ISA = (
-  	'Mail::SpamAssassin::Message'
+        'Mail::SpamAssassin::Message'
 );
 
 # ---------------------------------------------------------------------------
@@ -46,10 +46,15 @@ sub new {
 
   bless ($self, $class);
 
-  if (defined $opts{'data'}) {
-    $self->{textarray} = $opts{data};
-  } else {
-    $self->{textarray} = $self->read_text_array_from_stdin();
+  # data may be filehandle (default stdin) or arrayref
+  my $data = $opts{data} || \*STDIN;
+
+  if (ref $data eq 'ARRAY') {
+    $self->{textarray} = $data;
+  } elsif (ref $data eq 'GLOB') {
+    if (defined fileno $data) {
+      $self->{textarray} = [ <$data> ];
+    }
   }
 
   $self->parse_headers();
@@ -61,23 +66,6 @@ sub new {
 sub get_mail_object {
   my ($self) = @_;
   return $self;
-}
-
-# ---------------------------------------------------------------------------
-
-sub read_text_array_from_stdin {
-  my ($self) = @_;
-
-  my @ary = ();
-  while (<STDIN>) {
-    push (@ary, $_);
-    /^\r*$/ and last;
-  }
-
-  push (@ary, (<STDIN>));
-  close STDIN;
-
-  $self->{textarray} = \@ary;
 }
 
 # ---------------------------------------------------------------------------
@@ -115,7 +103,7 @@ sub parse_headers {
       $self->{from_line} = $_;
       next;
 
-    } elsif (/^([^\x00-\x1f\x7f-\xff :]+): (.*)$/) {
+    } elsif (/^([^\x00-\x20\x7f-\xff:]+):\s*(.*)$/) {
       $hdr = $1; $val = $2;
       $val =~ s/\r+//gs;          # trim CRs, we don't want them
       $entry = $self->_get_or_create_header_object ($hdr);
@@ -123,7 +111,7 @@ sub parse_headers {
 
     } else {
       $hdr = "X-Mail-Format-Warning";
-      $val = "Bad RFC822 header formatting in $_";
+      $val = "Bad RFC2822 header formatting in $_";
       $entry = $self->_get_or_create_header_object ($hdr);
       $entry->{added} = 1;
     }
@@ -136,9 +124,8 @@ sub parse_headers {
 sub _add_header_to_entry {
   my ($self, $entry, $hdr, $line) = @_;
 
-  if ($line !~ /\n$/) {
-    $line .= "\n";	# ensure we have line endings
-  }
+  # ensure we have line endings
+  $line .= "\n" unless $line =~ /\n$/;
 
   $entry->{$entry->{count}} = $line;
   push (@{$self->{header_order}}, $hdr.":".$entry->{count});
@@ -150,9 +137,9 @@ sub _get_or_create_header_object {
 
   if (!defined $self->{headers}->{$hdr}) {
     $self->{headers}->{$hdr} = {
-	      'count' => 0,
-	      'added' => 0,
-	      'original' => 0
+              'count' => 0,
+              'added' => 0,
+              'original' => 0
     };
   }
   return $self->{headers}->{$hdr};
@@ -160,20 +147,45 @@ sub _get_or_create_header_object {
 
 # ---------------------------------------------------------------------------
 
+sub _get_header_list {
+    my ($self, $hdr) = @_;
+  # OK, we want to do a case-insensitive match here on the header name
+  # So, first I'm going to pick up an array of the actual capitalizations used:
+  my @cap_hdrs = grep(/^$hdr$/i, keys(%{$self->{headers}}));
+
+  # And now pick up all the entries into a list
+  my @entries = map($self->{headers}->{$_},@cap_hdrs);
+
+  return @entries;
+}
+
 sub get_header {
   my ($self, $hdr) = @_;
 
-  my $entry = $self->{headers}->{$hdr};
+  # And now pick up all the entries into a list
+  my @entries = $self->_get_header_list($hdr);
 
   if (!wantarray) {
-    if (!defined $entry || $entry->{count} < 1) { return undef; }
-    return $entry->{0};
+      # If there is no header like that, return undef
+      if (scalar(@entries) < 1 ) { return undef; }
+      foreach my $entry (@entries)
+      {
+	  if($entry->{count} > 0) { return $entry->{0}; }
+      }
+      return undef;
 
   } else {
-    if (!defined $entry || $entry->{count} < 1) { return ( ); }
-    my @ret = ();
-    foreach my $i (0 .. ($entry->{count}-1)) { push (@ret, $entry->{$i}); }
-    return @ret;
+
+      if(scalar(@entries) < 1) { return ( ); }
+
+      my @ret = ();
+      # loop through each entry and collect all the individual matching lines
+      foreach my $entry (@entries)
+      {
+	  foreach my $i (0 .. ($entry->{count}-1)) { push (@ret, $entry->{$i}); }
+      }
+
+      return @ret;
   }
 }
 
@@ -227,11 +239,19 @@ sub get_all_headers {
 sub replace_header {
   my ($self, $hdr, $text) = @_;
 
-  if (!defined $self->{headers}->{$hdr}) {
+  # Get all the headers that might match
+  my @entries = $self->_get_header_list($hdr);
+
+  if (scalar(@entries) < 1) {
     return $self->put_header($hdr, $text);
   }
 
-  $self->{headers}->{$hdr}->{0} = $text;
+  foreach my $entry (@entries)
+  {
+      if($entry->{count} > 0) { $entry->{0} = $text; return; }
+  }
+
+  return $self->put_header($hdr, $text);
 }
 
 sub delete_header {
@@ -265,7 +285,7 @@ sub replace_body {
 sub as_string {
   my ($self) = @_;
   return join ('', $self->get_all_headers()) . "\n" .
-  		join ('', @{$self->get_body()});
+                join ('', @{$self->get_body()});
 }
 
 # ---------------------------------------------------------------------------
@@ -301,8 +321,18 @@ sub accept {
   my $self = shift;
   my $file = shift;
 
+  # determine location of mailspool
+  if ($ENV{'MAIL'}) {
+    $file = $ENV{'MAIL'};
+  } elsif (-d "/var/spool/mail/") {
+    $file = "/var/spool/mail/" . getpwuid($>);
+  } elsif (-d "/var/mail/") {
+    $file = "/var/mail/" . getpwuid($>);
+  } else {
+    die('Could not determine mailspool location for your system.  Try setting $MAIL in the environment.');
+  }
+
   # some bits of code from Mail::Audit here:
-  $file ||= $ENV{'MAIL'} || "/var/spool/mail/".getpwuid($>);
 
   if (exists $self->{accept}) {
     return $self->{accept}->();
@@ -321,7 +351,7 @@ sub accept {
 
     if (!defined $gotlock) {
       # dot-locking not supported here (probably due to file permissions
-      # on the /var/spool/mail dir).  just use flock().
+      # on the mailspool dir).  just use flock().
       $nodotlocking = 1;
     }
 
@@ -330,7 +360,7 @@ sub accept {
 
     if ($gotlock || $nodotlocking) {
       if (!open (MBOX, ">>$file")) {
-	die "Couldn't open $file: $!";
+        die "Couldn't open $file: $!";
       }
 
       flock(MBOX, LOCK_EX) or warn "failed to lock $file: $!";
@@ -339,7 +369,7 @@ sub accept {
       close MBOX;
 
       if (!$nodotlocking) {
-	$self->dotlock_unlock ();
+        $self->dotlock_unlock ();
       }
 
       if (!$self->{noexit}) { exit 0; }
@@ -447,7 +477,7 @@ sub _proxy_to_mail_audit {
 
   if ($@) {
     warn "spamassassin: $method() failed, Mail::Audit ".
-    		"module could not be loaded: $@";
+            "module could not be loaded: $@";
     return undef;
   }
 

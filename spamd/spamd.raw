@@ -44,7 +44,7 @@ Usage: spamd [options]
 
 Options:
 
-  -a              Use per-user auto-whitelists.
+  -a              Use auto-whitelists.
   -c              Create user preferences files if they do not already exist
   -d		  Daemonize, detach from parent process
   -h              Print this usage message and exit
@@ -292,7 +292,10 @@ for ( $waitedpid = 0;
 
 	    # Now read in message
 	    my @msglines = (<STDIN>);
-	    my $actual_length = length (join '', @msglines);
+	    my $actual_length;
+	    for (@msglines) {
+		$actual_length += length;
+	    }
 	    my $mail = Mail::SpamAssassin::NoMailAudit->new (
                                 data => \@msglines,
                                 add_From_line => $opt_F
@@ -320,7 +323,7 @@ for ( $waitedpid = 0;
 		$was_it_spam = 'clean message';
 	    }
 	    $current_user ||= '(unknown)';
-	    logmsg "$was_it_spam for $current_user:$> in ".
+	    logmsg "$was_it_spam ($msg_score/$msg_threshold) for $current_user:$> in ".
 		sprintf("%3d", time - $start) ." seconds.\n";
 
 	    $status->finish();	# added by jm to allow GC'ing
@@ -396,7 +399,10 @@ for ( $waitedpid = 0;
 
 	    # Now read in message
 	    my @msglines = (<STDIN>);
-	    my $actual_length = length (join '', @msglines);
+	    my $actual_length;
+	    for (@msglines) {
+		$actual_length += length;
+	    }
 	    my $mail = Mail::SpamAssassin::NoMailAudit->new (
                                 data => \@msglines,
                                 add_From_line => $opt_F
@@ -428,8 +434,10 @@ for ( $waitedpid = 0;
 	    }
 	    my $was_it_spam;
 	    if($status->is_spam) { $was_it_spam = 'identified spam'; } else { $was_it_spam = 'clean message'; }
+            my $msg_score = int($status->get_hits);
+            my $msg_threshold = int($status->get_required_hits);
 	    $current_user ||= '(unknown)';
-	    logmsg "$was_it_spam for $current_user:$> in ".
+	    logmsg "$was_it_spam ($msg_score/$msg_threshold) for $current_user:$> in ".
 		sprintf("%3d", time - $start) ." seconds.\n";
 
 	    $status->finish();	# added by jm to allow GC'ing
@@ -514,8 +522,8 @@ sub handle_user
 
 sub handle_user_sql
 {
-    my $username = shift;
-    $spamtest->load_scoreonly_sql ($username);
+    $current_user = shift;
+    $spamtest->load_scoreonly_sql ($current_user);
     return 1;
 }
 
@@ -577,7 +585,7 @@ spamd [options]
 
 =item B<-a>
 
-Use per-user auto-whitelists.  These will automatically create a list of
+Use auto-whitelists.  These will automatically create a list of
 senders whose messages are to be considered non-spam by monitoring the total
 number of received messages which weren't tagged as spam from that sender.
 Once a threshold is exceeded, further messages from that sender will be given a

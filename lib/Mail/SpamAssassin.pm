@@ -4,7 +4,7 @@ Mail::SpamAssassin - Mail::Audit spam detector plugin
 
 =head1 SYNOPSIS
 
-  my $mail = Mail::SpamAssassin::MyMailAudit->new();
+  my $mail = Mail::SpamAssassin::NoMailAudit->new();
 
   my $spamtest = Mail::SpamAssassin->new();
   my $status = $spamtest->check ($mail);
@@ -68,8 +68,8 @@ use vars	qw{
 
 @ISA = qw();
 
-$VERSION = "2.01";
-$SUB_VERSION = 'devel $Id: SpamAssassin.pm,v 1.61 2002/01/25 04:41:02 jmason Exp $';
+$VERSION = "2.11";
+$SUB_VERSION = 'devel $Id: SpamAssassin.pm,v 1.68 2002/03/04 01:22:24 hughescr Exp $';
 
 sub Version { $VERSION; }
 
@@ -214,7 +214,7 @@ Otherwise identical to C<$f->check()> above.
 
 sub check_message_text {
   my ($self, $mailtext) = @_;
-  my @lines = split (/\n/s, $mailtext);
+  my @lines = split (/^/m, $mailtext);
   my $mail_obj = Mail::SpamAssassin::NoMailAudit->new ('data' => \@lines);
   return $self->check ($mail_obj);
 }
@@ -402,7 +402,7 @@ sub read_scoreonly_config {
   my ($self, $filename) = @_;
 
   if (!open(IN,"<$filename")) {
-    warn "read_scoreonly_config: cannot open \"$filename\"\n";
+    warn "read_scoreonly_config: cannot open \"$filename\": $!\n";
     return;
   }
   my $text = join ('',<IN>);
@@ -506,7 +506,7 @@ sub init {
     $self->{config_text} = '';
 
     my $fname = $self->first_existing_path (@default_rules_path);
-    $self->{config_text} .= $self->read_cf ($fname, 'default rules dir');
+    $self->{rules_filename} or $self->{config_text} .= $self->read_cf ($fname, 'default rules dir');
 
     $fname = $self->{rules_filename};
     $fname ||= $self->first_existing_path (@site_rules_path);
@@ -533,7 +533,7 @@ sub init {
 
       if (defined $fname) {
         if (!-f $fname && !$self->create_default_prefs($fname)) {
-          warn "Failed to create default prefs file $fname\n";
+          warn "Failed to create default prefs file $fname: $!\n";
         }
       }
 
@@ -588,7 +588,7 @@ sub create_dotsa_dir_if_needed {
     dbg ("using \"$fname\" for user state dir");
 
     if (!-d $fname) {
-      mkpath ($fname, 0, 0700) or warn "mkdir $fname failed\n";
+      mkpath ($fname, 0, 0700) or warn "mkdir $fname failed: $!\n";
     }
   }
 }
@@ -610,8 +610,8 @@ sub create_default_prefs {
     my $defprefs = $self->first_existing_path
 			(@Mail::SpamAssassin::default_prefs_path);
     
-    open (IN, "<$defprefs") or warn "cannot open $defprefs";
-    open (OUT, ">$fname") or warn "cannot write to $fname";
+    open (IN, "<$defprefs") or warn "cannot open $defprefs: $!";
+    open (OUT, ">$fname") or warn "cannot write to $fname: $!";
     while (<IN>) {
       /^\#\* / and next;
       print OUT;
@@ -624,14 +624,14 @@ sub create_default_prefs {
 	# chown it
 	my ($uid,$gid) = (getpwnam($user))[2,3];
 	unless (chown $uid, $gid, $fname) {
-	   warn "Couldn't chown $fname to $uid:$gid for $user\n";
+	   warn "Couldn't chown $fname to $uid:$gid for $user: $!\n";
 	}
       }
      warn "Created user preferences file: $fname\n";
      return(1);
 
    } else {
-     warn "Failed to create user preferences file\n".
+     warn "Failed to create user preferences file: $!\n".
 			 "\"$fname\" from default \"$defprefs\".\n";
    }
  }

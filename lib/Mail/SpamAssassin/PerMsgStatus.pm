@@ -8,7 +8,7 @@ Mail::SpamAssassin::PerMsgStatus - per-message status (spam or not-spam)
     'rules_filename'      => '/etc/spamassassin.rules',
     'userprefs_filename'  => $ENV{HOME}.'/.spamassassin.cf'
   });
-  my $mail = Mail::SpamAssassin::MyMailAudit->new();
+  my $mail = Mail::SpamAssassin::NoMailAudit->new();
 
   my $status = $spamtest->check ($mail);
   if ($status->is_spam()) {
@@ -35,6 +35,7 @@ use Carp;
 use strict;
 
 use Mail::SpamAssassin::EvalTests;
+use Mail::SpamAssassin::AutoWhitelist;
 
 use vars	qw{
   	@ISA $base64alphabet
@@ -76,6 +77,7 @@ sub check {
   # we can then immediately submit to spamblocking services.
   #
   # TODO: change this to do whitelist/blacklists first? probably a plan
+  # NOTE: definitely need AWL stuff last, for regression-to-mean of score
 
   $self->remove_unwanted_headers();
 
@@ -110,20 +112,14 @@ sub check {
     }
 
     $self->do_head_eval_tests();
-  }
+
+    # Do AWL tests last, since these need the score to have already been calculated
+    $self->do_awl_tests();
+}
 
   dbg ("is spam? score=".$self->{hits}.
   			" required=".$self->{conf}->{required_hits});
   $self->{is_spam} = ($self->{hits} >= $self->{conf}->{required_hits});
-
-  # add it to the auto-whitelist if it's not spam
-  if (!$self->{is_spam} && defined $self->{auto_whitelist}) {
-    $self->{auto_whitelist}->increment_pass_accumulator();
-  }
-
-  if (defined $self->{auto_whitelist}) {
-    $self->{auto_whitelist}->finish();		# done with this now
-  }
 
   if ($self->{conf}->{use_terse_report}) {
     $_ = $self->{conf}->{terse_report_template};
@@ -338,18 +334,19 @@ sub rewrite_as_spam {
   # First, rewrite the subject line.
   if ($self->{conf}->{rewrite_subject}) {
     $_ = $srcmsg->get_header ("Subject");
-    my $SUBJ = $srcmsg->get_header ("SUBJECT"); # not really legal, but...
-    $_ ||= $SUBJ;
     $_ ||= '';
 
     my $tag = $self->{conf}->{subject_tag};
+
+    my $hit = sprintf ("%05.2f", $self->{hits});
+    $tag =~ s/_HITS_/$hit/;
+
+    my $reqd = sprintf ("%05.2f", $self->{conf}->{required_hits});
+    $tag =~ s/_REQD_/$reqd/;
+    
     s/^(?:\Q${tag}\E |)/${tag} /g;
 
-    if (defined $SUBJ) {        # keep the uppercase subject header
-      $self->{msg}->replace_header ("SUBJECT", $_);
-    } else {
-      $self->{msg}->replace_header ("Subject", $_);
-    }
+    $self->{msg}->replace_header ("Subject", $_);
   }
 
   # add some headers...
@@ -369,11 +366,9 @@ sub rewrite_as_spam {
   # defang HTML mail; change it to text-only.
   if ($self->{conf}->{defang_mime}) {
     my $ct = $srcmsg->get_header ("Content-Type");
-    $ct ||= $srcmsg->get_header ("Content-type");
 
     if (defined $ct && $ct ne '' && $ct ne 'text/plain') {
       $self->{msg}->replace_header ("Content-Type", "text/plain");
-      $self->{msg}->delete_header ("Content-type"); 	# just in case
       $self->{msg}->replace_header ("X-Spam-Prev-Content-Type", $ct);
     }
   }
@@ -526,7 +521,6 @@ sub get_raw_body_text_array {
   }
 
   my $ctype = $self->{msg}->get_header ('Content-Type');
-  $ctype ||=  $self->{msg}->get_header ('Content-type');
   $ctype ||=  '';
 
   # if it's non-text, just return an empty body rather than the base64-encoded
@@ -1045,6 +1039,39 @@ sub do_full_eval_tests {
 
 ###########################################################################
 
+sub do_awl_tests {
+    my($self) = @_;
+
+    local $_ = lc $self->get('From:addr');
+    return 0 unless /\S/;
+
+    # Create the AWL object, then check
+    $self->{auto_whitelist} = Mail::SpamAssassin::AutoWhitelist->new($self->{main});
+
+    my $meanscore = $self->{auto_whitelist}->check_address($_);
+    my $delta = 0;
+
+    dbg("AWL active, pre-score: ".$self->{hits}.", mean: ".($meanscore||'undef'));
+
+    if(defined($meanscore))
+    {
+	$delta = ($meanscore - $self->{hits})*$self->{main}->{conf}->{auto_whitelist_factor};
+    }
+
+    if($delta != 0)
+    {
+	$self->_handle_hit("AWL",$delta,"AWL: ","Auto-whitelist adjustment");
+    }
+
+    dbg("Post AWL score: ".$self->{hits});
+
+    # Update the AWL
+    $self->{auto_whitelist}->add_score($self->{hits});
+    $self->{auto_whitelist}->finish();		# done with this now
+}
+
+###########################################################################
+
 sub mk_param {
   my $param = shift;
 
@@ -1107,6 +1134,24 @@ sub clear_test_state {
   $self->{test_log_msgs} = '';
 }
 
+sub _handle_hit {
+    my ($self, $rule, $score, $area, $desc) = @_;
+
+    $score = sprintf("%2.1f",$score);
+    $self->{hits} += $score;
+    $self->{test_names_hit} .= $rule.',';
+
+    if ($self->{conf}->{use_terse_report}) {
+	$self->{test_logs} .= sprintf ("* % 2.1f -- %s%s\n%s",
+				       $score, $area, $desc, $self->{test_log_msgs});
+    } else {
+	$self->{test_logs} .= sprintf ("%-18s %s%s\n%s",
+				       "Hit! (".$score." point".($score == 1 ? "":"s").")",
+				       $area, $desc, $self->{test_log_msgs});
+    }
+}
+
+
 sub handle_hit {
   my ($self, $rule, $area, $deffallbackdesc) = @_;
 
@@ -1115,18 +1160,8 @@ sub handle_hit {
   $desc ||= $rule;
 
   my $score = $self->{conf}->{scores}->{$rule};
-  $self->{hits} += $score;
 
-  $self->{test_names_hit} .= $rule.",";
-
-  if ($self->{conf}->{use_terse_report}) {
-    $self->{test_logs} .= sprintf ("* % 2.1f -- %s%s\n%s",
-                          $score, $area, $desc, $self->{test_log_msgs});
-  } else {
-    $self->{test_logs} .= sprintf ("%-18s %s%s\n%s",
-                          "Hit! (".$score." point".($score == 1 ? "":"s").")",
-                          $area, $desc, $self->{test_log_msgs});
-  }
+  $self->_handle_hit($rule, $score, $area, $desc);
 }
 
 sub got_hit {

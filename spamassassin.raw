@@ -58,6 +58,7 @@ Usage: spamassassin [option ...] < mailmessage
 
 Options:
 
+  -a               Use auto-whitelists
   -h		   print this help and terminate without further action
   -P               pipe message through, instead of delivering to mail spool
   -e               Exit with a non-zero exit code for spam messages
@@ -87,14 +88,14 @@ EOUSAGE
 
 use vars qw{
   $opt_t $opt_c $opt_p $opt_h $opt_V $opt_D $opt_r $opt_P $opt_w $opt_l
-  $opt_d $opt_L $opt_e $opt_W $opt_M $opt_R $opt_F
+  $opt_d $opt_L $opt_e $opt_W $opt_M $opt_R $opt_F $opt_a
 };
 
 eval {
   require Mail::SpamAssassin;
   require Mail::SpamAssassin::NoMailAudit;
 
-  getopts ('tc:p:ehVDrPw:l:dLWRM:F:') or usage();
+  getopts ('atc:p:ehVDrPw:l:dLWRM:F:') or usage();
 
   if (defined $opt_h) { usage(); }
   if (defined $opt_V) {
@@ -169,6 +170,8 @@ my $mail = Mail::SpamAssassin::NoMailAudit->new ( add_From_line => $opt_F );
     $mail->ignore();		# will exit
   }
 
+($opt_a or $opt_R or $opt_W) and eval
+{
   # create a factory for the persistent address list.
   # choose one of these implementations!
   # The -M "Mail::SpamAssassin::ImplClassAddrList" flag can be used
@@ -183,19 +186,13 @@ my $mail = Mail::SpamAssassin::NoMailAudit->new ( add_From_line => $opt_F );
 
   } else {
 
-    # DB-file-based: probably faster:
-    #
     require Mail::SpamAssassin::DBBasedAddrList;
     $addrlistfactory = Mail::SpamAssassin::DBBasedAddrList->new();
 
-    # directory-based: may take up more disk space, and be slower, but is
-    # safer in the face of concurrency.
-    #
-    # require Mail::SpamAssassin::DirBasedAddrList;
-    # $addrlistfactory = Mail::SpamAssassin::DirBasedAddrList->new();
   }
 
   $spamtest->set_persistent_address_list_factory ($addrlistfactory);
+};
 
   if ($opt_W) {
     $spamtest->add_all_addresses_to_whitelist ($mail);
@@ -290,6 +287,15 @@ spamassassin - mail filter to identify spam using text analysis
 Normally SpamAssassin will write the rewritten message to the mail spool by
 default.  The B<-P> parameter will cause it to pipe the output to STDOUT
 instead.
+
+=item B<-a>
+
+Use auto-whitelists.  These will automatically create a list of
+senders whose messages are to be considered non-spam by monitoring the total
+number of received messages which weren't tagged as spam from that sender.
+Once a threshold is exceeded, further messages from that sender will be given a
+non-spam bonus (in case you correspond with people who occasionally swear in
+their emails).
 
 =item B<-e>
 
@@ -393,17 +399,21 @@ The default tagging operations that take place are detailed in L</TAGGING>.
 The rule base, text templates, and rule description text are loaded from the
 configuration files.
 
-The default configuration file is F<$Config{installsitelib}/spamassassin.cf>.
-This file will always be read first.
+By default, configuration data is loaded from the first existing directory in:
+F</usr/local/share/spamassassin>;F</usr/share/spamassassin>;F<./rules>;F<../rules>
 
-F</etc/spamassassin.cf> (or the file specified with C<-c>)  will be read next,
-if it exists.  This is a good place to add your own site-wide preferences.
+The, configuration data in the first existing directory in:
+F</usr/local/etc/spamassassin>;F</usr/pkg/etc/spamassassin>;F</usr/etc/spamassassin>;F</etc/mail/spamassassin>;F</etc/spamassassin>
+are used to override any values which had already been set
+
+Spamassassin will read *.cf in these directories, in alphanumeric order within each directory
+(similar to SysV-style startup scripts).  In other words, it will read F<10_misc.cf> before F<50_scores.cf> and F<20_body_tests.cf> before F<20_head_test.cf>.  Options in later files will override earlier files.
 
 The user preferences (such as scores to attach to each rule), are loaded from
 the file specified in the B<-p> argument.  If this is not specified,
-F<~/.spamassassin.cf> is used if it exists.  C<spamassassin> will create this
-file if it does not exist, using F<$Config{installsitelib}/spamassassin.prefs>
-as a template.
+F<~/.spamassassin/user_prefs> is used if it exists.  C<spamassassin> will create this
+file if it does not exist, using F<user_prefs.template> as a template.  This file will be looked for in 
+F</etc/spamassassin/user_prefs.template>;F</usr/local/share/spamassassin/user_prefs.template>;F</usr/share/spamassassin/user_prefs.template>
 
 =head1 TAGGING
 

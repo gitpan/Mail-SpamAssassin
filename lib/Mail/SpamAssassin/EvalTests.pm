@@ -9,7 +9,6 @@ use Mail::SpamAssassin::Conf;
 use Mail::SpamAssassin::Dns;
 use Mail::SpamAssassin::Locales;
 use Mail::SpamAssassin::PhraseFreqs;
-use Mail::SpamAssassin::AutoWhitelist;
 use Time::Local;
 use strict;
 
@@ -301,7 +300,7 @@ sub _check_whitelist {
 
   study $addr;
   foreach my $regexp (values %{$list}) {
-    if ($addr =~ /$regexp/) { return 1; }
+    if ($addr =~ /$regexp/i) { return 1; }
   }
 
   return 0;
@@ -556,6 +555,7 @@ sub check_for_spam_reply_to {
 
   my $rpto = $self->get ('Reply-To:addr');
   return 0 if ($rpto eq '');
+  return 0 if ($rpto =~ /,/);
 
   my $ratio1 = $self->get_address_commonality_ratio
   				($rpto, $self->get ('From:addr'));
@@ -573,24 +573,6 @@ sub check_for_spam_reply_to {
   if ($ratio1 > 2.0 && $ratio2 > 2.0 && $ratio3 > 2.0) { return 1; }
 
   return 0;
-}
-
-###########################################################################
-
-sub check_for_auto_whitelist {
-  my ($self) = @_;
-
-  my $addr = lc $self->get ('From:addr');
-  if ($addr !~ /\S/) { return 0; }
-
-  my $list = Mail::SpamAssassin::AutoWhitelist->new ($self->{main});
-  $self->{auto_whitelist} = $list;
-
-  if ($list->check_address ($addr)) {
-    return 1;
-  }
-
-  0;
 }
 
 ###########################################################################
@@ -627,7 +609,7 @@ sub check_for_content_type_just_html {
   # so we need to exclude that from the test.
   if ($rcv =~ / by hotmail.com /) { return 0; }
 
-  if ($ctype =~ /^text\/html\b/) { return 1; }
+  if ($ctype =~ /^text\/html;?\b/) { return 1; }
 
   0;
 }
@@ -652,6 +634,8 @@ sub check_for_faraway_charset {
     # number of 8-bit chars in the body text first.
 
     my $body = $self->get_decoded_stripped_body_text_array();
+    $body = join ("\n", @$body);
+
     if ($self->are_more_high_bits_set ($body)) {
       return 1;
     }

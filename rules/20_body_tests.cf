@@ -98,7 +98,7 @@ rawbody HTTP_ESCAPED_HOST       /http\:\/\/[^\/]*%/
 describe HTTP_ESCAPED_HOST      Uses %-escapes inside a URL's hostname
 
 # note: do not match \r or \n
-rawbody HTTP_CTRL_CHARS_HOST    /http\:\/\/[^\/]*[\x00-\x09\x0b\x0c\x0e-\x1f]/
+rawbody HTTP_CTRL_CHARS_HOST    /http\:\/\/[^\/]*[\x00-\x08\x0b\x0c\x0e-\x1f]/
 describe HTTP_CTRL_CHARS_HOST   Uses control sequences inside a URL's hostname
 
 rawbody SUPERLONG_LINE		/^[^<]{199,}$/m
@@ -135,10 +135,8 @@ body CASHCASHCASH		/\${3,}/
 describe CASHCASHCASH		Contains at least 3 dollar signs in a row
 body CALL_NOW			/CALL NOW/
 describe CALL_NOW		Urges you to call now
-body CALL_888			/(?:call|dial).{1,15}888-[\dA-Z]+-?[\dA-Z]+/i
-describe CALL_888		Contains an 888- phone number
-body CALL_1_800			/(?:call|dial).{1,15}1-800-[\dA-Z]+-?[\dA-Z]+/i
-describe CALL_1_800		Contains a 1-800- number
+body CALL_FREE			/(?:call|dial).{1,15}8(?:00|88|77|66|55|44|33|22)[\s-][\dA-Z]+[\s-]?[\dA-Z]+/i
+describe CALL_FREE		Contains a tollfree number
 body ONLINE_BIZ_OPS		/online business opportunities/i
 describe ONLINE_BIZ_OPS		Wants you to do business online
 body BILLION_DOLLARS		/[BM]ILLION DOLLAR/
@@ -212,11 +210,11 @@ body EXCUSE_12			/this (?:e?-?mail|message) (?:(?:has )?reached|was sent to) you
 describe EXCUSE_12		Nobody's perfect
 body EXCUSE_13			/mail was sent to you because /i
 describe EXCUSE_13		Gives an excuse for why message was sent
-body EXCUSE_14			/you do not wish to receive further /i
+body EXCUSE_14			/you (?:do not|no longer) wish to receive/i
 describe EXCUSE_14		Tells you how to stop further SPAM
 body EXCUSE_15			/this (?:|e?-?mail|message )(?:is|was) (?:not|never) (?:spam|(?:sent |)unsolicited)/i
 describe EXCUSE_15		Claims to be legitimate email
-body EXCUSE_16			/received this (?:e?-?mail|message) in error[, ]* or/
+body EXCUSE_16			/received this.{1,10}in error/
 describe EXCUSE_16		I wonder how many emails they sent in error...
 body EXCUSE_17			/received.{0,15} by mistake/i
 describe EXCUSE_17		Suspect you might have received the message by mistake
@@ -228,7 +226,7 @@ describe GREEN_EXCUSE_1		Claims SPAM helps the environment
 body GREEN_EXCUSE_2		/the trees, save the planet, use email!/i
 describe GREEN_EXCUSE_2		Claims SPAM helps the environment
 
-body VIAGRA			/VIAGRA/
+body VIAGRA			/VIAGRA/i
 describe VIAGRA			Plugs Viagra
 
 body YOU_HAVE_BEEN_SELECTED	/You have been selected as a (?:finalist|winner)/i
@@ -260,7 +258,7 @@ body PORN_2			/\bwild\b.{0,15}\bhardcore\b/i
 describe PORN_2			Uses words and phrases which indicate porn (2)
 
 # updated by: skod & Craig & jm
-body PORN_3			/(?:(?:\bcum|\borg[iy]|\bwild|fuck|\bteen|\baction\b|spunk|\bpussy\b|\bpussies\b|suck\b|sucking\b|\bhot\b|\bhottest\b|\bvoyeur|\ble[sz]b(?:ian|o)|\banal\b|\binterracial|\basian\b|\bamateur|\bsex+\b|\bslut|explicit|xxx[^x]|\blive\b|celebrity|\blick|\bsuck|\bdorm\b|webcam|\bass\b|\bschoolgirl\b|\bstrip|\bhorny\b|\bhorniest\b|\berotic|\boral\b|\bhardcore\b|\bblow[ -]*job|\bnast(?:y|iest)\b|\bporn).{0,15}){3,}/i
+body PORN_3			/(?:(?:\bcum|\borg[iy]|\bwild|fuck|\bteen|\baction\b|spunk|\bpussy\b|\bpussies\b|suck\b|sucking\b|\bhot\b|\bhottest\b|\bvoyeur|\ble[sz]b(?:ian|o)|\banal\b|\binterracial|\basian\b|\bamateur|\bsex+\b|\bslut|explicit|xxx[^x]|\blive\b|celebrity|\blick|\bsuck|\bdorm\b|webcam|\bass\b|\bschoolgirl\b|\bstrip|\bhorny\b|\bhorniest\b|\berotic|\boral\b|\bpenis\b|\bhardcore\b|\bblow[ -]*job|\bnast(?:y|iest)\b|\bporn).{0,15}){3,}/i
 describe PORN_3			Uses words and phrases which indicate porn (3)
 
 rawbody PORN_4 	/http:\/\/[\w\.]*(?:xxx|sex|anal|slut|pussy|cum|nympho|suck|porn|hardcore|taboo|whore|voyeur|lesbian|gurlpages|naughty|lolita|teen|schoolgirl|kooloffer|erotic)\w*\./
@@ -292,6 +290,8 @@ body STOCK_ALERT		/stock alert/i
 describe STOCK_ALERT		Offers a stock alert
 body MICRO_CAP_WARNING		/Investing in micro-cap securities is highly speculative/i
 describe MICRO_CAP_WARNING	SEC-mandated penny-stock warning -- thanks SEC
+body INVESTOR_SPEC_SHEET	/Investor Spec Sheet/i
+describe INVESTOR_SPEC_SHEET	Standard investment opportunity spam
 
 # some frequently-advertised URLs
 rawbody E_WEBHOSTCENTRAL_URL		/http:\/\/.*e-webhostcentral\.com/i
@@ -373,7 +373,7 @@ body MAIL_IN_ORDER_FORM		/Mail-in Order Form/i
 describe MAIL_IN_ORDER_FORM	Contains mail-in order form
 
 # (contrib: skod)
-body FOR_INSTANT_ACCESS		/(?:CLICK HERE|).{0,20}\s+INSTANT\s+ACCESS.{0,20}\s+(?:|CLICK HERE)/i
+body FOR_INSTANT_ACCESS		/INSTANT ACCESS/i
 describe FOR_INSTANT_ACCESS	Instant Access button
 
 # (contrib: skod)
@@ -437,7 +437,10 @@ describe UCE_MAIL_ACT           Mentions Spam Law "UCE-Mail Act"
 body PENIS_ENLARGE		/(?:(?:\bpenis\b|\benlarge).{0,50}){2,}/is
 describe PENIS_ENLARGE		Information on getting a larger penis
 
-body WORK_AT_HOME		/(?:WORK (?:AT|FROM) HOME|HOME.?WORKER)/
+body PENIS_ENLARGE2		/(?:(?:\bpenis\b|\bincrease).{0,50}){2,}/is
+describe PENIS_ENLARGE2		Information on getting a larger penis
+
+body WORK_AT_HOME		/(?:(?:WORK|MAKE (?:MONEY|\${1,})) (?:AT|FROM) HOME|HOME.?WORKER)/
 describe WORK_AT_HOME		Information on how to work at home
 
 body HOME_EMPLOYMENT		/HOME EMPLOYMENT/i
@@ -640,3 +643,14 @@ describe PENNIES_A_DAY          Contains 'for only pennies a day'
 body FOR_JUST_SOME_AMT          /for (?:just|only) \$?\d+\.?\d*[^\.]*!/i
 describe FOR_JUST_SOME_AMT      Contains 'for only' some amount of cash
 
+# suggestion following Jason Haar
+body MIME_NULL_BLOCK		/This message is in MIME format/
+describe MIME_NULL_BLOCK	Correct for MIME 'null block'
+
+# Unregistered spam tool
+body SAFEGUARD_NOTICE		/This safeguard is not inserted when using the registered version/
+describe SAFEGUARD_NOTICE	Contains signature of unregistered spam tool
+
+# Evites trigger false positives
+body EVITE			/evite.citysearch.com/
+describe EVITE			Claw back some for evite

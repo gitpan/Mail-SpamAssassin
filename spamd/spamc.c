@@ -99,8 +99,8 @@ full_read (int fd, unsigned char *buf, int min, int len)
     if (thistime < 0) {
       return -1;
     } else if (thistime == 0) {
-      // EOF, but we didn't read the minimum.  return what we've read
-      // so far and next read (if there is one) will return 0.
+      /* EOF, but we didn't read the minimum.  return what we've read
+       * so far and next read (if there is one) will return 0. */
       return total;
     }
 
@@ -119,7 +119,7 @@ full_write (int fd, const unsigned char *buf, int len)
     thistime = write (fd, buf+total, len-total);
 
     if (thistime < 0) {
-      return thistime;        // always an error for writes
+      return thistime;        /* always an error for writes */
     }
     total += thistime;
   }
@@ -130,7 +130,7 @@ full_write (int fd, const unsigned char *buf, int len)
 int dump_message(int in,int out)
 {
   size_t bytes;
-  char buf[8192];
+  unsigned char buf[8192];
 
   while((bytes=full_read(in, buf, 8192, 8192)) > 0)
   {
@@ -272,6 +272,8 @@ int read_message(int in, int out, int max_size)
 	    {
 	      response = EX_PROTOCOL; break;
 	    }
+
+	    printf("%d/%d\n",score,threshold);
 
 	    if(!strcasecmp("true",is_spam)) /* If message is indeed spam */
 	    {
@@ -452,9 +454,9 @@ int process_message(const char *hostname, int port, char *username, int max_size
       case HOST_NOT_FOUND:
       case NO_ADDRESS:
       case NO_RECOVERY:
-	return EX_NOHOST;
+	if(CHECK_ONLY) { printf("0/0\n"); return EX_NOTSPAM; } else { return EX_NOHOST; }
       case TRY_AGAIN:
-	return EX_TEMPFAIL;
+	if(CHECK_ONLY) { printf("0/0\n"); return EX_NOTSPAM; } else { return EX_TEMPFAIL; }
       }
     }
 
@@ -464,7 +466,10 @@ int process_message(const char *hostname, int port, char *username, int max_size
   exstatus = try_to_connect ((const struct sockaddr *) &addr, &mysock);
   if (EX_OK == exstatus)
   {
-    if(NULL == (msg_buf = malloc(max_size+1024))) return EX_OSERR;
+    if(NULL == (msg_buf = malloc(max_size+1024)))
+    {
+      if(CHECK_ONLY) { printf("0/0\n"); return EX_NOTSPAM; } else { return EX_OSERR; }
+    }
 
     exstatus = send_message(STDIN_FILENO,mysock,username,max_size);
     if (EX_OK == exstatus)
@@ -472,14 +477,24 @@ int process_message(const char *hostname, int port, char *username, int max_size
       exstatus = read_message(mysock,STDOUT_FILENO,max_size);
     }
 
+    if(CHECK_ONLY && ESC_PASSTHROUGHRAW == exstatus)
+    {
+	exstatus = EX_OK;
+    }
+
     if(!CHECK_ONLY && (ESC_PASSTHROUGHRAW == exstatus || (SAFE_FALLBACK && EX_OK != exstatus)))
     {
       /* Message was too big or corrupted, so dump the buffer then bail */
       full_write (STDOUT_FILENO,msg_buf,amount_read);
       dump_message(STDIN_FILENO,STDOUT_FILENO);
-      exstatus = 0;
+      exstatus = EX_OK;
     }
     free(msg_buf);
+  }
+  else if(CHECK_ONLY) /* If connect failed, but CHECK_ONLY then print "0/0" and return 0 */
+  {
+    printf("0/0\n");
+    exstatus = EX_NOTSPAM;
   }
   else if(SAFE_FALLBACK) /* If connection failed but SAFE_FALLBACK set then dump original message */
   {
@@ -562,7 +577,7 @@ int main(int argc,char **argv)
     curr_user = getpwuid(getuid());
     if (curr_user == NULL) {
       perror ("getpwuid failed");
-      return EX_OSERR;
+      if(CHECK_ONLY) { printf("0/0\n"); return EX_NOTSPAM; } else { return EX_OSERR; }
     }
     username = curr_user->pw_name;
   }
