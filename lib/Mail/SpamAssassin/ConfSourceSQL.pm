@@ -54,6 +54,8 @@ sub load {
    }
 
    eval {
+     # make sure we can see croak messages from DBI
+     local $SIG{'__DIE__'} = sub { warn "$_[0]"; };
      require DBI;
      load_with_dbi($self, $username, $dsn);
    };
@@ -80,7 +82,7 @@ sub load_with_dbi {
       if($sth) {
          my $rv  = $sth->execute();
          if($rv) {
-            dbg("retreiving prefs from SQL server");
+            dbg("retrieving prefs for $username from SQL server");
             my @row;
             my $text = '';
             while(@row = $sth->fetchrow_array()) {

@@ -25,7 +25,9 @@ sub sa_t_init {
 
   $spamdport = 48373;		# whatever
 
-  $scr_cf_args = "";
+  $scr_cf_args = "-c ../rules";
+  $scr_pref_args = "";
+  $scr_test_args = "";
 
   (-f "t/test_dir") && chdir("t");        # run from ..
   rmtree ("log");
@@ -53,7 +55,7 @@ sub tstprefs {
   my $lines = shift;
   open (OUT, ">log/tst.cf") or die;
   print OUT $lines; close OUT;
-  $scr_cf_args = "-p log/tst.cf";
+  $scr_pref_args = "-p log/tst.cf";
 }
 
 # Run spamassassin. Calls back with the output.
@@ -71,19 +73,22 @@ sub sarun {
   rmtree ("log/outputdir.tmp"); # some tests use this
   mkdir ("log/outputdir.tmp", 0755);
 
+  %found = ();
+  %found_anti = ();
+
   if (defined $ENV{'SA_ARGS'}) {
     $args = $ENV{'SA_ARGS'} . " ". $args;
   }
-  $args = $scr_cf_args . " " . $args;
+  $args = "$scr_cf_args $scr_pref_args $scr_test_args $args";
 
   # added fix for Windows tests from Rudif
   my $scrargs = "$scr $args";
   $scrargs =~ s!/!\\!g if ($^O =~ /^MS(DOS|Win)/i);
   print ("\t$scrargs\n");
-  system ("$scrargs > log/$testname.out");
+  system ("$scrargs > log/$testname.${Test::ntest}");
   $sa_exitcode = ($?>>8);
   if ($sa_exitcode != 0) { return undef; }
-  &checkfile ("$testname.out", $read_sub);
+  &checkfile ("$testname.${Test::ntest}", $read_sub);
   1;
 }
 
@@ -142,8 +147,12 @@ sub start_spamd {
       last if ($spamd_pid);
     }
 
-    sleep 1;
-    if ($retries-- <= 0) { warn "spamd start failed"; return 0; }
+    sleep 2;
+    if ($retries-- <= 0) {
+      warn "spamd start failed";
+      warn "\n\nMaybe you need to kill a running spamd process?\n\n";
+      return 0;
+    }
   }
 
   1;

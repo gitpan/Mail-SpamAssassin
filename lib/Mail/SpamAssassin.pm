@@ -50,7 +50,7 @@ use Mail::SpamAssassin::ConfSourceSQL;
 use Mail::SpamAssassin::PerMsgStatus;
 use Mail::SpamAssassin::Reporter;
 use Mail::SpamAssassin::Replier;
-use Mail::SpamAssassin::MyMailAudit;
+use Mail::SpamAssassin::NoMailAudit;
 
 use File::Basename;
 use File::Path;
@@ -60,42 +60,58 @@ use Cwd;
 use Config;
 
 use vars	qw{
-  	@ISA $VERSION $HOME_URL $DEBUG
-	@default_rules_path @default_prefs_path @default_userprefs_path
-	@site_rules_path
+  	@ISA $VERSION $SUB_VERSION $HOME_URL $DEBUG
+	@default_rules_path @default_prefs_path
+	@default_userprefs_path @default_userstate_dir
+	@site_rules_path @old_site_rules_path
 };
 
 @ISA = qw();
 
-$VERSION = "1.5";
+$VERSION = "2.01";
+$SUB_VERSION = 'devel $Id: SpamAssassin.pm,v 1.61 2002/01/25 04:41:02 jmason Exp $';
+
 sub Version { $VERSION; }
 
-$HOME_URL = "http://spamassassin.taint.org/";
+$HOME_URL = "http://spamassassin.org/";
 
 $DEBUG = 0;
 
+#__installsitelib__/spamassassin.cf
+#__installvendorlib__/spamassassin.cf
 @default_rules_path = qw(
-        ./spamassassin.cf
-        ../spamassassin.cf
-        __installsitelib__/spamassassin.cf
-	__installvendorlib__/spamassassin.cf
+  	/usr/local/share/spamassassin
+  	/usr/share/spamassassin
+	./rules
+	../rules
 );
 
+# first 3 are BSDish, latter 2 Linuxish
 @site_rules_path = qw(
-        /etc/spamassassin.cf
-        /etc/mail/spamassassin.cf
+        /usr/local/etc/spamassassin
+	/usr/pkg/etc/spamassassin
+        /usr/etc/spamassassin
+  	/etc/mail/spamassassin
+  	/etc/spamassassin
+);
+
+@old_site_rules_path = qw(
+  	/etc/mail/spamassassin.cf
+  	/etc/spamassassin.cf
 );
     
 @default_prefs_path = qw(
-        /etc/spamassassin.prefs
-        ./spamassassin.prefs 
-        ../spamassassin.prefs
-        __installsitelib__/spamassassin.prefs
-	__installvendorlib__/spamassassin.prefs
+        /etc/spamassassin/user_prefs.template
+        /usr/local/share/spamassassin/user_prefs.template
+        /usr/share/spamassassin/user_prefs.template
 );
 
 @default_userprefs_path = qw(
-        ~/.spamassassin.cf
+        ~/.spamassassin/user_prefs
+);
+
+@default_userstate_dir = qw(
+        ~/.spamassassin
 );
 
 ###########################################################################
@@ -114,6 +130,10 @@ The filename to load spam-identifying rules from. (optional)
 =item userprefs_filename
 
 The filename to load preferences from. (optional)
+
+=item userstate_dir
+
+The directory user state is stored in. (optional)
 
 =item config_text
 
@@ -183,6 +203,24 @@ sub check {
 
 ###########################################################################
 
+=item $status = $f->check_message_text ($mailtext)
+
+Check a mail, encapsulated in a plain string, to determine if it is spam or
+not.
+
+Otherwise identical to C<$f->check()> above.
+
+=cut
+
+sub check_message_text {
+  my ($self, $mailtext) = @_;
+  my @lines = split (/\n/s, $mailtext);
+  my $mail_obj = Mail::SpamAssassin::NoMailAudit->new ('data' => \@lines);
+  return $self->check ($mail_obj);
+}
+
+###########################################################################
+
 =item $f->report_as_spam ($mail, $options)
 
 Report a mail, encapsulated in a C<Mail::Audit> object, as human-verified spam.
@@ -215,6 +253,49 @@ sub report_as_spam {
 
 ###########################################################################
 
+=item $f->add_all_addresses_to_whitelist ($mail)
+
+Given a mail message, find as many addresses in the usual headers (To, Cc, From
+etc.), and the message body, and add them to the automatic whitelist database.
+
+=cut
+
+sub add_all_addresses_to_whitelist {
+  my ($self, $mail_obj) = @_;
+
+  my $list = Mail::SpamAssassin::AutoWhitelist->new($self);
+  foreach my $addr ($self->find_all_addrs_in_mail ($mail_obj)) {
+    if ($list->add_known_good_address ($addr)) {
+      print "SpamAssassin auto-whitelist: adding address: $addr\n";
+    }
+  }
+  $list->finish();
+}
+
+###########################################################################
+
+=item $f->remove_all_addresses_from_whitelist ($mail)
+
+Given a mail message, find as many addresses in the usual headers (To, Cc, From
+etc.), and the message body, and remove them from the automatic whitelist
+database.
+
+=cut
+
+sub remove_all_addresses_from_whitelist {
+  my ($self, $mail_obj) = @_;
+
+  my $list = Mail::SpamAssassin::AutoWhitelist->new($self);
+  foreach my $addr ($self->find_all_addrs_in_mail ($mail_obj)) {
+    if ($list->remove_address ($addr)) {
+      print "SpamAssassin auto-whitelist: removing address: $addr\n";
+    }
+  }
+  $list->finish();
+}
+
+###########################################################################
+
 =item $f->reply_with_warning ($mail, $replysender)
 
 Reply to the sender of a mail, encapsulated in a C<Mail::Audit> object,
@@ -227,8 +308,6 @@ sender of the reply message.
 
 sub reply_with_warning {
   my ($self, $mail_obj, $replysender) = @_;
-  local ($_);
-
   $self->init(1);
   my $mail = $self->encapsulate_mail_object ($mail_obj);
   my $msg = new Mail::SpamAssassin::Replier ($self, $mail);
@@ -269,7 +348,9 @@ sub remove_spamassassin_markup {
 
   # remove the headers we added
   1 while $hdrs =~ s/\nX-Spam-[^\n]*?\n/\n/gs;
-  1 while $hdrs =~ s/^Subject: \*+SPAM\*+ /Subject: /gm;
+
+  my $tag = $self->{conf}->{subject_tag};
+  1 while $hdrs =~ s/^Subject: \Q${tag}\E /Subject: /gm;
 
   # ok, next, the report.
   # This is a little tricky since we can have either 0, 1 or 2 reports;
@@ -347,6 +428,24 @@ sub load_scoreonly_sql {
   my $src = Mail::SpamAssassin::ConfSourceSQL->new ($self);
   $src->load($username);
 }
+
+
+###########################################################################
+
+=item $f->set_persistent_address_list_factory ($factoryobj)
+
+Set the persistent address list factory, used to create objects for the
+automatic whitelist algorithm's persistent-storage back-end.  See
+C<Mail::SpamAssassin::PersistentAddrList> for the API these factory objects
+must implement, and the API the objects they produce must implement.
+
+=cut
+
+sub set_persistent_address_list_factory {
+  my ($self, $fac) = @_;
+  $self->{pers_addr_list_factory} = $fac;
+}
+
 ###########################################################################
 
 =item $f->compile_now ()
@@ -377,7 +476,7 @@ sub compile_now {
 
   dbg ("ignore: test message to precompile patterns and load modules");
   $self->init(0);
-  my $mail = Mail::SpamAssassin::MyMailAudit->new(data => \@testmsg);
+  my $mail = Mail::SpamAssassin::NoMailAudit->new(data => \@testmsg);
   $self->check($mail)->finish();
 
   # load SQL modules now as well
@@ -407,25 +506,38 @@ sub init {
     $self->{config_text} = '';
 
     my $fname = $self->first_existing_path (@default_rules_path);
-    $self->{config_text} .= $self->read_cf ($fname, 'default rules file');
+    $self->{config_text} .= $self->read_cf ($fname, 'default rules dir');
 
     $fname = $self->{rules_filename};
     $fname ||= $self->first_existing_path (@site_rules_path);
-    $self->{config_text} .= $self->read_cf ($fname, 'site rules file');
+    $self->{config_text} .= $self->read_cf ($fname, 'site rules dir');
 
     if ( $use_user_pref != 0 ) {
+      $self->create_dotsa_dir_if_needed();
+
+      my $old_prefs_name = $self->first_existing_path ('~/.spamassassin.cf');
+      if (!-f $old_prefs_name) { $old_prefs_name = undef; }
+
+      # user prefs file
       $fname = $self->{userprefs_filename};
-      $fname ||= $self->first_existing_path (@default_userprefs_path);
+
+      if (!defined $fname) {
+        $fname ||= $self->first_existing_path (@default_userprefs_path);
+
+        if (defined $old_prefs_name && -f $old_prefs_name) {
+          dbg ("migrating $old_prefs_name to $fname");
+          rename ($old_prefs_name, $fname) or
+                        warn "rename $old_prefs_name to $fname failed: $!\n";
+        }
+      }
 
       if (defined $fname) {
-	dbg ("using \"$fname\" for user prefs file");
-
         if (!-f $fname && !$self->create_default_prefs($fname)) {
           warn "Failed to create default prefs file $fname\n";
         }
       }
 
-      $self->{config_text} .= $self->read_cf ($fname, 'user prefs');
+      $self->{config_text} .= $self->read_cf ($fname, 'user prefs file');
     }
   }
 
@@ -448,12 +560,37 @@ sub read_cf {
 
   dbg ("using \"$fname\" for $desc");
   my $txt = '';
-  if (-f $fname && -s _) {
-    open (IN, "<".$fname) or warn "cannot open \"$fname\"\n";
+
+  if (-d $fname) {
+    foreach my $file ($self->get_cf_files_in_dir ($fname)) {
+      open (IN, "<".$file) or warn "cannot open \"$file\": $!\n", next;
+      $txt .= join ('', <IN>);
+      close IN;
+    }
+
+  } elsif (-f $fname && -s _ && -r _) {
+    open (IN, "<".$fname) or warn "cannot open \"$fname\": $!\n";
     $txt = join ('', <IN>);
     close IN;
   }
+
   return $txt;
+}
+
+sub create_dotsa_dir_if_needed {
+  my ($self) = @_;
+
+  # user state directory
+  my $fname = $self->{userstate_dir};
+  $fname ||= $self->first_existing_path (@default_userstate_dir);
+
+  if (defined $fname && !$self->{dont_copy_prefs}) {
+    dbg ("using \"$fname\" for user state dir");
+
+    if (!-d $fname) {
+      mkpath ($fname, 0, 0700) or warn "mkdir $fname failed\n";
+    }
+  }
 }
 
 =item $f->create_default_prefs ()
@@ -467,10 +604,20 @@ sub create_default_prefs {
 
   if (!$self->{dont_copy_prefs} && !-f $fname)
   {
+    $self->create_dotsa_dir_if_needed();
+
     # copy in the default one for later editing
     my $defprefs = $self->first_existing_path
 			(@Mail::SpamAssassin::default_prefs_path);
-    use File::Copy;
+    
+    open (IN, "<$defprefs") or warn "cannot open $defprefs";
+    open (OUT, ">$fname") or warn "cannot write to $fname";
+    while (<IN>) {
+      /^\#\* / and next;
+      print OUT;
+    }
+    close OUT;
+    close IN;
 
     if (copy ($defprefs, $fname)) {
       if ( $< == 0 && $> == 0 && defined $user) {
@@ -495,16 +642,14 @@ sub create_default_prefs {
 ###########################################################################
 
 sub expand_name ($) {
-  my $self = shift;
-  my $name = shift;
+  my ($self, $name) = @_;
   return (getpwnam($name))[7] if ($name ne '');
-  return $ENV{'HOME'} if defined $ENV{'HOME'};
   return (getpwuid($>))[7];
 }
 
 sub sed_path {
-  my $self = shift;
-  my $path = shift;
+  my ($self, $path) = @_;
+  return undef if (!defined $path);
   $path =~ s/__installsitelib__/$Config{installsitelib}/gs;
   $path =~ s/__installvendorlib__/$Config{installvendorlib}/gs;
   $path =~ s/^\~([^\/]*)/$self->expand_name($1)/es;
@@ -519,6 +664,16 @@ sub first_existing_path {
     if (-e $path) { return $path; }
   }
   $path;
+}
+
+sub get_cf_files_in_dir {
+  my ($self, $dir) = @_;
+
+  opendir(SA_CF_DIR, $dir) or warn "cannot opendir $dir: $!\n";
+  my @cfs = grep { /\.cf$/ && -f "$dir/$_" } readdir(SA_CF_DIR);
+  closedir SA_CF_DIR;
+
+  return map { "$dir/$_" } sort { $a cmp $b } @cfs;	# sort numerically
 }
 
 ###########################################################################
@@ -578,6 +733,51 @@ sub encapsulate_mail_object {
   }
 }
 
+sub find_all_addrs_in_mail {
+  my ($self, $mail_obj) = @_;
+
+  $self->init(1);
+  my $mail = $self->encapsulate_mail_object ($mail_obj);
+
+  my @addrlist = ();
+  foreach my $header (qw(To From Cc Reply-To Sender
+  				Errors-To Mail-Followup-To))
+  {
+    my @hdrs = $mail->get_header ($header);
+    if ($#hdrs < 0) { next; }
+    push (@addrlist, $self->find_all_addrs_in_line (join (" ", @hdrs)));
+  }
+
+  # find addrs in body, too
+  foreach my $line (@{$mail->get_body()}) {
+    push (@addrlist, $self->find_all_addrs_in_line ($line));
+  }
+
+  my @ret = ();
+  my %done = ();
+
+  foreach $_ (@addrlist) {
+    next if defined ($done{$_}); $done{$_} = 1;
+    push (@ret, $_);
+  }
+
+  @ret;
+}
+
+sub find_all_addrs_in_line {
+  my ($self, $line) = @_;
+
+  my @addrs = ();
+  while ($line =~ s/([-a-z0-9_\+\:\.\/]+
+	      \@[-a-z0-9_\+\:\.\/]+
+	      \.[-a-z0-9_\+\:\.\/]+)//ix)
+  {
+    push (@addrs, $1);
+  }
+
+  return @addrs;
+}
+
 sub dbg {
   if ($Mail::SpamAssassin::DEBUG > 0) { warn "debug: ".join('',@_)."\n"; }
 }
@@ -608,7 +808,7 @@ C<Net::DNS>
 
 =head1 MORE DOCUMENTATION
 
-See also http://spamassassin.taint.org/ for more information.
+See also http://spamassassin.org/ for more information.
 
 =head1 SEE ALSO
 
@@ -628,7 +828,7 @@ SpamAssassin is distributed under Perl's Artistic license.
 The latest version of this library is likely to be available from CPAN
 as well as:
 
-  http://spamassassin.taint.org/
+  http://spamassassin.org/
 
 =cut
 

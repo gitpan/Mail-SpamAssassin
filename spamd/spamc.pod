@@ -7,13 +7,17 @@ spamc - client for spamd
 
 =over
 
-=item spamc [-d host] [-p port] [-s max_size] [-u username] [-h] [-f]
+=item spamc [-c] [-d host] [-f] [-h] [-p port] [-s max_size] [-u username]
 
 =back
 
 =head1 OPTIONS
 
 =over
+
+=item B<-c>
+
+Just check if the message is spam or not.  Set process exitcode to 1 is message is spam, 0 if not spam or processing failure occurs.
 
 =item B<-d> I<host>
 
@@ -29,6 +33,8 @@ connection failures to spamd will cause message delivery failures.
 Even with this flag set however, if spamc connects successfully, and then
 encounters an error at a later stage of communication, it will still return
 an exitcode.
+This now defaults to B<on>, and can't be turned off.  This flag is accepted
+though for backwards-compatibility.
 
 =item B<-h>
 
@@ -44,7 +50,7 @@ Set the maximum message size which will be sent to spamd -- any bigger than this
 
 =item B<-u> I<username>
 
-This argument has been obsoleted.  To have spamd use per-user-config files, run spamc as the user whose config files spamd should load.
+This argument has been semi-obsoleted.  To have spamd use per-user-config files, run spamc as the user whose config files spamd should load.  If you're running spamc as some other user though (eg. root, mail, nobody, cyrus, etc.) then you can still use this flag.
 
 =back
 

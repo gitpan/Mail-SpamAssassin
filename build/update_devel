@@ -15,13 +15,6 @@ make distcheck
 echo "Creating 'Changes' file from CVS change log..."
 cvs2cl.pl -f Changes
 
-rm -f Mail-SpamAssassin-$vers.tar.gz Mail-SpamAssassin-$vers.zip
-make tardist
-cp Mail-SpamAssassin-$vers.tar.gz $WEBDIR/devel
-
-make zipdist
-cp Mail-SpamAssassin-$vers.zip $WEBDIR/devel
-
 echo $vers > $WEBDIR/latest_version
 
 rm -rf $WEBDIR/dist $WEBDIR/doc
@@ -29,7 +22,16 @@ mkdir $WEBDIR/dist
 tar cf - --exclude=CVS --exclude='.#*' . | ( cd $WEBDIR/dist ; tar xf - )
 tar cf - --exclude=CVS --exclude='.#*' doc | ( cd $WEBDIR ; tar xf - )
 
-( cd $WEBDIR/dist ; make clean distclean )
-( cd $WEBDIR/devel ; cvs add -kb *SpamAssassin* )
+rm -f Mail-SpamAssassin-$vers.tar.gz Mail-SpamAssassin-$vers.zip
+make tardist
+cp Mail-SpamAssassin-$vers.tar.gz $WEBDIR/devel
+
+make zipdist
+cp Mail-SpamAssassin-$vers.zip $WEBDIR/devel
+
+( cd $WEBDIR/dist ;
+  make clean distclean;
+  rm -rf masses/*.log masses/logs
+)
 
 ls -l $WEBDIR/devel

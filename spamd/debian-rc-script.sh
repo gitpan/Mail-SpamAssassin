@@ -6,8 +6,10 @@
 
 # Based on skeleton by Miquel van Smoorenburg and Ian Murdock
 
-PATH=/sbin:/bin:/usr/sbin:/usr/bin
-DAEMON=/usr/bin/spamd
+# Please do not name this script /etc/init.d/spamd.  It may cause problems.
+
+PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/bin
+DAEMON=spamd
 PNAME=spamd
 NAME=spamd
 DESC="SpamAssasin Mail Filter Daemon"
@@ -23,11 +25,8 @@ set -e
 case "$1" in
   start)
 	echo -n "Starting $DESC: "
-	start-stop-daemon --start --quiet --background --name $PNAME \
-		--oknodo --startas $DAEMON
-
-	test $SLEEP && sleep $SLEEP
-	# Lets load before fetchmail rams stuff down spamd's throat!
+	start-stop-daemon --start --quiet --name $PNAME \
+		--oknodo --startas $DAEMON -- -d $OPTIONS
 
 	echo "$NAME."
 	;;
@@ -40,8 +39,8 @@ case "$1" in
 	echo -n "Restarting $DESC: "
 	start-stop-daemon --stop --quiet --name $PNAME --oknodo
 	sleep 1
-	start-stop-daemon --start --quiet --background --name $PNAME \
-		--oknodo --startas $DAEMON
+	start-stop-daemon --start --quiet --name $PNAME \
+		--oknodo --startas $DAEMON -- -d $OPTIONS
 	echo "$NAME."
 	;;
   *)

@@ -29,7 +29,7 @@ use vars	qw{ %charsets_for_locale };
   # Thai
   'th' => 'TIS620',
   # Chinese (simplified and traditional)
-  'zh' => 'GB2312 GB231219800 GB18030 GBK BIG5HKSCS BIG5 EUCTW'
+  'zh' => 'GB2312 GB231219800 GB18030 GBK BIG5HKSCS BIG5 EUCTW',
 );
 
 ###########################################################################
@@ -37,7 +37,12 @@ use vars	qw{ %charsets_for_locale };
 sub is_charset_ok_for_locales {
   my ($cs, @locales) = @_;
 
-  $cs = uc $cs; $cs =~ s/[^A-Z0-9]//g; study $cs;
+  $cs = uc $cs; $cs =~ s/[^A-Z0-9]//g;
+  $cs =~ s/^3D//gs;		# broken by quoted-printable
+  $cs =~ s/:.*$//gs;            # trim off multiple charsets, just use 1st
+
+  study $cs;
+  #warn "JMD $cs";
 
   # always OK (the net speaks mostly roman charsets)
   return 1 if ($cs eq 'USASCII');
@@ -46,10 +51,11 @@ sub is_charset_ok_for_locales {
   return 1 if ($cs =~ /^UTF/);
   return 1 if ($cs =~ /^UCS/);
   return 1 if ($cs =~ /^CP125/);
-  return 1 if ($cs =~ /^WINDOWS125/);
+  return 1 if ($cs =~ /^WINDOWS/);      # argh, Windows
   return 1 if ($cs eq 'IBM852');
-  return 1 if ($cs =~ /^UNICODE-1-1-UTF-[78]/);	# wtf? never heard of it
+  return 1 if ($cs =~ /^UNICODE11UTF[78]/);	# wtf? never heard of it
   return 1 if ($cs eq 'XUNKNOWN'); # added by sendmail when converting to 8bit
+  return 1 if ($cs eq 'ISO');	# Magellan, sending as 'charset=iso 8859-15'. grr
 
   foreach my $locale (@locales) {
     if (!defined($locale) || $locale eq 'C') { $locale = 'en'; }

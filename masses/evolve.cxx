@@ -23,10 +23,10 @@ int threshold = 5;	// threshold of spam vs. non-spam
 
 int nn, ny, yn, yy;	// simple number of y/n diagnoses
 
-// These floats are the same as above, but massively-y or massively-n scores
-// count extra.  This encourages clear decisions about spam or not.
+// These floats are the same as above, but incorrect scores are penalised
+// by how wrong they are.
 //
-float nnscore, nyscore, ynscore, yyscore;
+float nyscore, ynscore;
 
 float nybias	= 5.0;
 int sleepTime	= 0;		// time to sleep during runs
@@ -36,21 +36,21 @@ float float_num_nonspam;
 
 // ---------------------------------------------------------------------------
 
-void printhits (FILE *fout) {
+void printhits (FILE *fout, float convergence, int gens) {
   if (num_tests == 0) { num_tests = 1; }
 
   fprintf (fout, "# SUMMARY:            %6d / %6d\n#\n",
       	ny, yn);
 
   fprintf (fout,
-"# Correctly non-spam: %6d  %3.2f%%  (%3.2f%% overall, %6.0f adjusted)\n",
+"# Correctly non-spam: %6d  %3.2f%%  (%3.2f%% overall)\n",
         nn, (nn / (float) num_nonspam) * 100.0,
-        (nn / (float) num_tests) * 100.0, nnscore);
+        (nn / (float) num_tests) * 100.0);
 
   fprintf (fout,
-"# Correctly spam:     %6d  %3.2f%%  (%3.2f%% overall, %6.0f adjusted)\n",
+"# Correctly spam:     %6d  %3.2f%%  (%3.2f%% overall)\n",
         yy, (yy / (float) num_spam) * 100.0,
-	(yy / (float) num_tests) * 100.0, yyscore);
+	(yy / (float) num_tests) * 100.0);
 
   fprintf (fout,
 "# False positives:    %6d  %3.2f%%  (%3.2f%% overall, %6.0f adjusted)\n",
@@ -62,8 +62,11 @@ void printhits (FILE *fout) {
         yn, (yn / (float) num_spam) * 100.0,
 	(yn / (float) num_tests) * 100.0, ynscore);
 
-  fprintf (fout, "# TOTAL:              %6d  %3.2f%%\n#\n",
+  fprintf (fout, "# TOTAL:              %6d  %3.2f%%\n",
         num_tests, 100.0);
+
+  fprintf (fout, "# convergence / generations: %3.4f %d\n#\n",
+      	convergence, gens);
 }
 
 // ---------------------------------------------------------------------------
@@ -74,78 +77,115 @@ void writescores (FILE *fout) {
 
   for (i = 0; i < num_scores-1; i++) {
     score = scores[i];
-    fprintf (fout, "score %-30s %2.1f\n", score_names[i], score);
+    fprintf (fout, "score %-30s %2.2f\n", score_names[i], score);
   }
 }
 
 // ---------------------------------------------------------------------------
 
-void counthitsfromscores (void) {
+void fullcounthitsfromscores () {
   int file;
   float hits;
   int i;
+  int overthresh;
+  int nyint = 0;
+  int ynint = 0;
 
   nn = ny = yn = yy = 0;
-  nnscore = nyscore = ynscore = yyscore = 0.0;
-
   for (file = 0; file < num_tests; file++) {
-    float score;
-
     hits = 0.0;
     for (i = num_tests_hit[file]-1; i >= 0; i--) {
-      score = scores[tests_hit[file][i]];
-      hits += score;
+      hits += scores[tests_hit[file][i]];
     }
+    overthresh = (hits >= threshold);
 
-    // divide by 50 so we get e.g.
-    // 1.02 for a positive spam which is 1 pt over the threshold
+    // we use the xxscore vars as a weighted "crapness" score; ie.
+    // higher is worse.  incorrect diagnoses add (1 + incorrectness)
+    // to them, where "incorrectness" is (num_points_over_threshold) / 5.0.
+    //
+    // This way, massively-incorrect scores are massively penalised.
+
     if (is_spam[file]) {
-      if (hits > threshold) {
+      if (overthresh) {
 	yy++;
-	// maximise diff between hits and threshold
-	yyscore += ((hits - threshold) / 50.0) + 1.0;
       } else {
-	yn++;
-	// penalise diff between hits and threshold. bigger is worse
-	ynscore += ((threshold - hits) / 50.0) + 1.0;
+	yn++; nyint += (int) (hits - threshold) + 5;
       }
     } else {
-      if (hits > threshold) {
-	ny++;
-	// penalise diff between hits and threshold. bigger is worse
-	nyscore += ((hits - threshold) / 50.0) + 1.0;
+      if (overthresh) {
+	ny++; ynint += (int) (threshold - hits) + 5;
       } else {
 	nn++;
-	// maximise diff between hits and threshold
-	nnscore += ((threshold - hits) / 50.0) + 1.0;
       }
     }
   }
+
+  nyscore = ((float) nyint);		// / 5.0;
+  ynscore = ((float) ynint);		// / 5.0;
+}
+
+void quickcounthitsfromscores () {
+  int file;
+  float hits;
+  int i;
+  int overthresh;
+  int nyint = 0;
+  int ynint = 0;
+
+  for (file = 0; file < num_tests; file++) {
+    hits = 0.0;
+    
+    for (i = num_tests_hit[file]-1; i >= 0; i--) {
+      hits += scores[tests_hit[file][i]];
+    }
+
+    // Craig: good tips, this should be faster
+    overthresh = (hits >= threshold);
+    if (is_spam[file]) {
+      if (!overthresh) {
+	ynint += (int) (threshold - hits) + 5;
+      }
+    } else {
+      if (overthresh) {
+	nyint += (int) (hits - threshold) + 5;
+      }
+    }
+  }
+
+  nyscore = ((float) nyint);		// / 5.0;
+  ynscore = ((float) ynint);		// / 5.0;
 }
 
 // ---------------------------------------------------------------------------
 
-void counthits (GARealGenome &genome) {
-  int i, len;
+void copygenometoscores (GARealGenome &genome) {
+  int i;
 
-  len = genome.length();
-  if (len != num_scores) {
-    cerr << "len != numscores: "<<len<<"  "<<num_scores<<endl;
-    exit(1);
-  }
-
-  // copy the new scores to the "scores" array
-  for (i = 0; i < len; i++) {
+  for (i = 0; i < num_scores; i++) {
     if (is_mutatable[i]) {
       scores[i] = genome[i];
-      if (scores[i] == 0.0) { scores[i] = 0.1; }
+      if (scores[i] == 0.0) { scores[i] = 0.01; }
+      else if (scores[i] < range_lo[i]) { scores[i] = range_lo[i]; }
+      else if (scores[i] > range_hi[i]) { scores[i] = range_hi[i]; }
 
     } else {
       scores[i] = bestscores[i];	// use the standard one
     }
   }
+}
 
-  counthitsfromscores();
+void fullcounthitsfromgenome (GARealGenome &genome) {
+  if (genome.length() != num_scores) {
+    cerr << "len != numscores: "<<genome.length()<<"  "<<num_scores<<endl;
+    exit(1);
+  }
+  copygenometoscores (genome);
+  fullcounthitsfromscores ();
+}
+
+void quickcounthitsfromgenome (GARealGenome &genome) {
+  copygenometoscores (genome);
+  quickcounthitsfromscores ();
 }
 
 // ---------------------------------------------------------------------------
@@ -158,7 +198,7 @@ float
 objective(GAGenome & c)
 {
   GARealGenome &genome = (GARealGenome &) c;
-  counthits(genome);
+  quickcounthitsfromgenome(genome);
 
   if (sleepTime) { usleep(sleepTime); }
 
@@ -183,10 +223,10 @@ write_to_file (GARealGenome &genome, const char *fname) {
   FILE *fout;
   char namebuf[255];
 
-  counthits(genome);
+  fullcounthitsfromgenome (genome);
   snprintf (namebuf, 255, "%s", fname);
   fout = fopen (namebuf, "w");
-  printhits (fout);
+  printhits (fout, 0.0, 0);
   writescores (fout);
   fclose (fout);
 }
@@ -299,8 +339,8 @@ main (int argc, char **argv) {
       scores[i] = bestscores[i];
     }
 
-    counthitsfromscores();
-    printhits (stdout);
+    fullcounthitsfromscores();
+    printhits (stdout, 0.0, 0);
     exit (0);
   }
 
@@ -308,7 +348,8 @@ main (int argc, char **argv) {
 
   GARandomSeed();	// use time ^ $$
 
-  // allow scores from -0.5 to 4.0 inclusive, in jumps of 0.1
+  // allow scores from -0.5 to 4.0 inclusive, in jumps of 0.01
+  // each test has it's own range within this
   GARealAlleleSetArray allelesetarray;
   fill_allele_set (&allelesetarray);
   GARealGenome genome(allelesetarray, objective);
@@ -348,11 +389,15 @@ main (int argc, char **argv) {
   ga.set(gaNscoreFilename, "evolve.scores");
   ga.parameters(argc, argv);
 
+  unlink ("evolve.scores");
   cout << "Run this to watch progress scores:" << endl
     	<< "\ttail -f evolve.scores" << endl;
   cout << "evolving...\n";
 
   int gens = 0;
+  int progressinterval = (20000/popsize);
+  if (progressinterval < 1) { progressinterval = 1; }
+
   while(!ga.done()) {
     ga.step();
     gens++;
@@ -360,27 +405,26 @@ main (int argc, char **argv) {
     if (gens % 5 == 0) {
       cout << "."; cout.flush();
 
-      if (gens % 300 == 0) {
+      if (gens % progressinterval == 0) {
 	cout << "\nProgress: gen=" << gens << " convergence="
-	  	<< ga.statistics().convergence()
-	  	<< ":\n";
-
-	genome = ga.statistics().bestIndividual();
-	counthits(genome); printhits (stdout);
-	write_to_file (genome, "tmp/results.in_progress");
+	      << ga.statistics().convergence()
+	      << ":\n";
       }
+
+      genome = ga.statistics().bestIndividual();
+      fullcounthitsfromgenome (genome);
+      printhits (stdout, ga.statistics().convergence(), gens);
+      write_to_file (genome, "results.evolved");
     }
   }
   cout << endl;
 
-  genome = ga.statistics().bestIndividual();
-
   cout << "Best genome found:" << endl;
-  counthits(genome);
-  printhits (stdout);
-  //cout << "Stats:\n" << ga.statistics() << endl;
-
+  genome = ga.statistics().bestIndividual();
+  fullcounthitsfromgenome (genome);
+  printhits (stdout, ga.statistics().convergence(), gens);
   write_to_file (genome, "results.evolved");
+
   cout << "Scores for this genome written to \"results.evolved\"." << endl;
   return 0;
 }

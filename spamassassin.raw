@@ -63,6 +63,9 @@ Options:
   -e               Exit with a non-zero exit code for spam messages
   -t               only testing; pipe message through and add extra report
   -r               mail message is verified as spam, report it
+  -W               add all addresses in mail (from stdin) to whitelist
+  -R               remove all addresses in mail (from stdin) from whitelist
+  -F 0|1           remove/add 'From ' line at start of output (default: 1)
   -w fromaddr	   send a warning mail back to the sender of the message,
                    notifying them that their message has been marked as spam
 		   (only useful if -r is used)
@@ -75,7 +78,7 @@ Options:
                    (default:	$prefs )
   -D		   log diagnostic messages
 
-Version: $ver      Home: http://spamassassin.taint.org/
+Version: $ver      Home: http://spamassassin.org/
 
 EOUSAGE
   exit 64;		# == EX_USAGE
@@ -84,14 +87,14 @@ EOUSAGE
 
 use vars qw{
   $opt_t $opt_c $opt_p $opt_h $opt_V $opt_D $opt_r $opt_P $opt_w $opt_l
-  $opt_d $opt_L $opt_e
+  $opt_d $opt_L $opt_e $opt_W $opt_M $opt_R $opt_F
 };
 
 eval {
   require Mail::SpamAssassin;
-  require Mail::SpamAssassin::MyMailAudit;
+  require Mail::SpamAssassin::NoMailAudit;
 
-  getopts ('tc:p:hVDrPw:l:dL') or usage();
+  getopts ('tc:p:ehVDrPw:l:dLWRM:F:') or usage();
 
   if (defined $opt_h) { usage(); }
   if (defined $opt_V) {
@@ -102,8 +105,29 @@ EOVERSION
     exit 0;
   }
 
-# standard Mail::Audit start
-  my $mail = Mail::SpamAssassin::MyMailAudit->new();
+# 1.
+# Standard Mail::Audit start.  No longer used due to bugs in M:A, regarding
+# handling of slightly misformatted input.
+#
+# require Mail::Audit;
+# my $mail = Mail::Audit->new();
+
+# 2.
+# Workaround Mail::Audit start.  No longer needed, since
+# Mail::SpamAssassin::NoMailAudit provides the Mail::Audit features
+# we need more efficiently and reliably.
+#
+#my @msglines = (<STDIN>);
+#pre_chew_for_mail_audit (\@msglines);
+#require Mail::SpamAssassin::MyMailAudit;
+#my $mail = Mail::SpamAssassin::MyMailAudit->new ( data => \@msglines ); 
+
+# 3.
+# No use of Mail::Audit at all, apart from the accept(), reject() and
+# resend() methods (which are proxied transparently).  Lovely.
+#
+use Mail::SpamAssassin::NoMailAudit;
+my $mail = Mail::SpamAssassin::NoMailAudit->new ( add_From_line => $opt_F );
 
 # For Mail::Audit users -- this is the magic. Just create a Mail::SpamAssassin
 # object like this, then run the check() method as below; if it returns a
@@ -145,6 +169,44 @@ EOVERSION
     $mail->ignore();		# will exit
   }
 
+  # create a factory for the persistent address list.
+  # choose one of these implementations!
+  # The -M "Mail::SpamAssassin::ImplClassAddrList" flag can be used
+  # to switch between them.
+
+  my $addrlistfactory;
+  if (defined $opt_M) {
+    eval '
+      require '.$opt_M.'; $addrlistfactory = '.$opt_M.'->new();
+    ';
+    if ($@) { warn $@; undef $addrlistfactory; }
+
+  } else {
+
+    # DB-file-based: probably faster:
+    #
+    require Mail::SpamAssassin::DBBasedAddrList;
+    $addrlistfactory = Mail::SpamAssassin::DBBasedAddrList->new();
+
+    # directory-based: may take up more disk space, and be slower, but is
+    # safer in the face of concurrency.
+    #
+    # require Mail::SpamAssassin::DirBasedAddrList;
+    # $addrlistfactory = Mail::SpamAssassin::DirBasedAddrList->new();
+  }
+
+  $spamtest->set_persistent_address_list_factory ($addrlistfactory);
+
+  if ($opt_W) {
+    $spamtest->add_all_addresses_to_whitelist ($mail);
+    $mail->ignore();		# will exit
+  }
+
+  if ($opt_R) {
+    $spamtest->remove_all_addresses_from_whitelist ($mail);
+    $mail->ignore();		# will exit
+  }
+
 # not reporting? OK, do checks instead.  Create a status object which
 # holds details of the message's spam/not-spam status.
   my $status = $spamtest->check ($mail);
@@ -153,14 +215,14 @@ EOVERSION
 
   if ($opt_t) {
     # add the spam report to the end of the body as well, if testing.
-    my $lines = $mail->{obj}->body();
+    my $lines = $mail->body();
     push (@{$lines}, split (/$/, $status->get_report()));
-    $mail->{obj}->body ($lines);
+    $mail->body ($lines);
   }
 
 # if we're piping it, deliver it to stdout.
   if ($opt_t || $opt_P) {
-    $mail->{obj}->print (\*STDOUT);
+    print $mail->header(), "\n", join ('', @{$mail->body()});
     if ($opt_e && $status->is_spam ()) { exit 5; }
     exit;
   }
@@ -180,6 +242,21 @@ if ($@) {
   exit 70;		# == EX_SOFTWARE in sysexits.h. caught by MTA
 }
 
+# check for an assortment of crap that Mail::Audit cannot deal with: DOS
+# line-endings, extra 'From ' lines, etc.
+#
+sub pre_chew_for_mail_audit {
+    my ($msglines) = @_;
+
+    my @newhdrs = (); while ($_ = shift (@{$msglines})) {
+      /^From / and next;	# may fix the #1 M:A bug ;)
+      s/\r\n/\n/s;		# clean off \r\n's
+      push (@newhdrs, $_);
+      /^$/ and last;
+    }
+
+    unshift (@{$msglines}, @newhdrs);
+}
 
 
 # this is never called, it's just used to shut up the warnings
@@ -236,6 +313,22 @@ http://razor.sourceforge.net/ ).
 If the message contains SpamAssassin markup, this will be stripped out
 automatically before submission.
 
+=item B<-W>
+
+Add all email addresses, in the headers and body of the mail message read from
+STDIN, to the automatic whitelist.
+
+=item B<-R>
+
+Remove all email addresses, in the headers and body of the mail message read
+from STDIN, from the automatic whitelist.
+
+=item B<-F> I<0 | 1>
+
+Ensure that the output email message either always starts with a 'From ' line
+(I<1>) for UNIX mbox format, or ensure that this line is stripped from
+the output (I<0>).  (default: 1)
+
 =item B<-w> I<fromaddr>
 
 This flag is only useful in conjunction with B<-r>.  It will send a reply mail
@@ -258,7 +351,12 @@ to use this.
 
 Remove SpamAssassin markup (the "SpamAssassin results" report, X-Spam-Status
 headers, etc.) from the mail message.  The resulting message, which will be
-identical to the original, pre-SpamAssassin input, will be output to stdout.
+more or less identical to the original, pre-SpamAssassin input, will be output
+to stdout.
+
+(Note: the message will not be exactly identical; some headers will be
+reformatted due to some features of the Mail::Internet package, but the body
+text will be.)
 
 =item B<-c> I<config>
 
@@ -270,7 +368,7 @@ Read user score preferences from I<prefs>.
 
 =item B<-D>
 
-Product diagnostic output.
+Produce diagnostic output.
 
 =back
 

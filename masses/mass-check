@@ -1,23 +1,30 @@
 #!/usr/bin/perl
 
 use lib "../lib";
-use Mail::Internet;
 use Mail::SpamAssassin;
+use Mail::SpamAssassin::NoMailAudit;
+
+#use Devel::Peek;
+
+$cffile = '../rules';
+
+if (defined $ARGV[0] && $ARGV[0] eq '-c') {
+  shift; $cffile = $ARGV[0]; shift;
+}
+
+if (defined $ARGV[0] && $ARGV[0] eq '-ms') {
+  shift; find_missed('spam.log');
+}
+
+if (defined $ARGV[0] && $ARGV[0] eq '-mn') {
+  shift; find_missed('nonspam.log');
+}
 
 my $FORK = 0;
 if (defined $ARGV[0] && $ARGV[0] eq '-f') { $FORK = 1; }
 
-sub sortbynum {
-  $a =~ m,\/(\d+).*$,; my $anum = $1;
-  $b =~ m,\/(\d+).*$,; my $bnum = $1;
-  ($anum <=> $bnum);
-}
-
-$rulesfile = "../spamassassin.cf";
-if (-f "spamassassin.cf") { $rulesfile = "spamassassin.cf"; }
-
 $spamtest = new Mail::SpamAssassin ({
-  'rules_filename'      => $rulesfile,
+  'rules_filename'      => $cffile,
   'userprefs_filename'  => "../spamassassin.prefs",
   'local_tests_only'    => 1
 });
@@ -25,87 +32,14 @@ $spamtest->compile_now();
 
 my $count = 0;
 
-foreach my $folder (@ARGV) {
-  if (-d $folder &&
-  	(-f "$folder/1" || -f "$folder/1.gz" || -f "$folder/cyrus.index"))
-  {
-    # it's an MH folder or a Cyrus mailbox
-    mass_check_mh_folder($folder);
+mass_check_all_folders (\&wanted, @ARGV);
+exit;
 
-  } elsif (-f $folder) {
-    mass_check_mailbox($folder);
-  }
-}
+sub wanted {
+  my ($id, $dataref) = @_;
 
-sub mass_check_mh_folder {
-  my $folder = shift;
-  my @files = <$folder/[0-9]*>;
-  foreach my $mail (sort sortbynum @files) {
-    if ($mail =~ /\.gz$/) {
-      open (STDIN, "gunzip -cd $mail |") or warn "gunzip $mail failed: $@";
-    } elsif ($mail =~ /\.bz2$/) {
-      open (STDIN, "bzip2 -cd $mail |") or warn "bunzip2 $mail failed: $@";
-    } else {
-      open (STDIN, "<$mail") or warn "open $mail failed: $@";
-    }
-    my $ma = Mail::Audit->new();
-    docheck ($mail, $ma);
-  }
-}
-
-sub mass_check_mailbox {
-  my $folder = shift;
-
-  if ($folder =~ /\.gz$/) {
-    open (MBOX, "gunzip -cd $folder |") or warn "gunzip $folder failed: $@";
-  } elsif ($folder =~ /\.bz2$/) {
-    open (MBOX, "bzip2 -cd $folder |") or warn "bunzip2 $folder failed: $@";
-  } else {
-    open (MBOX, "<$folder") or warn "open $folder failed: $@";
-  }
-  while (<MBOX>) { /^From \S+ +... ... / and last; }
-
-  my $tmpf = "/tmp/mass-check.$$";
-  while (!eof MBOX) {
-    open (MSG, ">$tmpf");
-    my $msgid = undef;
-    $count++;
-
-    while (<MBOX>) {
-      /^Message-[Ii][Dd]: (.*)\s*$/ and $msgid = $1;
-
-      if (/^$/) {
-	if (!defined ($msgid)) {
-	  $msgid = "<$count\@no_msgid_in_msg.taint.org>";
-	  print MSG "Message-Id: $msgid\n";
-	}
-      }
-
-      /^From \S+ +... ... / and last;
-      print MSG;
-    }
-    close MSG;
-
-    # switch to a fork-based model to save RAM
-    if ($FORK && fork()) { wait; next; }
-
-    $msgid = "$folder:$msgid";		# so we can find it again
-    $msgid =~ s/\s/_/gs;	# make safe
-
-    open (STDIN, "<$tmpf");
-    unlink $tmpf;
-    my $ma = Mail::Audit->new();
-    docheck ($msgid, $ma);
-    close STDIN;
-
-    if ($FORK) { exit; }
-  }
-  close MBOX;
-}
-
-sub docheck {
-  my $id = shift;
-  my $ma = shift;
+  # my $ma = Mail::Audit->new('data' => \@msg);
+  my $ma = Mail::SpamAssassin::NoMailAudit->new ('data' => $dataref);
 
   $ma->{noexit} = 1;
   my $status = $spamtest->check ($ma);
@@ -117,12 +51,207 @@ sub docheck {
   my $yorn = $status->is_spam();
   my $hits = $status->get_hits();
   my $tests = $status->get_names_of_tests_hit();
-  $status->finish();
-
-  undef $ma;		# clean 'em up
-  undef $status;
 
   printf "%s %2d %s %s\n",
 		    ($yorn ? 'Y' : '.'),
 		    $hits, $id, $tests;
+
+  $status->finish();
+  undef $ma;		# clean 'em up
+  undef $status;
+
+# system ("ps alxww | grep mass-check | grep perl | grep -v grep");#JMD
+  if ($FORK) { exit; }
 }
+
+###########################################################################
+
+sub mass_check_all_folders {
+  my $sub = shift;
+
+  foreach my $folder (@_) {
+    if ($folder =~ /.tar$/)
+    {
+	# it's an MH or Cyrus folder in a tar file
+	use Archive::Tar;
+	mass_check_mh_tar_file($sub, $folder);
+    }
+    elsif (-d $folder &&
+	  (-f "$folder/1" || -f "$folder/1.gz" || -f "$folder/cyrus.index"))
+    {
+      # it's an MH folder or a Cyrus mailbox
+      mass_check_mh_folder($sub, $folder);
+
+    } elsif (-f $folder) {
+      mass_check_mailbox($sub, $folder);
+    }
+  }
+}
+
+sub mass_check_mh_tar_file {
+  my $sub = shift;
+  my $filename = shift;
+  my $tar = Archive::Tar->new();
+  $tar->read($filename);
+  my @files = $tar->list_files(['name']);
+  foreach my $mail (@files) {
+      next if $mail =~ m#/$# or $mail =~ /cyrus\.(index|header|cache)/;
+      my $msg_data = $tar->get_content($mail);
+      my @msg = split("\r\n",$tar->get_content($mail));
+      $mail =~ s/\s/_/g;
+      &$sub ($mail, \@msg);
+  }
+}
+
+sub mass_check_mh_folder {
+  my $sub = shift;
+  my $folder = shift;
+  my @files = <$folder/[0-9]*>;
+  foreach my $mail (@files)
+  {
+    # jm: commented size checks here; I can't see how they could be working,
+    # as "250_000" is not an int.  New size check implemented below
+
+    if ($mail =~ /\.gz$/) {
+      # next if `gunzip -c $mail|wc -c` > 250_000; #skip messages bigger than 250k
+      open (STDIN, "gunzip -cd $mail |") or warn "gunzip $mail failed: $@";
+    } elsif ($mail =~ /\.bz2$/) {
+      # next if `bzip2 -dc $mail|wc -c` > 250_000; #skip messages bigger than 250k
+      open (STDIN, "bzip2 -cd $mail |") or warn "bunzip2 $mail failed: $@";
+    } else {
+      # next if `wc -c $mail` > 250_000; #skip messages bigger than 250k
+      open (STDIN, "<$mail") or warn "open $mail failed: $@";
+    }
+
+    # skip too-big mails
+    if (-s STDIN > 250*1024) { close STDIN; next; }
+    my @msg = (<STDIN>);
+    close STDIN;
+
+    &$sub ($mail, \@msg);
+  }
+}
+
+sub mass_check_mailbox {
+  my $sub = shift;
+  my $folder = shift;
+
+  if ($folder =~ /\.gz$/) {
+    open (MBOX, "gunzip -cd $folder |") or warn "gunzip $folder failed: $@";
+  } elsif ($folder =~ /\.bz2$/) {
+    open (MBOX, "bzip2 -cd $folder |") or warn "bunzip2 $folder failed: $@";
+  } else {
+    open (MBOX, "<$folder") or warn "open $folder failed: $@";
+  }
+  while (<MBOX>) { /^From \S+ +... ... / and last; }
+
+  while (!eof MBOX) {
+    my @msg = ();
+    my $msgid = undef;
+    my $hits = '';
+    $count++;
+
+    while (<MBOX>) {
+      /^Message-[Ii][Dd]: (.*)\s*$/ and $msgid = $1;
+      /^X-Spam-Status: .* tests=(.*)$/ and $hits = $1;
+
+      if (/^$/) {
+	if (!defined ($msgid)) {
+	  $msgid = "<$count\@no_msgid_in_msg.taint.org>";
+	  push (@msg, "Message-Id: $msgid\n");
+	}
+      }
+
+      /^From \S+ +... ... / and last;
+      push (@msg, $_);
+    }
+
+    if (scalar @msg > 1000) { next; }	# too big
+
+    # switch to a fork-based model to save RAM
+    if ($FORK && fork()) { wait; next; }
+
+    $msgid = "$folder:$msgid";		# so we can find it again
+    $msgid =~ s/\s/_/gs;	# make safe
+
+    &$sub ($msgid, \@msg);
+  }
+
+  close MBOX;
+}
+
+sub sortbynum {
+  $a =~ m,\/(\d+).*$,; my $anum = $1;
+  $b =~ m,\/(\d+).*$,; my $bnum = $1;
+  ($anum <=> $bnum);
+}
+
+############################################################################
+
+sub find_missed {
+  my $file = shift;
+
+  my $threshold = 5;
+
+  my $shouldbespam = 1;
+  if ($file =~ /nonspam/) { $shouldbespam = 0; }
+
+  my $scores = readscores();
+
+  open (IN, "<$file");
+  while (<IN>) {
+    /^.\s+\d+\s+(\S+)\s*/ or next;
+    my $id = $1;
+    my $score = 0.0;
+
+    $_ = $'; s/,,+/,/g; s/^\s+//; s/\s+$//;
+    foreach my $tst (split (/,/, $_)) {
+      next if ($tst eq '');
+      if (!defined $scores->{$tst}) {
+	warn "unknown test in $file, ignored: $tst\n";
+	next;
+      }
+      $score += $scores->{$tst};
+    }
+
+    if ($shouldbespam && $score < $threshold) {
+      found_missed ($score, $id, $_);
+    } elsif (!$shouldbespam && $score > $threshold) {
+      found_missed ($score, $id, $_);
+    }
+  } 
+  close IN;
+}
+
+sub readscores {
+  my $scores = { };
+
+  print "Reading scores from \"$cffile\"...\n";
+  if (-d $cffile) {
+    open (IN, "<$cffile/*scores*.cf") or warn "cannot read $cffile\n";
+  } else {
+    open (IN, "<$cffile") or warn "cannot read $cffile\n";
+  }
+  while (<IN>) {
+    s/#.*$//g; s/^\s+//; s/\s+$//;
+
+    if (/^(header|body|full)\s+(\S+)\s+/) {
+      $scores->{$2} ||= 1;
+    } elsif (/^score\s+(\S+)\s+(.+)$/) {
+      $scores->{$1} = $2;
+    }
+  }
+  close IN;
+
+  $scores;
+}
+
+sub found_missed {
+  my $score = shift;
+  my $id = shift;
+  my $tests = shift;
+
+  print "$score $id $tests\n";
+}
+
+

@@ -74,30 +74,29 @@ sub check {
   # we do ALL the tests, even if a spam triggers lots of them early on.
   # this lets us see ludicrously spammish mails (score: 40) etc., which
   # we can then immediately submit to spamblocking services.
-  # Also, if parts of the message contain encoded bits (quoted-printable
-  # or base64), we test *both*.
+  #
+  # TODO: change this to do whitelist/blacklists first? probably a plan
 
   $self->remove_unwanted_headers();
 
   {
     $self->do_head_tests();
 
-    # do body tests with raw text portions
-    {
-      my $bodytext = $self->get_raw_body_text_array();
-      $self->do_body_tests($bodytext);
-      $self->do_body_eval_tests($bodytext);
-      undef $bodytext;
-    }
-
     # do body tests with decoded portions
     {
-      my $decoded = $self->get_decoded_body_text_array();
-      if (defined $decoded) {
-	$self->do_body_tests($decoded);
-	$self->do_body_eval_tests($decoded);
-      }
+      my $decoded = $self->get_decoded_stripped_body_text_array();
+      # warn "JMD ". join ("", @{$decoded}). "\n";
+      $self->do_body_tests($decoded);
+      $self->do_body_eval_tests($decoded);
       undef $decoded;
+    }
+
+    # do rawbody tests with raw text portions
+    {
+      my $bodytext = $self->get_decoded_body_text_array();
+      $self->do_rawbody_tests($bodytext);
+      $self->do_rawbody_eval_tests($bodytext);
+      undef $bodytext;
     }
 
     # and do full tests: first with entire, full, undecoded message
@@ -110,19 +109,6 @@ sub check {
       undef $fulltext;
     }
 
-    # then with decoded message
-    {
-      my $decoded = $self->get_decoded_body_text_array();
-      if (defined $decoded) {
-	my $fulltext = join ('', $self->{msg}->get_all_headers(), "\n",
-				  @{$decoded});
-	$self->do_full_tests(\$fulltext);
-	$self->do_full_eval_tests(\$fulltext);
-	undef $fulltext;
-      }
-      undef $decoded;
-    }
-
     $self->do_head_eval_tests();
   }
 
@@ -130,8 +116,16 @@ sub check {
   			" required=".$self->{conf}->{required_hits});
   $self->{is_spam} = ($self->{hits} >= $self->{conf}->{required_hits});
 
-  if ($self->{conf}->{use_terse_report})
-  {
+  # add it to the auto-whitelist if it's not spam
+  if (!$self->{is_spam} && defined $self->{auto_whitelist}) {
+    $self->{auto_whitelist}->increment_pass_accumulator();
+  }
+
+  if (defined $self->{auto_whitelist}) {
+    $self->{auto_whitelist}->finish();		# done with this now
+  }
+
+  if ($self->{conf}->{use_terse_report}) {
     $_ = $self->{conf}->{terse_report_template};
   } else {
     $_ = $self->{conf}->{report_template};
@@ -238,8 +232,9 @@ The modifications made are as follows:
 
 =item Subject: header for spam mails
 
-The string C<*****SPAM*****> is prepended to the subject,
-unless the C<rewrite_subject 0> configuration option is given.
+The string C<*****SPAM*****> (changeable with C<subject_tag> config option) is
+prepended to the subject, unless the C<rewrite_subject 0> configuration option
+is given.
 
 =item X-Spam-Status: header for spam mails
 
@@ -269,6 +264,10 @@ Set to C<YES>.
 
 Set to C<text/plain>, in order to defang HTML mail or other active
 content that could "call back" to the spammer.
+
+=item X-Spam-Checker-Version: header for spam mails
+
+Set to the version number of the SpamAssassin checker which tested the mail.
 
 =item spam mail body text
 
@@ -331,24 +330,41 @@ sub rewrite_as_spam {
     # delete the SpamAssassin-added headers in the target message.
     $self->{msg}->delete_header ("X-Spam-Status");
     $self->{msg}->delete_header ("X-Spam-Flag");
+    $self->{msg}->delete_header ("X-Spam-Checker-Version");
     $self->{msg}->delete_header ("X-Spam-Prev-Content-Type");
+    $self->{msg}->delete_header ("X-Spam-Report");
   }
 
   # First, rewrite the subject line.
   if ($self->{conf}->{rewrite_subject}) {
-    $_ = $srcmsg->get_header ("Subject"); $_ ||= '';
-    s/^/\*\*\*\*\*SPAM\*\*\*\*\* /g;
-    $self->{msg}->replace_header ("Subject", $_);
+    $_ = $srcmsg->get_header ("Subject");
+    my $SUBJ = $srcmsg->get_header ("SUBJECT"); # not really legal, but...
+    $_ ||= $SUBJ;
+    $_ ||= '';
+
+    my $tag = $self->{conf}->{subject_tag};
+    s/^(?:\Q${tag}\E |)/${tag} /g;
+
+    if (defined $SUBJ) {        # keep the uppercase subject header
+      $self->{msg}->replace_header ("SUBJECT", $_);
+    } else {
+      $self->{msg}->replace_header ("Subject", $_);
+    }
   }
 
   # add some headers...
 
-  $_ = sprintf ("Yes, hits=%d required=%d tests=%s",
+  $_ = sprintf ("Yes, hits=%2.1f required=%2.1f tests=%s version=%s",
 	$self->{hits}, $self->{conf}->{required_hits},
-	$self->get_names_of_tests_hit());
+	$self->get_names_of_tests_hit(),
+	$Mail::SpamAssassin::VERSION);
 
   $self->{msg}->put_header ("X-Spam-Status", $_);
   $self->{msg}->put_header ("X-Spam-Flag", 'YES');
+
+  $self->{msg}->put_header ("X-Spam-Checker-Version",
+  	"SpamAssassin $Mail::SpamAssassin::VERSION ".
+	"($Mail::SpamAssassin::SUB_VERSION)");
 
   # defang HTML mail; change it to text-only.
   if ($self->{conf}->{defang_mime}) {
@@ -382,7 +398,14 @@ sub rewrite_as_spam {
 
   } else {
     my $lines = $srcmsg->get_body();
-    unshift (@{$lines}, split (/$/, $self->{report}));
+
+    my $rep = $self->{report};
+    my $cte = $self->{msg}->get_header ('Content-Transfer-Encoding');
+    if (defined $cte && $cte =~ /quoted-printable/) {
+      $rep =~ s/=/=3D/gs;               # quote the = chars
+    }
+
+    unshift (@{$lines}, split (/$/, $rep));
     $lines->[0] =~ s/\n//;
     $self->{msg}->replace_body ($lines);
   }
@@ -395,9 +418,10 @@ sub rewrite_as_non_spam {
 
   $self->{test_names_hit} =~ s/,$//;
 
-  $_ = sprintf ("No, hits=%d required=%d tests=%s",
+  $_ = sprintf ("No, hits=%2.1f required=%2.1f tests=%s version=%s",
 	$self->{hits}, $self->{conf}->{required_hits},
-	$self->get_names_of_tests_hit());
+	$self->get_names_of_tests_hit(),
+	$Mail::SpamAssassin::VERSION);
 
   $self->{msg}->put_header ("X-Spam-Status", $_);
   $self->{msg}->get_mail_object;
@@ -512,38 +536,40 @@ sub get_raw_body_text_array {
     return $self->{body_text_array};
   }
 
-  # we run into a perl bug if the lines are astronomically long (probably due
-  # to lots of regexp backtracking); so cut short any individual line over 2048
-  # bytes in length.  This can wreck HTML totally -- but IMHO the only reason a
-  # luser would use 2048-byte lines is to crash filters, anyway.
-  #
-  my $body = $self->{msg}->get_body();
-  my @ret;
-  @$body = map {
-    @ret = ();
-    while (length ($_) > 1024) {
-      push (@ret, substr($_, 0, 1024));
-      $_ = substr($_, 1024);
-    }
-    ($_, @ret);
-  } @$body;
-
-  if ($ctype !~ /boundary="(.*)"/)
-  {
-    $self->{body_text_array} = $body;
-    return $self->{body_text_array};
+  # if it's a multipart MIME message, skip non-text parts and
+  # just assemble the body array from the text bits.
+  my $multipart_boundary;
+  my $end_boundary;
+  if ($ctype =~ /boundary="(.*)"/) {
+    $multipart_boundary = "--$1\n";
+    $end_boundary = "--$1--\n";
   }
 
-  # else it's a multipart MIME message. Skip non-text parts and
-  # just assemble the body array from the text bits.
-  $self->{body_text_array} = [ ];
-  my $multipart_boundary = "--$1\n";
-  my $end_boundary = "--$1--\n";
+  my $ctypeistext = 1;
 
-  my $line = 0;
-  while (defined ($_ = $body->[$line++]))
+  # we build up our own copy from the Mail::Audit message-body array
+  # reference, skipping MIME parts. this should help keep down in-memory
+  # text size.
+  my $bodyref = $self->{msg}->get_body();
+  $self->{body_text_array} = [ ];
+
+  my $line;
+  for ($line = 0; defined($_ = $bodyref->[$line]); $line++)
   {
+    # we run into a perl bug if the lines are astronomically long (probably due
+    # to lots of regexp backtracking); so cut short any individual line over 4096
+    # bytes in length.  This can wreck HTML totally -- but IMHO the only reason a
+    # luser would use 4096-byte lines is to crash filters, anyway.
+
+    while (length ($_) > 4096) {
+      push (@{$self->{body_text_array}}, substr($_, 0, 4096));
+      substr($_, 0, 4096) = '';
+    }
+
     push (@{$self->{body_text_array}}, $_);
+
+    next unless defined ($multipart_boundary);
+    # MIME-only from here on.
 
     if (/^Content-Transfer-Encoding: /) {
       if (/quoted-printable/) {
@@ -554,22 +580,36 @@ sub get_raw_body_text_array {
     }
 
     if ($multipart_boundary eq $_) {
-      $_ = $body->[$line++];
-      last unless defined $_;
-
-      if (/^Content-[Tt]ype: (?:text\/\S+|multipart\/alternative)/) {
+      for ($line++; defined($_ = $bodyref->[$line]); $line++) {
 	push (@{$self->{body_text_array}}, $_);
-	next;
+
+	if (/^$/) { last; }
+
+	if (/^Content-[Tt]ype: (\S+?\/\S+?)(?:\;|\s|$)/) {
+	  $ctype = $1;
+	  if ($ctype =~ /^(text\/\S+|message\/\S+|multipart\/alternative)/) {
+	    $ctypeistext = 1; next;
+	  } else {
+	    $ctypeistext = 0; next;
+	  }
+	}
       }
 
-      # skip this attachment, it's non-text.
-      while (defined ($_ = $body->[$line++])) {
-	if ($end_boundary eq $_) { last; }
-	if ($multipart_boundary eq $_) { $line--; last; }
+      last unless defined $_;
+
+      if (!$ctypeistext) {
+	# skip this attachment, it's non-text.
+	push (@{$self->{body_text_array}}, "[skipped $ctype attachment]\n");
+
+	for ($line++; defined($_ = $bodyref->[$line]); $line++) {
+	  if ($end_boundary eq $_) { last; }
+	  if ($multipart_boundary eq $_) { $line--; last; }
+	}
       }
     }
   }
 
+  #print "JMD ".join ("", @{$self->{body_text_array}})."\n\n\n";
   return $self->{body_text_array};
 }
 
@@ -605,13 +645,63 @@ sub get_decoded_body_text_array {
 
   } elsif ($self->{found_encoding_quoted_printable}) {
     $_ = join ('', @{$textary});
-    s/\=([0-9A-Fa-f]{2})/chr(hex($1))/ge; s/\=\n/\n/;
+    s/\=\r?\n//gs;
+    s/\=([0-9A-Fa-f]{2})/chr(hex($1))/ge;
     my @ary = split (/^/, $_);
     return \@ary;
 
   } else {
-    return undef;
+    return $textary;
   }
+}
+
+###########################################################################
+
+sub get_decoded_stripped_body_text_array {
+  my ($self) = @_;
+  local ($_);
+
+  my $bodytext = $self->get_decoded_body_text_array();
+
+  my $text = '';
+  my $lastwasmime = 0;
+  foreach $_ (@{$bodytext}) {
+    /^SPAM: / and next;         # SpamAssassin markup
+
+    /^--/ and $lastwasmime=1 and next;		# MIME bits
+    if ($lastwasmime) {
+      /^$/ and $lastwasmime=0;
+      /Content-.*: / and next;
+      /^\s/ and next;
+    }
+
+    $text .= $_;
+  }
+  $text =~ s/=\r?\n//gis;	# QP line endings
+
+  # sort out escaped QP markup
+  $text =~ s/=20/ /gis;
+  $text =~ s/=3E/>/gis;         # spam trick, disguise HTML
+  $text =~ s/=[0-9a-f][0-9a-f]//gis;
+
+  $text =~ s/\n\n+/<p>/gs;	# keep paragraph breaks
+
+  # strip HTML tags and entities
+  $text =~ s/(?:\&\#0147;|\&\#0148;|\&quot;)/"/gs;
+  $text =~ s/\&\#0146;/'/gs;
+  $text =~ s/\&\#82(?:16|17|20|11);//gs;
+  $text =~ s/\&[-_a-zA-Z0-9]+;/ /gs;
+  $text =~ s/\s+/ /gs;
+
+  $text =~ s/<p>/\n\n/gis;	# reinsert para breaks
+
+  $text =~ s/<[?!\s]*[:a-z0-9]+\b[^>]*>//gis;
+  $text =~ s/<\/[:a-z0-9]+>//gis;
+
+  #print "JMD $text";
+
+  my @textary = split (/^/, $text);
+  return \@textary;
 }
 
 ###########################################################################
@@ -634,6 +724,11 @@ sub get {
 
   if ($hdrname eq 'Message-Id' && (!defined($_) || $_ eq '')) {
     $_ = join ("\n", $self->{msg}->get_header ('Message-ID'));	# news-ish
+    if ($_ eq '') { undef $_; }
+  }
+
+  if ($hdrname eq 'Cc' && (!defined($_) || $_ eq '')) {
+    $_ = join ("\n", $self->{msg}->get_header ('CC'));		# common enough
     if ($_ eq '') { undef $_; }
   }
 
@@ -730,8 +825,6 @@ sub do_head_tests {
   my $evalstr = '';
 
   while (($rulename, $rule) = each %{$self->{conf}->{head_tests}}) {
-    next unless ($self->{conf}->{scores}->{$rulename});
-
     my $def = '';
     my ($hdrname, $testtype, $pat) = 
     		$rule =~ /^\s*(\S+)\s*(\=|\!)\~\s*(\S.*?\S)\s*$/;
@@ -740,9 +833,12 @@ sub do_head_tests {
     $hdrname =~ s/#/[HASH]/g;		# avoid probs with eval below
     $def =~ s/#/[HASH]/g;
 
+    # dbg ("header regexp test '.$rulename.'");
     $evalstr .= '
-      if ($self->get(q#'.$hdrname.'#, q#'.$def.'#) '.$testtype.'~ '.$pat.') {
-	$self->got_hit (q{'.$rulename.'}, q{});
+      if ($self->{conf}->{scores}->{q#'.$rulename.'#}) {
+	if ($self->get(q#'.$hdrname.'#, q#'.$def.'#) '.$testtype.'~ '.$pat.') {
+	  $self->got_hit (q#'.$rulename.'#, q{});
+	}
       }
     ';
   }
@@ -788,9 +884,10 @@ sub do_body_tests {
   # build up the eval string...
   my $evalstr = '';
   while (($rulename, $pat) = each %{$self->{conf}->{body_tests}}) {
-    next unless ($self->{conf}->{scores}->{$rulename});
     $evalstr .= '
-      if ('.$pat.') { $self->got_body_pattern_hit (q{'.$rulename.'}); }
+      if ($self->{conf}->{scores}->{q{'.$rulename.'}}) {
+	if ('.$pat.') { $self->got_body_pattern_hit (q{'.$rulename.'}); }
+      }
     ';
   }
 
@@ -822,6 +919,58 @@ EOT
   }
 }
 
+sub do_rawbody_tests {
+  my ($self, $textary) = @_;
+  my ($rulename, $pat);
+  local ($_);
+
+  dbg ("running raw-body-text per-line regexp tests; score so far=".$self->{hits});
+
+  $self->clear_test_state();
+  if ( defined &Mail::SpamAssassin::PerMsgStatus::_rawbody_tests ) {
+    # ok, we've compiled this before.
+    Mail::SpamAssassin::PerMsgStatus::_rawbody_tests($self, @$textary);
+    return;
+  }
+
+  # build up the eval string...
+  my $evalstr = '';
+  while (($rulename, $pat) = each %{$self->{conf}->{rawbody_tests}}) {
+    $evalstr .= '
+      if ($self->{conf}->{scores}->{q{'.$rulename.'}}) {
+	if ('.$pat.') { $self->got_body_pattern_hit (q{'.$rulename.'}); }
+      }
+    ';
+  }
+
+  # generate the loop that goes through each line...
+  $evalstr = <<"EOT";
+{
+  package Mail::SpamAssassin::PerMsgStatus;
+
+  sub _rawbody_tests {
+    my \$self = shift;
+    foreach (\@_) {
+        $evalstr
+	;
+    }
+  }
+
+  1;
+}
+EOT
+
+  # and run it.
+  eval $evalstr;
+  if ($@) {
+      warn("Failed to compile body SpamAssassin tests, skipping:\n".
+	      "\t($@)\n");
+  }
+  else {
+    Mail::SpamAssassin::PerMsgStatus::_rawbody_tests($self, @$textary);
+  }
+}
+
 sub do_full_tests {
   my ($self, $fullmsgref) = @_;
   my ($rulename, $pat);
@@ -839,10 +988,11 @@ sub do_full_tests {
   # build up the eval string...
   my $evalstr = '';
   while (($rulename, $pat) = each %{$self->{conf}->{full_tests}}) {
-    next unless ($self->{conf}->{scores}->{$rulename});
     $evalstr .= '
-      if ($$fullmsgref =~ '.$pat.') {
-	$self->got_body_pattern_hit (q{'.$rulename.'});
+      if ($self->{conf}->{scores}->{q{'.$rulename.'}}) {
+	if ($$fullmsgref =~ '.$pat.') {
+	  $self->got_body_pattern_hit (q{'.$rulename.'});
+	}
       }
     ';
   }
@@ -881,6 +1031,11 @@ sub do_head_eval_tests {
 sub do_body_eval_tests {
   my ($self, $bodystring) = @_;
   $self->run_eval_tests ($self->{conf}->{body_evals}, 'BODY: ', $bodystring);
+}
+
+sub do_rawbody_eval_tests {
+  my ($self, $bodystring) = @_;
+  $self->run_eval_tests ($self->{conf}->{rawbody_evals}, 'RAW: ', $bodystring);
 }
 
 sub do_full_eval_tests {
@@ -986,6 +1141,14 @@ sub got_hit {
 
 sub test_log {
   my ($self, $msg) = @_;
+  while ($msg =~ s/^(.{30,48})\s//) {
+    $self->_test_log_line ($1);
+  }
+  $self->_test_log_line ($msg);
+}
+
+sub _test_log_line {
+  my ($self, $msg) = @_;
   if ($self->{conf}->{use_terse_report}) {
     $self->{test_log_msgs} .= sprintf ("%9s [%s]\n", "", $msg);
   } else {
@@ -1090,7 +1253,9 @@ sub sa_die { Mail::SpamAssassin::sa_die (@_); }
 sub remove_unwanted_headers {
   my ($self) = @_;
   $self->{msg}->delete_header ("X-Spam-Status");
+  $self->{msg}->delete_header ("X-Spam-Checker-Version");
   $self->{msg}->delete_header ("X-Spam-Flag");
+  $self->{msg}->delete_header ("X-Spam-Report");
 }
 
 ###########################################################################
