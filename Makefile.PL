@@ -1,5 +1,10 @@
 require 5.005;
+
+use Config;
 use ExtUtils::MakeMaker;
+
+my $mycflags = '';		# this is a good place to put -g etc.
+
 
 sub MY::libscan {
   my($self,$path) = @_;
@@ -17,7 +22,13 @@ WriteMakefile(
     'NAME'	=> 'Mail::SpamAssassin',
     'VERSION_FROM' => 'lib/Mail/SpamAssassin.pm', # finds $VERSION
 
-    'EXE_FILES'	=> [ 'spamassassin'],
+    'EXE_FILES'	=> [ 'spamassassin', 'spamd/spamc', 'spamd/spamd' ],
+
+    'MAN1PODS' => {
+	    'spamassassin' => '$(INST_MAN1DIR)/spamassassin.$(MAN1EXT)',
+	    'spamd/spamc.pod' => '$(INST_MAN1DIR)/spamc.$(MAN1EXT)',
+	    'spamd/spamd' => '$(INST_MAN1DIR)/spamd.$(MAN1EXT)',
+    },
 
     'PL_FILES' => '',
 
@@ -29,14 +40,13 @@ WriteMakefile(
                         'Net::DNS' => 0,
                   },
 
-
     'dist' => {
       		COMPRESS => 'gzip -9f', SUFFIX => 'gz',
 	      	DIST_DEFAULT => 'tardist'
 	      },
 
     'clean' => { FILES =>
-	'pod2html* spamassassin'
+	'pod2htm* spamassassin spamd/spamc spamd/spamd'
     },
 
     'AUTHOR' => 'Justin Mason <jm@jmason.org>',
@@ -48,14 +58,27 @@ WriteMakefile(
 
 sub MY::install {
   package MY;
-  my $inherited = shift->SUPER::install (@_);
+  my $self = shift;
+  my $inherited = $self->SUPER::install (@_);
 
   $inherited =~ s/^(install :: .*)$/$1 inst_cfs/gm;
   $inherited;
 }
 
 sub MY::postamble {
-q{
+    # import some C-linkage stuff from %Config.  We can't seem to
+    # do this with MakeMaker without it trying to build the perl
+    # modules as .so's :(
+
+qq{
+
+CFCC		= $Config{cc}
+CFCCFLAGS	= $Config{ccflags} $mycflags
+CFOPTIMIZE	= $Config{optimize}
+CFLIBS		= $Config{libs}
+CFLDFLAGS	= $Config{ldflags}
+
+}. q{
 
 pm_to_blib: spamassassin
 
@@ -63,18 +86,26 @@ spamassassin: spamassassin.raw
 	$(PERL) fixpath.pl spamassassin.raw $@
 	$(CHMOD) $(PERM_RWX) $@
 
+spamd/spamd: spamd/spamd.raw
+	$(PERL) fixpath.pl spamd/spamd.raw $@
+	$(CHMOD) $(PERM_RWX) $@
+
+spamd/spamc: spamd/spamc.c
+	$(CFCC) $(CFCCFLAGS) $(CFOPTIMIZE) spamd/spamc.c \
+			-o $@ $(CFLDFLAGS) $(CFLIBS)
+
 inst_cfs: spamassassin.cf spamassassin.prefs
 	$(CP) spamassassin.cf $(INSTALLSITELIB)/spamassassin.cf
 	$(CP) spamassassin.prefs $(INSTALLSITELIB)/spamassassin.prefs
 
 text_html_doc: $(MAN1PODS) $(MAN3PODS)
 	-mkdir doc
-	for f in $(MAN1PODS) ; do pod2html $$f > doc/$$f.html ; done
-	for f in $(MAN1PODS) ; do pod2text $$f > doc/$$f.txt ; done
-	for f in $(MAN3PODS) ; do pod2html $$f > doc/`echo $$f | sed \
-	  	-e 's/lib\///' -e 's/\//::/g' -e 's/\.pm//'`.html ; done
-	for f in $(MAN3PODS) ; do pod2text $$f > doc/`echo $$f | sed \
-	  	-e 's/lib\///' -e 's/\//::/g' -e 's/\.pm//'`.txt ; done
+	for f in $(MAN1PODS) $(MAN3PODS) $(EXTRAPODS) ; do \
+	      pod2html $$f > doc/`echo $$f | perl -pe \
+	  	's/(lib|spamd)\///; s/\//::/g; s/\.(pod|pm)//;'`.html ; \
+	      pod2text $$f > doc/`echo $$f | perl -pe \
+	  	's/(lib|spamd)\///; s/\//::/g; s/\.(pod|pm)//;'`.txt ; \
+	done
 
 };
 }

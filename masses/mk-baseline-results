@@ -1,0 +1,6 @@
+#!/bin/sh
+
+make clean
+./logs-to-c $*
+make
+./evolve -C

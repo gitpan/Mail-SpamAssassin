@@ -1,6 +1,5 @@
 NAME
-    Mail::SpamAssassin::PerMsgStatus - per-message status (spam or
-    not-spam)
+    Mail::SpamAssassin::PerMsgStatus - per-message status (spam or not-spam)
 
 SYNOPSIS
       my $spamtest = new Mail::SpamAssassin ({
@@ -17,79 +16,83 @@ SYNOPSIS
       ...
 
 DESCRIPTION
-    The Mail::SpamAssassin `check()' method returns an object of
-    this class. This object encapsulates all the per-message state.
+    The Mail::SpamAssassin `check()' method returns an object of this class.
+    This object encapsulates all the per-message state.
 
 METHODS
     $isspam = $status->is_spam ()
-        After a mail message has been checked, this method can be
-        called. It will return 1 for mail determined likely to be
-        spam, 0 if it does not seem spam-like.
+        After a mail message has been checked, this method can be called. It
+        will return 1 for mail determined likely to be spam, 0 if it does
+        not seem spam-like.
 
     $list = $status->get_names_of_tests_hit ()
-        After a mail message has been checked, this method can be
-        called. It will return a comma-separated string, listing all
-        the symbolic test names of the tests which were trigged by
-        the mail.
+        After a mail message has been checked, this method can be called. It
+        will return a comma-separated string, listing all the symbolic test
+        names of the tests which were trigged by the mail.
 
     $num = $status->get_hits ()
-        After a mail message has been checked, this method can be
-        called. It will return the number of hits this message
-        incurred.
+        After a mail message has been checked, this method can be called. It
+        will return the number of hits this message incurred.
 
     $num = $status->get_required_hits ()
-        After a mail message has been checked, this method can be
-        called. It will return the number of hits required for a
-        mail to be considered spam.
+        After a mail message has been checked, this method can be called. It
+        will return the number of hits required for a mail to be considered
+        spam.
 
     $report = $status->get_report ()
-        Deliver a "spam report" on the checked mail message. This
-        contains details of how many spam detection rules it
-        triggered.
+        Deliver a "spam report" on the checked mail message. This contains
+        details of how many spam detection rules it triggered.
 
-        The report is returned as a multi-line string, with the
-        lines separated by `\n' characters.
+        The report is returned as a multi-line string, with the lines
+        separated by `\n' characters.
 
     $status->rewrite_mail ()
-        Rewrite the mail message. This will add headers, and
-        possibly body text, to reflect it's spam or not-spam status.
+        Rewrite the mail message. This will add headers, and possibly body
+        text, to reflect it's spam or not-spam status.
 
         The modifications made are as follows:
 
-    Subject: header for spam mails
+        Subject: header for spam mails
             The string `*****SPAM*****' is prepended to the subject.
 
-    X-Spam-Status: header for spam mails
-            A string, `Yes, hits=nn required=nn tests=...' is set in
-            this header to reflect the filter status. The keys in
-            this string are as follows:
+        X-Spam-Status: header for spam mails
+            A string, `Yes, hits=nn required=nn tests=...' is set in this
+            header to reflect the filter status. The keys in this string are
+            as follows:
 
-        hits=nn The number of hits the message triggered.
-        required=nn The threshold at which a mail is marked as spam.
-        tests=... The symbolic names of tests which were triggered.
-    X-Spam-Flag: header for spam mails
+            hits=nn The number of hits the message triggered.
+            required=nn The threshold at which a mail is marked as spam.
+            tests=... The symbolic names of tests which were triggered.
+        X-Spam-Flag: header for spam mails
             Set to `YES'.
 
-    Content-Type: header for spam mails
-            Set to `text/plain', in order to defang HTML mail or
-            other active content that could "call back" to the
-            spammer.
+        Content-Type: header for spam mails
+            Set to `text/plain', in order to defang HTML mail or other
+            active content that could "call back" to the spammer.
 
-    spam mail body text
-            The SpamAssassin report is added to top of the mail
-            message body.
+        spam mail body text
+            The SpamAssassin report is added to top of the mail message
+            body.
 
-    X-Spam-Status: header for non-spam mails
-            A string, `No, hits=nn required=nn tests=...' is set in
-            this header to reflect the filter status. The keys in
-            this string are the same as for spam mails (see above).
+        X-Spam-Status: header for non-spam mails
+            A string, `No, hits=nn required=nn tests=...' is set in this
+            header to reflect the filter status. The keys in this string are
+            the same as for spam mails (see above).
 
     $status->handle_auto_report ()
-        If this mail message has a high enough hit score, report it
-        to spam-tracking services straight away, without waiting for
-        user confirmation. See the documentation for the
-        spamassassin manpage's `-r' switch for details on what spam-
-        tracking services are used.
+        If this mail message has a high enough hit score, report it to
+        spam-tracking services straight away, without waiting for user
+        confirmation. See the documentation for `spamassassin''s `-r' switch
+        for details on what spam-tracking services are used.
+
+    $status->finish ()
+        Indicate that this `$status' object is finished with, and can be
+        destroyed.
+
+        If you are using SpamAssassin in a persistent environment, or
+        checking many mail messages from one the Mail::SpamAssassin manpage
+        factory, this method should be called to ensure Perl's garbage
+        collection will clean up old status objects.
 
 SEE ALSO
     `Mail::SpamAssassin' `spamassassin'

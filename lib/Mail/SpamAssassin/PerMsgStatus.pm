@@ -362,7 +362,7 @@ sub rewrite_as_non_spam {
 
 If this mail message has a high enough hit score, report it to spam-tracking
 services straight away, without waiting for user confirmation.  See the
-documentation for L<spamassassin>'s C<-r> switch for details on what
+documentation for C<spamassassin>'s C<-r> switch for details on what
 spam-tracking services are used.
 
 =cut
@@ -377,6 +377,23 @@ sub handle_auto_report {
     dbg ("score is high enough to automatically report this as spam");
     $self->{main}->report_as_spam ($self->{msg}->{audit});
   }
+}
+
+=item $status->finish ()
+
+Indicate that this C<$status> object is finished with, and can be destroyed.
+
+If you are using SpamAssassin in a persistent environment, or checking many
+mail messages from one L<Mail::SpamAssassin> factory, this method should be
+called to ensure Perl's garbage collection will clean up old status objects.
+
+=cut
+
+sub finish {
+  my ($self) = @_;
+  delete $self->{main};
+  delete $self->{msg};
+  delete $self->{conf};
 }
 
 ###########################################################################
@@ -513,7 +530,8 @@ sub get {
   }
 
   if ($getaddr) {
-    s/^.*?<(.+)>\s*$/$1/g			# Foo Blah <jm@foo>
+    chomp;
+    s/^.*?<(.+)>\s*$/$1/g		# Foo Blah <jm@foo>
     	or s/^(.+)\s\(.*?\)\s*$/$1/g;	# jm@foo (Foo Blah)
 
   } else {
@@ -586,9 +604,14 @@ sub do_head_tests {
   dbg ("running header regexp tests; score so far=".$self->{hits});
 
   my ($rulename, $rule);
+  my $evalstr = '';
+
+  # note: we do this only once for all head pattern tests.  Only
+  # eval tests need to use stuff in here.
+  $self->clear_test_state();
+
   while (($rulename, $rule) = each %{$self->{conf}->{head_tests}}) {
-    my $hit = 0;
-    $self->clear_test_state();
+    next if ($self->{conf}->{scores}->{$rulename} == 0.0);
 
     my $def = '';
     my ($hdrname, $testtype, $pat) = 
@@ -596,15 +619,17 @@ sub do_head_tests {
 
     if ($pat =~ s/\s+\[if-unset:\s+(.+)\]\s*$//i) { $def = $1; }
     $_ = $self->get ($hdrname, $def);
-    # warn "JMD $pat $def $hdrname $_\n";
+    s/#/[HASH]/gs;		# avoid probs with eval below
 
-    if (!eval 'if ($_ '.$testtype.'~ '.$pat.') { $hit = 1; } 1;') {
-      warn "Failed to run $rulename SpamAssassin test, skipping:\n".
-      		"\t$rule ($@)\n";
-      next;
-    }
+    $evalstr .= '
+      if (q#'.$_.'# '.$testtype.'~ '.$pat.') {
+	$self->got_hit (q{'.$rulename.'}, q{});
+      }
+    ';
+  }
 
-    if ($hit) { $self->got_hit ($rulename, ''); }
+  if (!eval $evalstr.'1;') {
+    warn "Failed to run header SpamAssassin tests, skipping some: $@\n";
   }
 }
 
@@ -619,13 +644,14 @@ sub do_body_tests {
   # build up the eval string...
   my $evalstr = '';
   while (($rulename, $pat) = each %{$self->{conf}->{body_tests}}) {
+    next if ($self->{conf}->{scores}->{$rulename} == 0.0);
     $evalstr .= '
       if ('.$pat.') { $self->got_body_pattern_hit (q{'.$rulename.'}); }
     ';
   }
 
   # generate the loop that goes through each line...
-  $evalstr = 'foreach $_ (@{$textary}) { study; '.$evalstr.'; }';
+  $evalstr = 'foreach $_ (@{$textary}) { '.$evalstr.'; }';
 
   # and run it.
   if (!eval $evalstr.'1;') {
@@ -645,13 +671,14 @@ sub do_full_tests {
   # build up the eval string...
   my $evalstr = '';
   while (($rulename, $pat) = each %{$self->{conf}->{full_tests}}) {
+    next if ($self->{conf}->{scores}->{$rulename} == 0);
     $evalstr .= '
       if ($$fullmsgref =~ '.$pat.') { $self->got_hit (q{'.$rulename.'}, q{}); }
     ';
   }
 
   # and run it.
-  # study $$fullmsgref;
+  study $$fullmsgref;
   if (!eval $evalstr.'; 1;') {
     warn "Failed to run full SpamAssassin tests, skipping:\n".
 	      "\t($@)\n";
@@ -683,6 +710,8 @@ sub run_eval_tests {
   local ($_);
 
   while (($rulename, $evalsub) = each %{$evalhash}) {
+    next if ($self->{conf}->{scores}->{$rulename} == 0);
+
     my $result;
     $self->clear_test_state();
 
@@ -718,6 +747,8 @@ sub got_body_pattern_hit {
 
 ###########################################################################
 
+# note: only eval tests should store state in here; pattern tests do
+# not.
 sub clear_test_state {
   my ($self) = @_;
   $self->{test_log_msgs} = '';
@@ -735,7 +766,7 @@ sub handle_hit {
 
   $self->{test_names_hit} .= $rule.",";
 
-  $self->{test_logs} .= sprintf ("%-16s %s%s\n%s",
+  $self->{test_logs} .= sprintf ("%-18s %s%s\n%s",
 		"Hit! (".$score." point".($score == 1 ? "":"s").")",
 		$area, $desc, $self->{test_log_msgs});
 }
@@ -752,7 +783,7 @@ sub got_hit {
 
 sub test_log {
   my ($self, $msg) = @_;
-  $self->{test_log_msgs} .= sprintf ("%16s [%s]\n", "", $msg);
+  $self->{test_log_msgs} .= sprintf ("%18s [%s]\n", "", $msg);
 }
 
 ###########################################################################
@@ -827,6 +858,7 @@ sub work_out_local_domain {
 }
 
 sub dbg { Mail::SpamAssassin::dbg (@_); }
+sub sa_die { Mail::SpamAssassin::sa_die (@_); }
 
 ###########################################################################
 

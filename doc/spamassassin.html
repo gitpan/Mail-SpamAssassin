@@ -1,277 +1,231 @@
 <HTML>
 <HEAD>
 <TITLE>spamassassin - mail filter to identify spam using text analysis</TITLE>
-<LINK REV="made" HREF="mailto:feedback@suse.de">
+<LINK REV="made" HREF="mailto:bhcompile@stripples.devel.redhat.com">
 </HEAD>
 
 <BODY>
 
+<A NAME="__index__"></A>
 <!-- INDEX BEGIN -->
 
 <UL>
 
-	<LI><A HREF="#NAME">NAME</A>
-	<LI><A HREF="#SYNOPSIS">SYNOPSIS</A>
-	<LI><A HREF="#DESCRIPTION">DESCRIPTION</A>
-	<LI><A HREF="#CONFIGURATION_FILES">CONFIGURATION FILES</A>
-	<LI><A HREF="#OPTIONS">OPTIONS</A>
-	<LI><A HREF="#TAGGING_FOR_SPAM_MAILS">TAGGING FOR SPAM MAILS</A>
-	<LI><A HREF="#TAGGING_FOR_NON_SPAM_MAILS">TAGGING FOR NON-SPAM MAILS</A>
-	<LI><A HREF="#SPAM_TRAPPING">SPAM TRAPPING</A>
-	<LI><A HREF="#INSTALLATION">INSTALLATION</A>
-	<LI><A HREF="#ENVIRONMENT">ENVIRONMENT</A>
-	<LI><A HREF="#SEE_ALSO">SEE ALSO</A>
-	<LI><A HREF="#AUTHOR">AUTHOR</A>
-	<LI><A HREF="#PREREQUISITES">PREREQUISITES</A>
-	<LI><A HREF="#COREQUISITES">COREQUISITES</A>
+	<LI><A HREF="#name">NAME</A></LI>
+	<LI><A HREF="#synopsis">SYNOPSIS</A></LI>
+	<LI><A HREF="#options">OPTIONS</A></LI>
+	<LI><A HREF="#description">DESCRIPTION</A></LI>
+	<LI><A HREF="#configuration files">CONFIGURATION FILES</A></LI>
+	<LI><A HREF="#tagging">TAGGING</A></LI>
+	<UL>
+
+		<LI><A HREF="#tagging for spam mails">TAGGING FOR SPAM MAILS</A></LI>
+		<LI><A HREF="#tagging for nonspam mails">TAGGING FOR NON-SPAM MAILS</A></LI>
+	</UL>
+
+	<LI><A HREF="#spam trapping">SPAM TRAPPING</A></LI>
+	<LI><A HREF="#installation">INSTALLATION</A></LI>
+	<LI><A HREF="#environment">ENVIRONMENT</A></LI>
+	<LI><A HREF="#see also">SEE ALSO</A></LI>
+	<LI><A HREF="#author">AUTHOR</A></LI>
+	<LI><A HREF="#prerequisites">PREREQUISITES</A></LI>
+	<LI><A HREF="#corequisites">COREQUISITES</A></LI>
 </UL>
 <!-- INDEX END -->
 
 <HR>
 <P>
-<H1><A NAME="NAME">NAME</A></H1>
-<P>
-spamassassin - mail filter to identify spam using text analysis
-
+<H1><A NAME="name">NAME</A></H1>
+<P>spamassassin - mail filter to identify spam using text analysis</P>
 <P>
 <HR>
-<H1><A NAME="SYNOPSIS">SYNOPSIS</A></H1>
-<P>
-<PRE>  spamassassin [option ...] &lt; mailmessage
-  spamassassin -P [option ...] &lt; mailmessage &gt; output
-</PRE>
-<P>
-<PRE>  -h               print this help and terminate without further action
-  -P               pipe message through, instead of delivering to mail spool
-  -t               only testing; pipe message through and add extra report
-  -r               report this message as verified spam
-  -w fromaddr      send a warning mail back to the sender of the message,
-                   notifying them that their message has been marked as spam
-                   (only useful if -r is used)
-  -l filename      Log all mail messages to a mbox-format file
-  -L               Local tests only, do not do internet-based checks
-  -d               Remove SpamAssassin reports from a mail message and print
-  -c config        configuration file
-  -p prefs         user preferences file
-  -D               produce diagnostic output
-</PRE>
-<P>
-<HR>
-<H1><A NAME="DESCRIPTION">DESCRIPTION</A></H1>
-<P>
-SpamAssassin is a mail filter to identify spam using text analysis and
-several internet-based realtime blacklists.
-
-<P>
-Using its rule base, it uses a wide range of heuristic tests on mail
-headers and body text to identify ``spam'', also known as unsolicited
-commercial email.
-
-<P>
-Once identified, the mail is then tagged as spam for later filtering using
-the user's own mail user-agent application.
-
-<P>
-SpamAssassin also includes support for reporting spam messages to
-collaborative filtering databases, such as Vipul's Razor ( <A
-HREF="http://razor.sourceforge.net/">http://razor.sourceforge.net/</A> ).
-
-<P>
-The default tagging operations that take place are detailed in the <EM>TAGGING</EM>
-section below.
-
-<P>
-<HR>
-<H1><A NAME="CONFIGURATION_FILES">CONFIGURATION FILES</A></H1>
-<P>
-The rule base, text templates, and rule description text are loaded from
-the configuration file. The default configuration file, if <CODE>-c</CODE> is not specified, is <CODE>$Config{installsitelib}/spamassassin.cf</CODE>.
-
-<P>
-The user preferences (such as scores to attach to each rule), are loaded
-from the file specified in the <CODE>-p</CODE> argument. If this is not specified,
-<CODE>~/.spamassassin.cf</CODE> is used if it exists, otherwise
-<CODE>$Config{installsitelib}/spamassassin.prefs</CODE> is used.
-
-<P>
-<HR>
-<H1><A NAME="OPTIONS">OPTIONS</A></H1>
+<H1><A NAME="synopsis">SYNOPSIS</A></H1>
 <DL>
-<DT><STRONG><A NAME="item__P">-P</A></STRONG><DD>
+<DT><STRONG><A NAME="item_spamassassin_%5Boption_%2E%2E%2E%5D_%3C_mailmessag">spamassassin [option ...] &lt; mailmessage</A></STRONG><BR>
+<DD>
+<DT><STRONG><A NAME="item_spamassassin_%2DP_%5Boption_%2E%2E%2E%5D_%3C_mailm">spamassassin -P [option ...] &lt; mailmessage &gt; output</A></STRONG><BR>
+<DD>
+</DL>
 <P>
+<HR>
+<H1><A NAME="options">OPTIONS</A></H1>
+<DL>
+<DT><STRONG><A NAME="item_%2DP"><STRONG>-P</STRONG></A></STRONG><BR>
+<DD>
 Normally SpamAssassin will write the rewritten message to the mail spool by
-default. The <CODE>-P</CODE> parameter will cause it to pipe the output to STDOUT instead.
-
-<DT><STRONG><A NAME="item__t">-t</A></STRONG><DD>
-<P>
-Test mode.
-
-<DT><STRONG><A NAME="item__r">-r</A></STRONG><DD>
-<P>
-Report this message as verified spam. This will submit the mail message
-read from STDIN to various spam-blocker databases, such as Vipul's Razor (
-<A HREF="http://razor.sourceforge.net/">http://razor.sourceforge.net/</A>
-).
-
-<P>
-If the message contains SpamAssassin markup, this will be stripped out
-automatically before submission.
-
-<DT><STRONG><A NAME="item__w">-w fromaddr</A></STRONG><DD>
-<P>
-This flag is only useful in conjunction with <CODE>-r</CODE>. It will send a reply mail to the sender of the tested mail, notifying
-them that their message has been trapped as spam, from the address supplied
-in <CODE>fromaddr</CODE>. See the <A HREF="#SPAM_TRAPPING">SPAM TRAPPING</A> section below for more details.
-
-<DT><STRONG><A NAME="item__l">-l filename</A></STRONG><DD>
-<P>
+default.  The <STRONG>-P</STRONG> parameter will cause it to pipe the output to STDOUT
+instead.
+<P></P>
+<DT><STRONG><A NAME="item_%2Dh"><STRONG>-h</STRONG></A></STRONG><BR>
+<DD>
+Print help message and exit.
+<P></P>
+<DT><STRONG><A NAME="item_%2Dt"><STRONG>-t</STRONG></A></STRONG><BR>
+<DD>
+Test mode.  Pipe message through and add extra report.
+<P></P>
+<DT><STRONG><A NAME="item_%2Dr"><STRONG>-r</STRONG></A></STRONG><BR>
+<DD>
+Report this message as verified spam.  This will submit the mail message read
+from STDIN to various spam-blocker databases, such as Vipul's Razor (
+<A HREF="http://razor.sourceforge.net/">http://razor.sourceforge.net/</A> ).
+<P>If the message contains SpamAssassin markup, this will be stripped out
+automatically before submission.</P>
+<P></P>
+<DT><STRONG><A NAME="item_%2Dw_fromaddr"><STRONG>-w</STRONG> <EM>fromaddr</EM></A></STRONG><BR>
+<DD>
+This flag is only useful in conjunction with <STRONG>-r</STRONG>.  It will send a reply mail
+to the sender of the tested mail, notifying them that their message has been
+trapped as spam, from the address supplied in <EM>fromaddr</EM>.  See <A HREF="#spam trapping">SPAM TRAPPING</A>.
+<P></P>
+<DT><STRONG><A NAME="item_%2Dl_filename"><STRONG>-l</STRONG> <EM>filename</EM></A></STRONG><BR>
+<DD>
 Log all mail messages that pass through the filter, to an mbox-format file
-named by <CODE>filename</CODE>. Handy for use with <CODE>-r</CODE> and <CODE>-w</CODE>.
-
-<DT><STRONG><A NAME="item__L">-L</A></STRONG><DD>
-<P>
-Do only the ''local'' tests, ones that do not require an internet
-connection to operate. Normally, SpamAssassin will try to detect whether
-you are connected to the net before doing these tests anyway, but for
-faster checks you may wish to use this.
-
-<DT><STRONG><A NAME="item__d">-d</A></STRONG><DD>
-<P>
-Remove SpamAssassin markup (the ``SpamAssassin results'' report,
-X-Spam-Status headers, etc.) from the mail message. The resulting message,
-which will be identical to the original, pre-SpamAssassin input, will be
-output to stdout.
-
-<DT><STRONG><A NAME="item__c">-c config</A></STRONG><DD>
-<P>
-Read configuration from <CODE>config</CODE>.
-
-<DT><STRONG><A NAME="item__p">-p prefs</A></STRONG><DD>
-<P>
-Read user score preferences from <CODE>prefs</CODE>.
-
-</DL>
+named by <EM>filename</EM>.  Handy for use with <STRONG>-r</STRONG> and <STRONG>-w</STRONG>.
+<P></P>
+<DT><STRONG><A NAME="item_%2DL"><STRONG>-L</STRONG></A></STRONG><BR>
+<DD>
+Do only the ''local'' tests, ones that do not require an internet connection to
+operate.  Normally, SpamAssassin will try to detect whether you are connected
+to the net before doing these tests anyway, but for faster checks you may wish
+to use this.
+<P></P>
+<DT><STRONG><A NAME="item_%2Dd"><STRONG>-d</STRONG></A></STRONG><BR>
+<DD>
+Remove SpamAssassin markup (the ``SpamAssassin results'' report, X-Spam-Status
+headers, etc.) from the mail message.  The resulting message, which will be
+identical to the original, pre-SpamAssassin input, will be output to stdout.
+<P></P>
+<DT><STRONG><A NAME="item_%2Dc_config"><STRONG>-c</STRONG> <EM>config</EM></A></STRONG><BR>
+<DD>
+Read configuration from <EM>config</EM>.
+<P></P>
+<DT><STRONG><A NAME="item_%2Dp_prefs"><STRONG>-p</STRONG> <EM>prefs</EM></A></STRONG><BR>
+<DD>
+Read user score preferences from <EM>prefs</EM>.
+<P></P>
+<DT><STRONG><A NAME="item_%2DD"><STRONG>-D</STRONG></A></STRONG><BR>
+<DD>
+Product diagnostic output.
+<P></P></DL>
 <P>
 <HR>
-<H1><A NAME="TAGGING_FOR_SPAM_MAILS">TAGGING FOR SPAM MAILS</A></H1>
+<H1><A NAME="description">DESCRIPTION</A></H1>
+<P>SpamAssassin is a mail filter to identify spam using text analysis and several
+internet-based realtime blacklists.</P>
+<P>Using its rule base, it uses a wide range of heuristic tests on mail headers
+and body text to identify ``spam'', also known as unsolicited commercial email.</P>
+<P>Once identified, the mail is then tagged as spam for later filtering using the
+user's own mail user-agent application.</P>
+<P>SpamAssassin also includes support for reporting spam messages to collaborative
+filtering databases, such as Vipul's Razor ( <A HREF="http://razor.sourceforge.net/">http://razor.sourceforge.net/</A> ).</P>
+<P>The default tagging operations that take place are detailed in <A HREF="#tagging">TAGGING</A>.</P>
 <P>
-The modifications made are as follows:
-
+<HR>
+<H1><A NAME="configuration files">CONFIGURATION FILES</A></H1>
+<P>The rule base, text templates, and rule description text are loaded from the
+configuration file.  The default configuration file, if <STRONG>-c</STRONG> is not specified,
+is <EM>$Config{installsitelib}/spamassassin.cf</EM>.</P>
+<P>The user preferences (such as scores to attach to each rule), are loaded from
+the file specified in the <STRONG>-p</STRONG> argument.  If this is not specified,
+<EM>~/.spamassassin.cf</EM> is used if it exists, otherwise
+<EM>$Config{installsitelib}/spamassassin.prefs</EM> is used.</P>
+<P>
+<HR>
+<H1><A NAME="tagging">TAGGING</A></H1>
+<P>The following two sections detail the tagging that takes place for
+spam messages, first of all, and for non-spam messages.</P>
+<P>Note that if you use the <STRONG>-t</STRONG> argument, all mails will be tagged
+as if they are spam messages.</P>
+<P>
+<H2><A NAME="tagging for spam mails">TAGGING FOR SPAM MAILS</A></H2>
+<P>The modifications made are as follows:</P>
 <DL>
-<DT><STRONG><A NAME="item_Subject">Subject: header</A></STRONG><DD>
-<P>
+<DT><STRONG><A NAME="item_Subject%3A_header">Subject: header</A></STRONG><BR>
+<DD>
 The string <CODE>*****SPAM*****</CODE> is prepended to the subject.
-
-<DT><STRONG><A NAME="item_X">X-Spam-Status: header</A></STRONG><DD>
-<P>
-A string, <CODE>Yes, hits=nn required=nn</CODE> is set in this header to reflect the filter status.
-
-<DT><STRONG><A NAME="item_X">X-Spam-Flag: header</A></STRONG><DD>
-<P>
+<P></P>
+<DT><STRONG><A NAME="item_X%2DSpam%2DStatus%3A_header">X-Spam-Status: header</A></STRONG><BR>
+<DD>
+A string, <CODE>Yes, hits=nn required=nn</CODE> is set in this header to reflect
+the filter status.
+<P></P>
+<DT><STRONG><A NAME="item_X%2DSpam%2DFlag%3A_header">X-Spam-Flag: header</A></STRONG><BR>
+<DD>
 Set to <CODE>YES</CODE>.
-
-<DT><STRONG><A NAME="item_Content">Content-Type: header</A></STRONG><DD>
-<P>
-Set to <CODE>text/plain</CODE>, in order to defang HTML mail or other active content that could ``call
-back'' to the spammer.
-
-<DT><STRONG><A NAME="item_spam">spam mail body text</A></STRONG><DD>
-<P>
+<P></P>
+<DT><STRONG><A NAME="item_Content%2DType%3A_header">Content-Type: header</A></STRONG><BR>
+<DD>
+Set to <CODE>text/plain</CODE>, in order to defang HTML mail or other active
+content that could ``call back'' to the spammer.
+<P></P>
+<DT><STRONG><A NAME="item_spam_mail_body_text">spam mail body text</A></STRONG><BR>
+<DD>
 The SpamAssassin report is added to top of the mail message body.
-
-</DL>
+<P></P></DL>
 <P>
-<HR>
-<H1><A NAME="TAGGING_FOR_NON_SPAM_MAILS">TAGGING FOR NON-SPAM MAILS</A></H1>
+<H2><A NAME="tagging for nonspam mails">TAGGING FOR NON-SPAM MAILS</A></H2>
 <DL>
-<DT><STRONG>X-Spam-Status: header</STRONG><DD>
-<P>
-A string, <CODE>No, hits=nn required=nn</CODE> is set in this header to reflect the filter status.
-
-</DL>
+<DT><STRONG>X-Spam-Status: header</STRONG><BR>
+<DD>
+A string, <CODE>No, hits=nn required=nn</CODE> is set in this header to reflect
+the filter status.
+<P></P></DL>
 <P>
 <HR>
-<H1><A NAME="SPAM_TRAPPING">SPAM TRAPPING</A></H1>
-<P>
-Quite often, if you've been on the internet for a while, you'll have
-accumulated a few old email accounts that nowadays get nothing but spam.
-
-<P>
-SpamAssassin lets you set them up as aliases, as follows:
-
+<H1><A NAME="spam trapping">SPAM TRAPPING</A></H1>
+<P>Quite often, if you've been on the internet for a while, you'll have
+accumulated a few old email accounts that nowadays get nothing but
+spam.</P>
+<P>SpamAssassin lets you set them up as aliases, as follows:</P>
 <DL>
-<DT><STRONG><A NAME="item_spamtrap1">spamtrap1: &quot;| /path/to/spamassassin -r -w spamtrap1&quot;</A></STRONG><DD>
+<DT><STRONG><A NAME="item_spamtrap1%3A_%22%7C_%2Fpath%2Fto%2Fspamassassin_%2">spamtrap1: ``| /path/to/spamassassin -r -w spamtrap1''</A></STRONG><BR>
+<DD>
 </DL>
-<P>
-This will add any incoming mail messages straight into spam-tracking
-databases, such as Vipul's Razor; send an explanatory reply message to the
-sender, from the <A HREF="#item_spamtrap1">spamtrap1</A> address; then drop the mail into the bit-bucket.
-
-<P>
-The explanatory reply text is taken from the SpamAssassin configuration
-file, where it is stored in the <CODE>spamtrap</CODE> lines.
-
-<P>
-If you want to keep a copy of the mails, use something like this:
-
+<P>This will add any incoming mail messages straight into spam-tracking databases,
+such as Vipul's Razor; send an explanatory reply message to the sender, from
+the <EM>spamtrap1</EM> address; then drop the mail into the bit-bucket.</P>
+<P>The explanatory reply text is taken from the SpamAssassin configuration file,
+where it is stored in the <CODE>spamtrap</CODE> lines.</P>
+<P>If you want to keep a copy of the mails, use something like this:</P>
 <DL>
-<DT><STRONG>spamtrap1: &quot;| /path/to/spamassassin -r -w spamtrap1 -l /var/spam/caught&quot;</STRONG><DD>
+<DT><STRONG>spamtrap1: ``| /path/to/spamassassin -r -w spamtrap1 -l /var/spam/caught''</STRONG><BR>
+<DD>
 </DL>
-<P>
-It is suggested you familiarise yourself with how MTAs run programs
-specified in aliases, if you plan to do this; for one thing, <CODE>spamassassin</CODE> will not run under your user id in this case. If you are nervous about
-this, create a user for spamtrapping, and set up spamassassin in it's <CODE>.forward</CODE> file.
-
-<P>
-<HR>
-<H1><A NAME="INSTALLATION">INSTALLATION</A></H1>
-<P>
-The <STRONG>spamassassin</STRONG> command is part of the <STRONG>Mail::SpamAssassin</STRONG> Perl module. Install this as a normal Perl module, using <CODE>perl -MCPAN -e shell</CODE>, or by hand.
-
+<P>It is suggested you familiarise yourself with how MTAs run programs specified
+in aliases, if you plan to do this; for one thing, <STRONG>spamassassin</STRONG> will not run
+under your user id in this case.  If you are nervous about this, create a user
+for spamtrapping, and set up spamassassin in it's <EM>.forward</EM> file.</P>
 <P>
 <HR>
-<H1><A NAME="ENVIRONMENT">ENVIRONMENT</A></H1>
-<P>
-No environment variables, aside from those used by perl, are required to be
-set.
-
-<P>
-<HR>
-<H1><A NAME="SEE_ALSO">SEE ALSO</A></H1>
-<P>
-<CODE>Mail::SpamAssassin</CODE>
-
-<CODE>Mail::Audit</CODE>
-
-<CODE>Razor</CODE>
-
-
-
+<H1><A NAME="installation">INSTALLATION</A></H1>
+<P>The <STRONG>spamassassin</STRONG> command is part of the <STRONG>Mail::SpamAssassin</STRONG> Perl module.
+Install this as a normal Perl module, using <CODE>perl -MCPAN -e shell</CODE>, or by
+hand.</P>
 <P>
 <HR>
-<H1><A NAME="AUTHOR">AUTHOR</A></H1>
-<P>
-Justin Mason &lt;jm /at/ jmason.org&gt;
-
-
-
+<H1><A NAME="environment">ENVIRONMENT</A></H1>
+<P>No environment variables, aside from those used by perl, are required to
+be set.</P>
 <P>
 <HR>
-<H1><A NAME="PREREQUISITES">PREREQUISITES</A></H1>
-<P>
-<CODE>Mail::Audit</CODE>
-
-
-
+<H1><A NAME="see also">SEE ALSO</A></H1>
+<P>Mail::SpamAssassin(3)
+Mail::Audit(3)
+<CODE>Razor(3)</CODE></P>
 <P>
 <HR>
-<H1><A NAME="COREQUISITES">COREQUISITES</A></H1>
+<H1><A NAME="author">AUTHOR</A></H1>
+<P>Justin Mason &lt;jm /at/ jmason.org&gt;</P>
 <P>
-<CODE>Net::DNS</CODE>
-
-<CODE>Razor</CODE>
-
-
+<HR>
+<H1><A NAME="prerequisites">PREREQUISITES</A></H1>
+<P><CODE>Mail::Audit</CODE></P>
+<P>
+<HR>
+<H1><A NAME="corequisites">COREQUISITES</A></H1>
+<P><CODE>Net::DNS</CODE>
+<CODE>Razor</CODE></P>
 
 </BODY>
 

@@ -32,7 +32,7 @@ filtering using the user's own mail user-agent application.
 
 This module implements a Mail::Audit plugin, allowing SpamAssassin to be used
 in a Mail::Audit filter.  If you wish to use a command-line filter tool,
-try the L<spamassassin> tool provided.
+try the C<spamassassin> or C<spamd> tools provided.
 
 SpamAssassin also includes support for reporting spam messages to collaborative
 filtering databases, such as Vipul's Razor ( http://razor.sourceforge.net/ ).
@@ -65,7 +65,7 @@ use vars	qw{
 
 @ISA = qw();
 
-$VERSION = "1.2";
+$VERSION = "1.3";
 sub Version { $VERSION; }
 
 $HOME_URL = "http://spamassassin.taint.org/";
@@ -83,7 +83,7 @@ $DEBUG = 0;
         /etc/spamassassin.prefs
         __installsitelib__/spamassassin.prefs
 );
-    
+
 @default_userprefs_path = qw(
         ./spamassassin.prefs 
         ../spamassassin.prefs
@@ -110,17 +110,18 @@ The filename to load preferences from. (optional)
 =item config_text
 
 The text of all rules and preferences.  If you prefer not to load the rules
-from files, read them in yourself and set this instead.
-
-If none of rules_filename, userprefs_filename, or config_text is set,
-the C<Mail::SpamAssassin> module will search for the configuration files
-in the usual installed locations.
+from files, read them in yourself and set this instead.  As a result, this will
+override the settings for C<rules_filename> and C<userprefs_filename>.
 
 =item local_tests_only
 
 If set to 1, no tests that require internet access will be performed.
 
 =back
+
+If none of C<rules_filename>, C<userprefs_filename>, or C<config_text> is set,
+the C<Mail::SpamAssassin> module will search for the configuration files in the
+usual installed locations.
 
 =cut
 
@@ -150,7 +151,8 @@ used to test or manipulate the mail message.
 
 Note that the C<Mail::SpamAssassin> object can be re-used for further messages
 without affecting this check; in OO terminology, the C<Mail::SpamAssassin>
-object is a "factory".
+object is a "factory".   However, if you do this, be sure to call the
+C<finish()> method on the status objects when you're done with them.
 
 =cut
 
@@ -222,13 +224,21 @@ sub remove_spamassassin_markup {
 
   $self->init();
   my $mail = $self->encapsulate_audit ($audit);
-
   my $hdrs = $mail->get_all_headers();
+
+  # remove DOS line endings
+  $hdrs =~ s/\r//gs;
+
+  # de-break lines on SpamAssassin-modified headers.
+  $hdrs =~ s/(\n(?:X-Spam|Subject)[^\n]+?)\n[ \t]+/$1 /gs;
 
   # reinstate the old content type
   if ($hdrs =~ /^X-Spam-Prev-Content-Type: /m) {
     $hdrs =~ s/\nContent-Type: [^\n]*?\n/\n/gs;
-    $hdrs =~ s/\nX-Spam-Prev-(Content-Type: [^\n]*?\n)/\n$1/gs;
+    $hdrs =~ s/\nX-Spam-Prev-(Content-Type: [^\n]*\n)/\n$1/gs;
+
+    # remove embedded spaces where they shouldn't be; a common problem
+    $hdrs =~ s/(Content-Type: .*?boundary=\".*?) (.*?\".*?\n)/$1$2/gs;
   }
 
   # remove the headers we added
@@ -244,6 +254,8 @@ sub remove_spamassassin_markup {
   my $inreport = 0;
   foreach $_ (@{$mail->get_body()})
   {
+    s/\r?$//;	# DOS line endings
+
     if (/^SPAM: ----/ && $inreport == 0) {
       # we've just entered a report.  If there's a blank line before the
       # report, get rid of it...
@@ -404,6 +416,14 @@ sub encapsulate_audit {
 
 sub dbg {
   if ($Mail::SpamAssassin::DEBUG > 0) { warn "debug: ".join('',@_)."\n"; }
+}
+
+# sa_die -- used to die with a useful exit code.
+
+sub sa_die {
+  my $exitcode = shift;
+  warn @_;
+  exit $exitcode;
 }
 
 1;

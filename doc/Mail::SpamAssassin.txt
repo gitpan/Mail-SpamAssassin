@@ -17,82 +17,78 @@ SYNOPSIS
       ...
 
 DESCRIPTION
-    Mail::SpamAssassin is a Mail::Audit plugin to identify spam
-    using text analysis and several internet-based realtime
-    blacklists.
+    Mail::SpamAssassin is a Mail::Audit plugin to identify spam using text
+    analysis and several internet-based realtime blacklists.
 
-    Using its rule base, it uses a wide range of heuristic tests on
-    mail headers and body text to identify "spam", also known as
-    unsolicited commercial email.
+    Using its rule base, it uses a wide range of heuristic tests on mail
+    headers and body text to identify "spam", also known as unsolicited
+    commercial email.
 
-    Once identified, the mail can then be optionally tagged as spam
-    for later filtering using the user's own mail user-agent
-    application.
+    Once identified, the mail can then be optionally tagged as spam for
+    later filtering using the user's own mail user-agent application.
 
-    This module implements a Mail::Audit plugin, allowing
-    SpamAssassin to be used in a Mail::Audit filter. If you wish to
-    use a command-line filter tool, try the the spamassassin manpage
-    tool provided.
+    This module implements a Mail::Audit plugin, allowing SpamAssassin to be
+    used in a Mail::Audit filter. If you wish to use a command-line filter
+    tool, try the `spamassassin' or `spamd' tools provided.
 
-    SpamAssassin also includes support for reporting spam messages
-    to collaborative filtering databases, such as Vipul's Razor (
+    SpamAssassin also includes support for reporting spam messages to
+    collaborative filtering databases, such as Vipul's Razor (
     http://razor.sourceforge.net/ ).
 
 METHODS
     $f = new Mail::SpamAssassin( [ { opt => val, ... } ] )
-        Constructs a new `Mail::SpamAssassin' object. You may pass
-        the following attribute-value pairs to the constructor.
+        Constructs a new `Mail::SpamAssassin' object. You may pass the
+        following attribute-value pairs to the constructor.
 
-    rules_filename
-            The filename to load spam-identifying rules from.
-            (optional)
+        rules_filename
+            The filename to load spam-identifying rules from. (optional)
 
-    userprefs_filename
+        userprefs_filename
             The filename to load preferences from. (optional)
 
-    config_text
-            The text of all rules and preferences. If you prefer not
-            to load the rules from files, read them in yourself and
-            set this instead.
+        config_text
+            The text of all rules and preferences. If you prefer not to load
+            the rules from files, read them in yourself and set this
+            instead. As a result, this will override the settings for
+            `rules_filename' and `userprefs_filename'.
 
-            If none of rules_filename, userprefs_filename, or
-            config_text is set, the `Mail::SpamAssassin' module will
-            search for the configuration files in the usual
-            installed locations.
+        local_tests_only
+            If set to 1, no tests that require internet access will be
+            performed.
 
-    local_tests_only
-            If set to 1, no tests that require internet access will
-            be performed.
+        If none of `rules_filename', `userprefs_filename', or `config_text'
+        is set, the `Mail::SpamAssassin' module will search for the
+        configuration files in the usual installed locations.
 
     $status = $f->check ($mail)
-        Check a mail, encapsulated in a `Mail::Audit' object, to
-        determine if it is spam or not.
+        Check a mail, encapsulated in a `Mail::Audit' object, to determine
+        if it is spam or not.
 
-        Returns a `Mail::SpamAssassin::PerMsgStatus' object which
-        can be used to test or manipulate the mail message.
+        Returns a `Mail::SpamAssassin::PerMsgStatus' object which can be
+        used to test or manipulate the mail message.
 
-        Note that the `Mail::SpamAssassin' object can be re-used for
-        further messages without affecting this check; in OO
-        terminology, the `Mail::SpamAssassin' object is a "factory".
+        Note that the `Mail::SpamAssassin' object can be re-used for further
+        messages without affecting this check; in OO terminology, the
+        `Mail::SpamAssassin' object is a "factory". However, if you do this,
+        be sure to call the `finish()' method on the status objects when
+        you're done with them.
 
     $f->report_as_spam ($mail)
         Report a mail, encapsulated in a `Mail::Audit' object, as
-        human-verified spam. This will submit the mail message to
-        live, collaborative, spam-blocker databases, allowing other
-        users to block this message.
+        human-verified spam. This will submit the mail message to live,
+        collaborative, spam-blocker databases, allowing other users to block
+        this message.
 
     $f->reply_with_warning ($mail, $replysender)
-        Reply to the sender of a mail, encapsulated in a
-        `Mail::Audit' object, explaining that their message has been
-        added to spam-tracking databases and deleted. To be used in
-        conjunction with `report_as_spam'. The `$replysender'
-        argument should contain an email address to use as the
-        sender of the reply message.
+        Reply to the sender of a mail, encapsulated in a `Mail::Audit'
+        object, explaining that their message has been added to
+        spam-tracking databases and deleted. To be used in conjunction with
+        `report_as_spam'. The `$replysender' argument should contain an
+        email address to use as the sender of the reply message.
 
     $text = $f->remove_spamassassin_markup ($mail)
-        Returns the text of the message, with any SpamAssassin-added
-        text (such as the report, or X-Spam-Status headers)
-        stripped.
+        Returns the text of the message, with any SpamAssassin-added text
+        (such as the report, or X-Spam-Status headers) stripped.
 
 PREREQUISITES
     `Mail::Audit' `Mail::Internet'
@@ -113,8 +109,8 @@ COPYRIGHT
     SpamAssassin is distributed under Perl's Artistic license.
 
 AVAILABILITY
-    The latest version of this library is likely to be available
-    from CPAN as well as:
+    The latest version of this library is likely to be available from CPAN
+    as well as:
 
       http://spamassassin.taint.org/
 

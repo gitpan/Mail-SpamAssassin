@@ -1,205 +1,159 @@
 <HTML>
 <HEAD>
 <TITLE>Mail::SpamAssassin - Mail::Audit spam detector plugin</TITLE>
-<LINK REV="made" HREF="mailto:feedback@suse.de">
+<LINK REV="made" HREF="mailto:bhcompile@stripples.devel.redhat.com">
 </HEAD>
 
 <BODY>
 
+<A NAME="__index__"></A>
 <!-- INDEX BEGIN -->
 
 <UL>
 
-	<LI><A HREF="#NAME">NAME</A>
-	<LI><A HREF="#SYNOPSIS">SYNOPSIS</A>
-	<LI><A HREF="#DESCRIPTION">DESCRIPTION</A>
-	<LI><A HREF="#METHODS">METHODS</A>
-	<LI><A HREF="#PREREQUISITES">PREREQUISITES</A>
-	<LI><A HREF="#COREQUISITES">COREQUISITES</A>
-	<LI><A HREF="#MORE_DOCUMENTATION">MORE DOCUMENTATION</A>
-	<LI><A HREF="#SEE_ALSO">SEE ALSO</A>
-	<LI><A HREF="#AUTHOR">AUTHOR</A>
-	<LI><A HREF="#COPYRIGHT">COPYRIGHT</A>
-	<LI><A HREF="#AVAILABILITY">AVAILABILITY</A>
+	<LI><A HREF="#name">NAME</A></LI>
+	<LI><A HREF="#synopsis">SYNOPSIS</A></LI>
+	<LI><A HREF="#description">DESCRIPTION</A></LI>
+	<LI><A HREF="#methods">METHODS</A></LI>
+	<LI><A HREF="#prerequisites">PREREQUISITES</A></LI>
+	<LI><A HREF="#corequisites">COREQUISITES</A></LI>
+	<LI><A HREF="#more documentation">MORE DOCUMENTATION</A></LI>
+	<LI><A HREF="#see also">SEE ALSO</A></LI>
+	<LI><A HREF="#author">AUTHOR</A></LI>
+	<LI><A HREF="#copyright">COPYRIGHT</A></LI>
+	<LI><A HREF="#availability">AVAILABILITY</A></LI>
 </UL>
 <!-- INDEX END -->
 
 <HR>
 <P>
-<H1><A NAME="NAME">NAME</A></H1>
-<P>
-Mail::SpamAssassin - Mail::Audit spam detector plugin
-
+<H1><A NAME="name">NAME</A></H1>
+<P>Mail::SpamAssassin - Mail::Audit spam detector plugin</P>
 <P>
 <HR>
-<H1><A NAME="SYNOPSIS">SYNOPSIS</A></H1>
-<P>
-<PRE>  my $mail = Mail::Audit-&gt;new();
-</PRE>
-<P>
-<PRE>  my $spamtest = Mail::SpamAssassin-&gt;new();
-  my $status = $spamtest-&gt;check ($mail);
-</PRE>
-<P>
-<PRE>  if ($status-&gt;is_spam ()) {
+<H1><A NAME="synopsis">SYNOPSIS</A></H1>
+<PRE>
+  my $mail = Mail::Audit-&gt;new();</PRE>
+<PRE>
+  my $spamtest = Mail::SpamAssassin-&gt;new();
+  my $status = $spamtest-&gt;check ($mail);</PRE>
+<PRE>
+  if ($status-&gt;is_spam ()) {
     $status-&gt;rewrite_mail ();
-    $mail-&gt;accept(&quot;spamfolder&quot;);
-</PRE>
-<P>
-<PRE>  } else {
+    $mail-&gt;accept(&quot;spamfolder&quot;);</PRE>
+<PRE>
+  } else {
     $mail-&gt;accept();            # to default incoming mailbox
   }
-  ...
-</PRE>
+  ...</PRE>
 <P>
 <HR>
-<H1><A NAME="DESCRIPTION">DESCRIPTION</A></H1>
-<P>
-Mail::SpamAssassin is a Mail::Audit plugin to identify spam using text
-analysis and several internet-based realtime blacklists.
-
-<P>
-Using its rule base, it uses a wide range of heuristic tests on mail
-headers and body text to identify ``spam'', also known as unsolicited
-commercial email.
-
-<P>
-Once identified, the mail can then be optionally tagged as spam for later
-filtering using the user's own mail user-agent application.
-
-<P>
-This module implements a Mail::Audit plugin, allowing SpamAssassin to be
-used in a Mail::Audit filter. If you wish to use a command-line filter
-tool, try the <EM>spamassassin</EM> tool provided.
-
-<P>
-SpamAssassin also includes support for reporting spam messages to
-collaborative filtering databases, such as Vipul's Razor ( <A
-HREF="http://razor.sourceforge.net/">http://razor.sourceforge.net/</A> ).
-
+<H1><A NAME="description">DESCRIPTION</A></H1>
+<P>Mail::SpamAssassin is a Mail::Audit plugin to identify spam using text
+analysis and several internet-based realtime blacklists.</P>
+<P>Using its rule base, it uses a wide range of heuristic tests on mail headers
+and body text to identify ``spam'', also known as unsolicited commercial email.</P>
+<P>Once identified, the mail can then be optionally tagged as spam for later
+filtering using the user's own mail user-agent application.</P>
+<P>This module implements a Mail::Audit plugin, allowing SpamAssassin to be used
+in a Mail::Audit filter.  If you wish to use a command-line filter tool,
+try the <CODE>spamassassin</CODE> or <CODE>spamd</CODE> tools provided.</P>
+<P>SpamAssassin also includes support for reporting spam messages to collaborative
+filtering databases, such as Vipul's Razor ( <A HREF="http://razor.sourceforge.net/">http://razor.sourceforge.net/</A> ).</P>
 <P>
 <HR>
-<H1><A NAME="METHODS">METHODS</A></H1>
+<H1><A NAME="methods">METHODS</A></H1>
 <DL>
-<DT><STRONG><A NAME="item__f">$f = new Mail::SpamAssassin( [ { opt =&gt; val, ... } ] )</A></STRONG><DD>
-<P>
-Constructs a new <CODE>Mail::SpamAssassin</CODE> object. You may pass the following attribute-value pairs to the
-constructor.
-
+<DT><STRONG><A NAME="item_SpamAssassin">$f = new Mail::SpamAssassin( [ { opt =&gt; val, ... } ] )</A></STRONG><BR>
+<DD>
+Constructs a new <CODE>Mail::SpamAssassin</CODE> object.  You may pass the
+following attribute-value pairs to the constructor.
 <DL>
-<DT><STRONG><A NAME="item_rules_filename">rules_filename</A></STRONG><DD>
-<P>
+<DT><STRONG><A NAME="item_rules_filename">rules_filename</A></STRONG><BR>
+<DD>
 The filename to load spam-identifying rules from. (optional)
-
-<DT><STRONG><A NAME="item_userprefs_filename">userprefs_filename</A></STRONG><DD>
-<P>
+<P></P>
+<DT><STRONG><A NAME="item_userprefs_filename">userprefs_filename</A></STRONG><BR>
+<DD>
 The filename to load preferences from. (optional)
-
-<DT><STRONG><A NAME="item_config_text">config_text</A></STRONG><DD>
-<P>
-The text of all rules and preferences. If you prefer not to load the rules
-from files, read them in yourself and set this instead.
-
-<P>
-If none of rules_filename, userprefs_filename, or config_text is set, the <CODE>Mail::SpamAssassin</CODE> module will search for the configuration files in the usual installed
-locations.
-
-<DT><STRONG><A NAME="item_local_tests_only">local_tests_only</A></STRONG><DD>
-<P>
+<P></P>
+<DT><STRONG><A NAME="item_config_text">config_text</A></STRONG><BR>
+<DD>
+The text of all rules and preferences.  If you prefer not to load the rules
+from files, read them in yourself and set this instead.  As a result, this will
+override the settings for <A HREF="#item_rules_filename"><CODE>rules_filename</CODE></A> and <A HREF="#item_userprefs_filename"><CODE>userprefs_filename</CODE></A>.
+<P></P>
+<DT><STRONG><A NAME="item_local_tests_only">local_tests_only</A></STRONG><BR>
+<DD>
 If set to 1, no tests that require internet access will be performed.
-
-</DL>
-<DT><STRONG><A NAME="item__status">$status = $f-&gt;check ($mail)</A></STRONG><DD>
-<P>
-Check a mail, encapsulated in a <CODE>Mail::Audit</CODE> object, to determine if it is spam or not.
-
-<P>
-Returns a <CODE>Mail::SpamAssassin::PerMsgStatus</CODE> object which can be used to test or manipulate the mail message.
-
-<P>
-Note that the <CODE>Mail::SpamAssassin</CODE> object can be re-used for further messages without affecting this check; in
-OO terminology, the <CODE>Mail::SpamAssassin</CODE>
-object is a ``factory''.
-
-<DT><STRONG><A NAME="item__f_report_as_spam">$f-&gt;report_as_spam ($mail)</A></STRONG><DD>
-<P>
-Report a mail, encapsulated in a <CODE>Mail::Audit</CODE> object, as human-verified spam. This will submit the mail message to live,
-collaborative, spam-blocker databases, allowing other users to block this
-message.
-
-<DT><STRONG><A NAME="item__f_reply_with_warning">$f-&gt;reply_with_warning ($mail, $replysender)</A></STRONG><DD>
-<P>
-Reply to the sender of a mail, encapsulated in a <CODE>Mail::Audit</CODE> object, explaining that their message has been added to spam-tracking
-databases and deleted. To be used in conjunction with <CODE>report_as_spam</CODE>. The
-<CODE>$replysender</CODE> argument should contain an email address to use as the sender of the reply
-message.
-
-<DT><STRONG><A NAME="item__text">$text = $f-&gt;remove_spamassassin_markup ($mail)</A></STRONG><DD>
-<P>
-Returns the text of the message, with any SpamAssassin-added text (such as
-the report, or X-Spam-Status headers) stripped.
-
-</DL>
-<P>
-<HR>
-<H1><A NAME="PREREQUISITES">PREREQUISITES</A></H1>
-<P>
-<CODE>Mail::Audit</CODE>
-
-<CODE>Mail::Internet</CODE>
-
-
-
+<P></P></DL>
+<P>If none of <A HREF="#item_rules_filename"><CODE>rules_filename</CODE></A>, <A HREF="#item_userprefs_filename"><CODE>userprefs_filename</CODE></A>, or <A HREF="#item_config_text"><CODE>config_text</CODE></A> is set,
+the <CODE>Mail::SpamAssassin</CODE> module will search for the configuration files in the
+usual installed locations.</P>
+<DT><STRONG><A NAME="item_check">$status = $f-&gt;check ($mail)</A></STRONG><BR>
+<DD>
+Check a mail, encapsulated in a <CODE>Mail::Audit</CODE> object, to determine if
+it is spam or not.
+<P>Returns a <CODE>Mail::SpamAssassin::PerMsgStatus</CODE> object which can be
+used to test or manipulate the mail message.</P>
+<P>Note that the <CODE>Mail::SpamAssassin</CODE> object can be re-used for further messages
+without affecting this check; in OO terminology, the <CODE>Mail::SpamAssassin</CODE>
+object is a ``factory''.   However, if you do this, be sure to call the
+<CODE>finish()</CODE> method on the status objects when you're done with them.</P>
+<P></P>
+<DT><STRONG><A NAME="item_report_as_spam">$f-&gt;report_as_spam ($mail)</A></STRONG><BR>
+<DD>
+Report a mail, encapsulated in a <CODE>Mail::Audit</CODE> object, as human-verified spam.
+This will submit the mail message to live, collaborative, spam-blocker
+databases, allowing other users to block this message.
+<P></P>
+<DT><STRONG><A NAME="item_reply_with_warning">$f-&gt;reply_with_warning ($mail, $replysender)</A></STRONG><BR>
+<DD>
+Reply to the sender of a mail, encapsulated in a <CODE>Mail::Audit</CODE> object,
+explaining that their message has been added to spam-tracking databases
+and deleted.  To be used in conjunction with <A HREF="#item_report_as_spam"><CODE>report_as_spam</CODE></A>.  The
+<CODE>$replysender</CODE> argument should contain an email address to use as the
+sender of the reply message.
+<P></P>
+<DT><STRONG><A NAME="item_remove_spamassassin_markup">$text = $f-&gt;remove_spamassassin_markup ($mail)</A></STRONG><BR>
+<DD>
+Returns the text of the message, with any SpamAssassin-added text (such
+as the report, or X-Spam-Status headers) stripped.
+<P></P></DL>
 <P>
 <HR>
-<H1><A NAME="COREQUISITES">COREQUISITES</A></H1>
-<P>
-<CODE>Net::DNS</CODE>
-
-
-
+<H1><A NAME="prerequisites">PREREQUISITES</A></H1>
+<P><CODE>Mail::Audit</CODE>
+<CODE>Mail::Internet</CODE></P>
 <P>
 <HR>
-<H1><A NAME="MORE_DOCUMENTATION">MORE DOCUMENTATION</A></H1>
-<P>
-See also <A
-HREF="http://spamassassin.taint.org/">http://spamassassin.taint.org/</A>
-for more information.
-
+<H1><A NAME="corequisites">COREQUISITES</A></H1>
+<P><CODE>Net::DNS</CODE></P>
 <P>
 <HR>
-<H1><A NAME="SEE_ALSO">SEE ALSO</A></H1>
-<P>
-<CODE>Mail::SpamAssassin::PerMsgStatus</CODE>
-
-<CODE>spamassassin</CODE>
-
-
-
+<H1><A NAME="more documentation">MORE DOCUMENTATION</A></H1>
+<P>See also <A HREF="http://spamassassin.taint.org/">http://spamassassin.taint.org/</A> for more information.</P>
 <P>
 <HR>
-<H1><A NAME="AUTHOR">AUTHOR</A></H1>
-<P>
-Justin Mason &lt;jm /at/ jmason.org&gt;
-
-
-
+<H1><A NAME="see also">SEE ALSO</A></H1>
+<P><CODE>Mail::SpamAssassin::PerMsgStatus</CODE>
+<CODE>spamassassin</CODE></P>
 <P>
 <HR>
-<H1><A NAME="COPYRIGHT">COPYRIGHT</A></H1>
-<P>
-SpamAssassin is distributed under Perl's Artistic license.
-
+<H1><A NAME="author">AUTHOR</A></H1>
+<P>Justin Mason &lt;jm /at/ jmason.org&gt;</P>
 <P>
 <HR>
-<H1><A NAME="AVAILABILITY">AVAILABILITY</A></H1>
+<H1><A NAME="copyright">COPYRIGHT</A></H1>
+<P>SpamAssassin is distributed under Perl's Artistic license.</P>
 <P>
-The latest version of this library is likely to be available from CPAN as
-well as:
+<HR>
+<H1><A NAME="availability">AVAILABILITY</A></H1>
+<P>The latest version of this library is likely to be available from CPAN
+as well as:</P>
+<PRE>
+  <A HREF="http://spamassassin.taint.org/">http://spamassassin.taint.org/</A></PRE>
 
-<P>
-<PRE>  <A HREF="http://spamassassin.taint.org/">http://spamassassin.taint.org/</A>
-</PRE>
 </BODY>
 
 </HTML>

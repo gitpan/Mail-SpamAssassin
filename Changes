@@ -1,3 +1,379 @@
+2001-10-25 06:00  jmason
+
+	* Makefile.PL, TODO: last-minute mods
+
+2001-10-25 05:52  jmason
+
+	* spamd/spamc.c: argh, kill solaris now
+
+2001-10-25 05:50  jmason
+
+	* Makefile.PL, spamd/spamc.c: replaced portability-nightmare
+	inet_aton with inet_addr
+
+2001-10-25 05:11  jmason
+
+	* spamd/spamc.c: changed inet_aton to inet_pton for Solaris support
+
+2001-10-25 04:00  jmason
+
+	* Makefile.PL: updated Makefile.PL, hopefully with correct
+	portability stuff to build spamc
+
+2001-10-25 03:25  jmason
+
+	* spamd/spamc.c: fixed minor typo that MacOS compiler didn't like
+
+2001-10-25 03:06  jmason
+
+	* lib/Mail/SpamAssassin/Dns.pm, masses/RUNME, masses/evolve.cxx,
+	masses/logs-to-c, spamd/spamc.c: rewrote connection code in spamc;
+	pretty sure it's portable now
+
+2001-10-24 07:57  jmason
+
+	* lib/Mail/SpamAssassin.pm: fixed bug handling DOS line-endings in
+	-d
+
+2001-10-24 06:50  jmason
+
+	* spamd/spamc.c: made sure spamc copies errno before calling
+	syslog()
+
+2001-10-24 06:48  jmason
+
+	* spamassassin.cf: reverted to 1.55 version of cf file
+
+2001-10-24 06:16  hughescr
+
+	* spamd/spamc.c: Ha!
+
+2001-10-24 06:07  jmason
+
+	* spamd/spamd.raw: commented 'local-tests-only'
+
+2001-10-24 06:06  jmason
+
+	* spamd/spamd.raw: mod
+
+2001-10-24 05:55  jmason
+
+	* spamd/spamc.c: changed spamc comments to use /* instead of //
+
+2001-10-24 05:52  jmason
+
+	* spamd/spamc.c: added syslogging to spamc as well
+
+2001-10-24 03:20  jmason
+
+	* spamassassin.cf, masses/evolve.cxx, masses/logs-to-c,
+	masses/mass-check, masses/mk-baseline-results: cf updated with GA
+	scores for new tests. redundant code removed from
+	mk-baseline-results
+
+2001-10-24 00:07  hughescr
+
+	* Makefile.PL, spamassassin.raw, spamd/spamc.pod, spamd/spamd.raw:
+	Doc cleanup -- call me anal
+
+2001-10-23 20:04  hughescr
+
+	* Makefile.PL: Fix POD manpage generation for spamc.pod
+
+2001-10-23 18:22  hughescr
+
+	* TODO: spamd/spamc implemented!
+
+2001-10-23 18:12  hughescr
+
+	* spamd/spamd.raw: Made spamd a well-behaved daemon
+
+2001-10-23 18:03  hughescr
+
+	* spamd/spamd.raw: Protocol checking in spamd, syslogging in spamd
+
+2001-10-23 18:02  hughescr
+
+	* spamd/spamc.c: Error in args to snprintf
+
+2001-10-23 17:05  hughescr
+
+	* spamd/spamd.raw: Argh!  Ok, got it now
+
+2001-10-23 17:04  hughescr
+
+	* spamd/spamd.raw: Editted spamd instead of spamd.raw
+
+2001-10-23 17:00  hughescr
+
+	* spamd/: README, spamc.c, spamc.pod, spamd.raw: spam[cd] now with
+	exit codes
+
+2001-10-23 14:32  hughescr
+
+	* Makefile.PL: Added CFLAGS=-g to makefile
+
+2001-10-23 11:06  jmason
+
+	* lib/Mail/: SpamAssassin.pm, SpamAssassin/PerMsgStatus.pm: minor
+	pod tweaks
+
+2001-10-23 07:27  jmason
+
+	* lib/Mail/SpamAssassin/EvalTests.pm,
+	lib/Mail/SpamAssassin/PerMsgStatus.pm, t/forged_rcvd.t,
+	t/nonspam.t, t/spam.t, t/strip2.t, t/stripmarkup.t: a little bit of
+	profiling and optimisation
+
+2001-10-23 06:46  jmason
+
+	* spamassassin.cf: added a couple of new tests
+
+2001-10-23 03:03  jmason
+
+	* fixpath.pl: removed -T flag from spamd
+
+2001-10-23 02:36  jmason
+
+	* README: updated README to credit Craig
+
+2001-10-23 02:30  jmason
+
+	* spamassassin.cf: updated cf file with releasable scores
+
+2001-10-22 12:00  jmason
+
+	* spamassassin.cf, masses/evolve.cxx: updated with yet more new
+	scores
+
+2001-10-22 02:35  jmason
+
+	* spamassassin.cf, masses/RUNME, masses/evolve.cxx,
+	masses/logs-to-c, masses/mass-check, masses/mk-baseline-results,
+	masses/rewrite-cf-with-new-scores: updated with new GA scores
+
+2001-10-20 08:11  jmason
+
+	* spamd/spamd: spamd/spamd removed AGAIN
+
+2001-10-20 08:06  jmason
+
+	* build/: update_devel, update_devel: updated build_devel
+
+2001-10-20 08:01  jmason
+
+	* build/: update_devel, update_devel: updated build_devel
+
+2001-10-20 07:55  jmason
+
+	* Changes, build/update_devel: updated update_devel
+
+2001-10-20 07:51  jmason
+
+	* build/update_devel: added POD doc for spamc
+
+2001-10-20 07:45  jmason
+
+	* spamassassin.cf: added catch for the Nigerian scam
+
+2001-10-20 07:38  jmason
+
+	* MANIFEST, MANIFEST.SKIP, Makefile.PL, spamassassin.raw,
+	lib/Mail/SpamAssassin.pm, lib/Mail/SpamAssassin/PerMsgStatus.pm,
+	spamd/spamc.c, spamd/spamc.pod, spamd/spamd, spamd/spamd.raw: added
+	POD doc for spamc
+
+2001-10-20 07:21  jmason
+
+	* .cvsignore, spamd/.cvsignore: fixed .cvsignore
+
+2001-10-20 07:20  jmason
+
+	* MANIFEST.SKIP, README, spamd/Makefile, spamd/spamd,
+	spamd/spamd.raw: removed now-obsolete spamd Makefile
+
+2001-10-20 07:11  jmason
+
+	* MANIFEST, Makefile.PL, spamd/Makefile, spamd/spamd,
+	spamd/spamd.raw: spamd and spamc are now built from top-lvel
+	Makefile.PL; added some POD doco to spamd
+
+2001-10-20 06:53  jmason
+
+	* spamd/spamd: added finish() call to spamd
+
+2001-10-20 06:51  jmason
+
+	* spamd/README: spamd README: added newlines
+
+2001-10-20 06:50  jmason
+
+	* MANIFEST, masses/perturb.c, masses/perturb.pl, masses/summarise:
+	updated MANIFEST for spamd
+
+2001-10-20 06:49  jmason
+
+	* lib/Mail/SpamAssassin.pm, lib/Mail/SpamAssassin/PerMsgStatus.pm,
+	masses/mass-check: added finish method to PerMsgStatus object, to
+	allow objects to be garbage-collected. Tip from Matt Sergeant
+
+2001-10-20 06:32  jmason
+
+	* MANIFEST, MANIFEST.SKIP: updated MANIFEST
+
+2001-10-20 06:30  jmason
+
+	* README, spamassassin.cf, spamassassin.raw,
+	lib/Mail/SpamAssassin.pm, lib/Mail/SpamAssassin/Conf.pm,
+	lib/Mail/SpamAssassin/Dns.pm, lib/Mail/SpamAssassin/EvalTests.pm,
+	lib/Mail/SpamAssassin/PerMsgStatus.pm,
+	lib/Mail/SpamAssassin/Reporter.pm, t/spam.t: added support for
+	razor-agents 1.06
+
+2001-10-17 05:54  jmason
+
+	* .cvsignore, spamassassin.cf, masses/.cvsignore: fixing
+
+2001-10-17 05:53  jmason
+
+	* spamassassin.cf, masses/RUNME, masses/evolve.cxx,
+	masses/hit-frequencies, masses/logs-to-c, masses/mass-check,
+	masses/mk-baseline-results: updated with new GA-optimised scores
+
+2001-10-16 20:08  hughescr
+
+	* spamd/README: Added spamd/spamc README
+
+2001-10-16 19:17  hughescr
+
+	* spamd/: spamc.c, spamd: Changed default port number
+
+2001-10-16 19:09  hughescr
+
+	* License, spamd/Makefile, spamd/spamc.c, spamd/spamd: Rolling in
+	spamd
+
+2001-10-16 04:23  jmason
+
+	* MANIFEST.SKIP, spamassassin.cf, masses/Makefile, masses/RUNME,
+	masses/evolve.cxx, masses/hit-frequencies, masses/mass-check,
+	masses/rewrite-cf-with-new-scores: updated after last night's GA
+	run
+
+2001-10-15 12:01  jmason
+
+	* masses/.cvsignore: upd
+
+2001-10-15 12:00  jmason
+
+	* masses/: .cvsignore, uniq-scores: update
+
+2001-10-15 11:58  jmason
+
+	* MANIFEST.SKIP, README, spamassassin.cf,
+	lib/Mail/SpamAssassin/Dns.pm, lib/Mail/SpamAssassin/EvalTests.pm,
+	masses/.cvsignore, masses/Makefile, masses/RUNME,
+	masses/evolve.cxx: added new, first draft of GA-optimised scores
+
+2001-10-12 07:26  jmason
+
+	* spamassassin.raw: updated pod
+
+2001-10-12 06:12  jmason
+
+	* masses/mass-check: added Cyrus mailbox mass-check support, patch
+	from Craig R Hughes
+
+2001-10-12 06:09  jmason
+
+	* lib/Mail/SpamAssassin/PerMsgStatus.pm, masses/README,
+	masses/continual_evolve.sh, masses/evolve.cxx: whitelist bug fixed,
+	thanks to Bill O'Hanlon
+
+2001-10-11 13:52  jmason
+
+	* MANIFEST, MANIFEST.SKIP, masses/README: updated readme
+
+2001-10-11 11:38  jmason
+
+	* masses/.cvsignore: upd .cvsignore
+
+2001-10-11 11:37  jmason
+
+	* masses/: evolve.cxx, hit-frequencies, mk-baseline-results: added
+	2 more utils
+
+2001-10-11 09:25  jmason
+
+	* MANIFEST, spamassassin.cf, lib/Mail/SpamAssassin/EvalTests.pm,
+	masses/README, t/data/nice/base64.txt, t/data/spam/base64.txt:
+	updated base64 test
+
+2001-10-11 07:38  jmason
+
+	* spamassassin.cf, lib/Mail/SpamAssassin/Conf.pm,
+	lib/Mail/SpamAssassin/PerMsgStatus.pm: added support for
+	non-integer scores
+
+2001-10-11 07:34  jmason
+
+	* masses/evolve.cxx: try using SteadyState GA again
+
+2001-10-11 07:33  jmason
+
+	* masses/README: rescoring README finished
+
+2001-10-11 07:30  jmason
+
+	* MANIFEST, MANIFEST.SKIP: updated MANIFEST
+
+2001-10-11 07:27  jmason
+
+	* masses/: README, mass-check, .cvsignore, .cvsignore, Makefile,
+	README, continual_evolve.sh, evolve.cxx, logs-to-c, .cvsignore:
+	added genetic algorithm to rescore tests
+
+2001-10-10 08:51  jmason
+
+	* MANIFEST.SKIP, masses/.cvsignore, masses/perturb.c,
+	masses/perturb.pl, t/strip2.t: added score-searching script and C
+	code
+
+2001-10-10 06:40  jmason
+
+	* MANIFEST: MANIFEST was incorrect
+
+2001-10-10 05:27  jmason
+
+	* MANIFEST, lib/Mail/SpamAssassin/EvalTests.pm: reduced retry sleep
+	time on From address MX-check
+
+2001-10-05 02:40  jmason
+
+	* README: removed hb from procmail line
+
+2001-10-04 02:16  jmason
+
+	* README: fixed procmail recipe
+
+2001-10-02 08:06  jmason
+
+	* lib/Mail/SpamAssassin/: Dns.pm, PerMsgStatus.pm: fixed Razor
+	checks
+
+2001-10-02 04:22  jmason
+
+	* README, spamassassin.cf, build/update_devel, build/update_stable,
+	lib/Mail/SpamAssassin/PerMsgStatus.pm: added bl.spamcop.net test
+
+2001-09-30 04:33  jmason
+
+	* MANIFEST, masses/README: added masses README
+
+2001-09-30 04:28  jmason
+
+	* lib/Mail/SpamAssassin.pm: released 1.2
+
 2001-09-30 04:18  jmason
 
 	* lib/Mail/SpamAssassin/EvalTests.pm: incorrect counting of 8bit

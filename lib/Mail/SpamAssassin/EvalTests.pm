@@ -42,11 +42,12 @@ sub check_for_from_mx {
   # First check that DNS is available, if not do not perform this check
   return 0 unless $self->is_dns_available();
 
-  # Try 5 times to protect against temporary outages
+  # Try 5 times to protect against temporary outages.  sleep between checks
+  # to give the DNS a chance to recover.
   for my $i (1..5) {
     my @mx = mx ($self->{res}, $_);
     if (scalar @mx >= 0) { return 0; }
-    sleep 10;
+    sleep 5;
   }
 
   return 1;
@@ -72,9 +73,8 @@ sub check_for_bad_dialup_ips {
 
 sub check_for_from_to_equivalence {
   my ($self) = @_;
-  my $from = $self->get ('From');
-  my $to = $self->get ('To');
-
+  my $from = $self->get ('From:addr');
+  my $to = $self->get ('To:addr');
   ($from eq $to);
 }
 
@@ -145,6 +145,29 @@ sub check_from_in_whitelist {
 
 ###########################################################################
 
+sub check_lots_of_cc_lines {
+  my ($self) = @_;
+  local ($_);
+  $_ = $self->get ('Cc');
+  my @count = /\n/gs;
+  if ($#count > 20) { return 1; }
+  return 0;
+}
+
+###########################################################################
+
+sub check_from_name_eq_from_address {
+  my ($self) = @_;
+  local ($_);
+  $_ = $self->get ('From');
+
+  /\"(\S+)\" <(\S+)>/ or return 0;
+  if ($1 eq $2) { return 1; }
+  return 0;
+}
+
+###########################################################################
+
 sub check_rbl {
   my ($self, $rbl_domain) = @_;
   local ($_);
@@ -205,7 +228,7 @@ sub check_for_unique_subject_id {
   $_ = $self->get ('Subject');
 
   my $id = undef;
-  if (/[-_\s]{7,}([-a-z0-9]{4,})$/
+  if (/[-_\.\s]{7,}([-a-z0-9]{4,})$/
 	|| /\s+[-:\#\(\[]+([-a-zA-Z0-9]{4,})[\]\)]+$/
 	|| /\s+[-:\#]([-a-zA-Z0-9]{4,})$/)
   {
@@ -224,6 +247,10 @@ sub word_is_in_dictionary {
   local ($_);
 
   $word =~ tr/A-Z/a-z/;
+  $word =~ s/^\s+//;
+  $word =~ s/\s+$//;
+  return 0 if ($word =~ /[^a-z]/);
+
   if (!open (DICT, "</usr/dict/words") &&
   	!open (DICT, "</usr/share/dict/words"))
   {
@@ -231,6 +258,10 @@ sub word_is_in_dictionary {
     return 1;		# fail safe
   }
 
+  # use DICT as a file, rather than making a hash; keeps memory
+  # usage down, and the OS should cache the file contents anyway
+  # if the system has enough memory.
+  #
   while (<DICT>) {
     chop; if ($word eq $_) { close DICT; return 1; }
   }
@@ -252,10 +283,29 @@ sub check_for_very_long_text {
 ###########################################################################
 
 sub check_razor {
-  my ($self, $fulltext, $site) = @_;
+  my ($self, $fulltext) = @_;
 
   return 0 unless ($self->is_razor_available());
-  return $self->razor_lookup ($site, $fulltext);
+  return $self->razor_lookup ($fulltext);
+}
+
+sub check_for_base64_enc_text {
+  my ($self, $fulltext) = @_;
+
+  if ($$fulltext =~ /\n\n.{0,100}(
+    	\nContent-Type:\stext\/.{0,200}
+	\nContent-Transfer-Encoding:\sbase64.*?
+	\n\n)/isx)
+  {
+    my $otherhdrs = $1;
+    if ($otherhdrs =~ /^Content-Disposition: (?:attachment|inline)/im) {
+      return 0;		# text attachments are OK
+    } else {
+      return 1;		# no Content-Disp: header found, it's bad
+    }
+  }
+
+  return 0;
 }
 
 ###########################################################################
