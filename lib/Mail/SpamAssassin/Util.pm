@@ -2,13 +2,21 @@
 # functions that stand alone, without requiring a $self object,
 # Portability functions especially.
 
-# Copyright (C) 2003  Justin Mason
-# Copyright (C) 2003  Daniel Quinlan
-#
-# This program is free software; you can redistribute it and/or modify
-# it under the terms of either the Artistic License or the GNU General
-# Public License as published by the Free Software Foundation; either
-# version 2 of the License, or (at your option) any later version.
+# <@LICENSE>
+# Copyright 2004 Apache Software Foundation
+# 
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+# 
+#     http://www.apache.org/licenses/LICENSE-2.0
+# 
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# </@LICENSE>
 
 package Mail::SpamAssassin::Util;
 
@@ -23,16 +31,20 @@ use vars qw (
 require Exporter;
 
 @ISA = qw(Exporter);
-@EXPORT = qw(local_tz);
+@EXPORT = qw(local_tz base64_decode);
 
 use Mail::SpamAssassin;
+use Mail::SpamAssassin::Util::RegistrarBoundaries;
 
 use Config;
 use File::Spec;
 use Time::Local;
 use Sys::Hostname (); # don't import hostname() into this namespace!
+use Fcntl;
 
+###########################################################################
 
+use constant HAS_MIME_BASE64 => eval { require MIME::Base64; };
 use constant RUNNING_ON_WINDOWS => ($^O =~ /^(?:mswin|dos|os2)/oi);
 
 ###########################################################################
@@ -101,8 +113,10 @@ use constant RUNNING_ON_WINDOWS => ($^O =~ /^(?:mswin|dos|os2)/oi);
 	dbg("PATH included '$dir', which isn't a directory, dropping.");
 	next;
       }
-      elsif (($stat[2]&2) == 1) {
-        # We could be more paranoid and check all of the parent directories as well
+      elsif (($stat[2]&2) != 0) {
+        # World-Writable directories are considered insecure.
+        # We could be more paranoid and check all of the parent directories as well,
+        # but it's good for now.
 	dbg("PATH included '$dir', which is world writable, dropping.");
 	next;
       }
@@ -180,6 +194,25 @@ sub untaint_file_path {
   }
 }
 
+sub untaint_hostname {
+  my ($host) = @_;
+
+  return unless defined($host);
+  return '' if ($host eq '');
+
+  # from RFC 1035, but allowing domains starting with numbers
+  my $label = q/[A-Za-z\d](?:[A-Za-z\d-]{0,61}[A-Za-z\d])?/;
+  my $domain = qq<$label(?:\.$label)*>;
+
+  if (length($host) <= 255 && $host =~ /^($domain)$/) {
+    return $1;
+  }
+  else {
+    warn "security: cannot untaint hostname: \"$host\"\n";
+    return $host;
+  }
+}
+
 # This sub takes a scalar or a reference to an array, hash, scalar or another
 # reference and recursively untaints all its values (and keys if it's a
 # reference to a hash). It should be used with caution as blindly untainting
@@ -231,8 +264,10 @@ my %TZ = (
 	'UT'   => '+0000',
 	'UTC'  => '+0000',
 	# US and Canada
+	'NDT'  => '-0230',
 	'AST'  => '-0400',
 	'ADT'  => '-0300',
+	'NST'  => '-0330',
 	'EST'  => '-0500',
 	'EDT'  => '-0400',
 	'CST'  => '-0600',
@@ -244,7 +279,9 @@ my %TZ = (
 	'HST'  => '-1000',
 	'AKST' => '-0900',
 	'AKDT' => '-0800',
-	# European
+	'HADT' => '-0900',
+	'HAST' => '-1000',
+	# Europe
 	'GMT'  => '+0000',
 	'BST'  => '+0100',
 	'IST'  => '+0100',
@@ -256,12 +293,30 @@ my %TZ = (
 	'EEST' => '+0300',
 	'MSK'  => '+0300',
 	'MSD'  => '+0400',
-	# Australian
+	'MET'  => '+0100',
+	'MEZ'  => '+0100',
+	'MEST' => '+0200',
+	'MESZ' => '+0200',
+	# South America
+	'BRST' => '-0200',
+	'BRT'  => '-0300',
+	# Australia
 	'AEST' => '+1000',
 	'AEDT' => '+1100',
 	'ACST' => '+0930',
 	'ACDT' => '+1030',
 	'AWST' => '+0800',
+	# New Zealand
+	'NZST' => '+1200',
+	'NZDT' => '+1300',
+	# Asia
+	'JST'  => '+0900',
+	'KST'  => '+0900',
+	'HKT'  => '+0800',
+	'SGT'  => '+0800',
+	'PHT'  => '+0800',
+	# Middle East
+	'IDT'  => '+0300',
 	);
 
 # month mappings
@@ -317,8 +372,8 @@ sub parse_rfc822_date {
   if (s/ ([-+]\d{4}) / /) {
     $tzoff = $1;
   }
-  # UT, GMT, and North American timezones
-  elsif (s/\b([A-Z]{2,4})\b/ / && exists $TZ{$1}) {
+  # common timezones
+  elsif (s/\b([A-Z]{2,4}(?:-DST)?)\b/ / && exists $TZ{$1}) {
     $tzoff = $TZ{$1};
   }
   # all other timezones are considered equivalent to "-0000"
@@ -333,7 +388,7 @@ sub parse_rfc822_date {
 
   my $time;
   eval {		# could croak
-    $time = timegm ($ss, $mm, $hh, $dd, $mmm-1, $yyyy);
+    $time = timegm($ss, $mm, $hh, $dd, $mmm-1, $yyyy);
   };
 
   if ($@) {
@@ -364,6 +419,59 @@ sub time_to_rfc822_date {
 
   sprintf("%s, %02d %s %4d %02d:%02d:%02d %s", $days[$localtime[6]], $localtime[3],
     $months[$localtime[4]], @localtime[5,2,1,0], local_tz());
+}
+
+###########################################################################
+
+# Some base64 decoders will remove intermediate "=" characters, others
+# will stop decoding on the first "=" character, this one translates "="
+# characters to null.
+sub base64_decode {
+  local $_ = shift;
+
+  s/\s+//g;
+  if (HAS_MIME_BASE64 && (length($_) % 4 == 0) &&
+      m|^(?:[A-Za-z0-9+/=]{2,}={0,2})$|s)
+  {
+    # only use MIME::Base64 when the XS and Perl are both correct and quiet
+    s/(=+)(?!=*$)/'A' x length($1)/ge;
+    return MIME::Base64::decode_base64($_);
+  }
+  tr|A-Za-z0-9+/=||cd;			# remove non-base64 characters
+  s/=+$//;				# remove terminating padding
+  tr|A-Za-z0-9+/=| -_`|;		# translate to uuencode
+  s/.$// if (length($_) % 4 == 1);	# unpack cannot cope with extra byte
+
+  my $length;
+  my $out = '';
+  while ($_) {
+    $length = (length >= 84) ? 84 : length;
+    $out .= unpack("u", chr(32 + $length * 3/4) . substr($_, 0, $length, ''));
+  }
+
+  return $out;
+}
+
+sub qp_decode {
+  local $_ = shift;
+
+  s/\=\r?\n//gs;
+  s/\=([0-9a-fA-F]{2})/chr(hex($1))/ge;
+  return $_;
+}
+
+sub base64_encode {
+  local $_ = shift;
+
+  if (HAS_MIME_BASE64) {
+    return MIME::Base64::encode_base64($_);
+  }
+
+  $_ = pack("u57", $_);
+  s/^.//mg;
+  tr| -_`|A-Za-z0-9+/A|;
+  s/(A+)$/'=' x length $1/e;
+  return $_;
 }
 
 ###########################################################################
@@ -465,7 +573,470 @@ sub extract_ipv4_addr_from_string {
 
 ###########################################################################
 
+sub ips_match_in_16_mask {
+  my ($ipset1, $ipset2) = @_;
+  my ($b1, $b2);
+
+  foreach my $ip1 (@{$ipset1}) {
+    foreach my $ip2 (@{$ipset2}) {
+      next unless defined $ip1;
+      next unless defined $ip2;
+      next unless ($ip1 =~ /^(\d+\.\d+\.)/); $b1 = $1;
+      next unless ($ip2 =~ /^(\d+\.\d+\.)/); $b2 = $1;
+      if ($b1 eq $b2) { return 1; }
+    }
+  }
+
+  return 0;
+}
+
+sub ips_match_in_24_mask {
+  my ($ipset1, $ipset2) = @_;
+  my ($b1, $b2);
+
+  foreach my $ip1 (@{$ipset1}) {
+    foreach my $ip2 (@{$ipset2}) {
+      next unless defined $ip1;
+      next unless defined $ip2;
+      next unless ($ip1 =~ /^(\d+\.\d+\.\d+\.)/); $b1 = $1;
+      next unless ($ip2 =~ /^(\d+\.\d+\.\d+\.)/); $b2 = $1;
+      if ($b1 eq $b2) { return 1; }
+    }
+  }
+
+  return 0;
+}
+
+###########################################################################
+
 sub my_inet_aton { unpack("N", pack("C4", split(/\./, $_[0]))) }
+
+###########################################################################
+
+sub parse_content_type {
+  # This routine is typically called by passing a
+  # get_header("content-type") which passes all content-type headers
+  # (array context).  If there are multiple Content-type headers (invalid,
+  # but it happens), MUAs seem to take the last one and so that's what we
+  # should do here.
+  #
+  my $ct = $_[-1] || 'text/plain; charset=us-ascii';
+
+  # This could be made a bit more rigid ...
+  # the actual ABNF, BTW (RFC 1521, section 7.2.1):
+  # boundary := 0*69<bchars> bcharsnospace
+  # bchars := bcharsnospace / " "
+  # bcharsnospace :=    DIGIT / ALPHA / "'" / "(" / ")" / "+" /"_"
+  #               / "," / "-" / "." / "/" / ":" / "=" / "?"
+  #
+  # The boundary may be surrounded by double quotes.
+  # "the boundary parameter, which consists of 1 to 70 characters from
+  # a set of characters known to be very robust through email gateways,
+  # and NOT ending with white space.  (If a boundary appears to end with
+  # white space, the white space must be presumed to have been added by
+  # a gateway, and must be deleted.)"
+  #
+  # In practice:
+  # - MUAs accept whitespace before and after the "=" character
+  # - only an opening double quote seems to be needed
+  # - non-quoted boundaries should be followed by space, ";", or end of line
+  # - blank boundaries seem to not work
+  my($boundary) = $ct =~ m!\bboundary\s*=\s*("[^"]+|[^\s";]+(?=[\s;]|$))!i;
+
+  # remove double-quotes in boundary (should only be at start and end)
+  $boundary =~ tr/"//d if defined $boundary;
+
+  # Parse out the charset and name, if they exist.
+  my($charset) = $ct =~ /\bcharset\s*=\s*["']?(.*?)["']?(?:;|$)/i;
+  my($name) = $ct =~ /\b(?:file)?name\s*=\s*["']?(.*?)["']?(?:;|$)/i;
+
+  # Get the type out ...
+  $ct =~ s/;.*$//;                    # strip everything after first semi-colon
+  $ct =~ s@^([^/]+(?:/[^/]*)?).*$@$1@;	# only something/something ...
+  $ct =~ tr/\000-\040\177-\377\042\050\051\054\056\072-\077\100\133-\135//d;    # strip inappropriate chars
+  $ct = lc $ct;
+
+  return wantarray ? ($ct,$boundary,$charset,$name) : $ct;
+}
+
+###########################################################################
+
+sub url_encode {
+  my ($url) = @_;
+  my (@characters) = split(/(\%[0-9a-fA-F]{2})/, $url);
+  my (@unencoded) = ();
+  my (@encoded) = ();
+
+  foreach (@characters) {
+    # escaped character set ...
+    if (/\%[0-9a-fA-F]{2}/) {
+      # IF it is in the range of 0x00-0x20 or 0x7f-0xff
+      #    or it is one of  "<", ">", """, "#", "%",
+      #                     ";", "/", "?", ":", "@", "=" or "&"
+      # THEN preserve its encoding
+      unless (/(20|7f|[0189a-fA-F][0-9a-fA-F])/i) {
+	s/\%([2-7][0-9a-fA-F])/sprintf "%c", hex($1)/e;
+	push(@unencoded, $_);
+      }
+    }
+    # other stuff
+    else {
+      # 0x00-0x20, 0x7f-0xff, <, >, and " ... "
+      s/([\000-\040\177-\377\074\076\042])
+	  /push(@encoded, $1) && sprintf "%%%02x", unpack("C",$1)/egx;
+    }
+  }
+  if (wantarray) {
+    return(join("", @characters), join("", @unencoded), join("", @encoded));
+  }
+  else {
+    return join("", @characters);
+  }
+}
+
+###########################################################################
+
+=item $module = first_available_module (@module_list)
+
+Return the first module that can be successfully loaded with C<require>
+from the list.  Returns C<undef> if none are available.
+
+This is used instead of C<AnyDBM_File> as follows:
+
+  my $module = Mail::SpamAssassin::Util::first_available_module
+                        (qw(DB_File GDBM_File NDBM_File SDBM_File));
+  tie %hash, $module, $path, [... args];
+
+Note that C<SDBM_File> is guaranteed to be present, since it comes
+with Perl.
+
+=cut
+
+sub first_available_module {
+  my (@packages) = @_;
+  foreach my $mod (@packages) {
+    if (eval 'require '.$mod.'; 1; ') {
+      return $mod;
+    }
+  }
+  undef;
+}
+
+###########################################################################
+
+# thanks to http://www2.picante.com:81/~gtaylor/autobuse/ for this
+# code.
+sub secure_tmpfile {
+  my $tmpdir = Mail::SpamAssassin::Util::untaint_file_path(
+                 File::Spec->tmpdir()
+               );
+  if (!$tmpdir) {
+    die "Cannot find a temporary directory! set TMP or TMPDIR in env";
+  }
+
+  my ($reportfile,$tmpfile);
+  my $umask = umask 077;
+  do {
+    # we do not rely on the obscurity of this name for security...
+    # we use a average-quality PRG since this is all we need
+    my $suffix = join ('',
+                       (0..9, 'A'..'Z','a'..'z')[rand 62,
+                                                 rand 62,
+                                                 rand 62,
+                                                 rand 62,
+                                                 rand 62,
+                                                 rand 62]);
+    $reportfile = File::Spec->catfile(
+                    $tmpdir,
+                    join ('.',
+                      "spamassassin",
+                      $$,
+                      $suffix,
+                      "tmp",
+                    )
+                  );
+    # ...rather, we require O_EXCL|O_CREAT to guarantee us proper
+    # ownership of our file; read the open(2) man page.
+  } while (! sysopen ($tmpfile, $reportfile, O_RDWR|O_CREAT|O_EXCL, 0600));
+  umask $umask;
+
+  return ($reportfile, $tmpfile);
+}
+
+###########################################################################
+
+sub uri_to_domain {
+  my ($uri) = @_;
+
+  #return if ($uri =~ /^mailto:/i);	# not mailto's, please (TODO?)
+
+  # Javascript is not going to help us, so return.
+  return if ($uri =~ /^javascript:/i);
+
+  $uri =~ s,#.*$,,gs;			# drop fragment
+  $uri =~ s#^[a-z]+:/{0,2}##gsi;	# drop the protocol
+  $uri =~ s,^[^/]*\@,,gs;		# username/passwd
+  $uri =~ s,[/\?\&].*$,,gs;		# path/cgi params
+  $uri =~ s,:\d+$,,gs;			# port
+
+  return if $uri =~ /\%/;         # skip undecoded URIs.
+  # we'll see the decoded version as well
+
+  # keep IPs intact
+  if ($uri !~ /^\d+\.\d+\.\d+\.\d+$/) { 
+    # get rid of hostname part of domain, understanding delegation
+    $uri = Mail::SpamAssassin::Util::RegistrarBoundaries::trim_domain($uri);
+
+    # ignore invalid domains
+    return unless
+        (Mail::SpamAssassin::Util::RegistrarBoundaries::is_domain_valid($uri));
+  }
+  
+  # $uri is now the domain only
+  return lc $uri;
+}
+
+sub uri_list_canonify {
+  my(@uris) = @_;
+
+  # make sure we catch bad encoding tricks
+  my @nuris = ();
+  for my $uri (@uris) {
+    next if $uri =~ /^mailto:/i;
+
+    # sometimes we catch URLs on multiple lines
+    $uri =~ s/\n//g;
+
+    # URLs won't have leading/trailing whitespace
+    $uri =~ s/^\s+//;
+    $uri =~ s/\s+$//;
+
+    # Make a copy so we don't trash the original
+    my $nuri = $uri;
+
+    if ($nuri !~ /^[a-z0-9_-]+:/i) {    # no scheme?
+      $nuri = "http://".$nuri;          # assume HTTP, as a web browser would
+      # TODO: should we be sensitive to the type of attribute ("href", etc.)
+      # this appears in?  IMO, no, since as far as I can see it doesn't
+      # make any difference; most browsers/MUAs will assume a default
+      # of HTTP.
+    }
+
+    # http:www.foo.biz -> http://www.foo.biz
+    $nuri =~ s#^(https?:)/{0,2}#$1//#i;
+
+    # http://www.foo.biz?id=3 -> http://www.foo.biz/?id=3
+    $nuri =~ s/^(https?:\/\/[^\/\?]+)\?/$1\/?/;
+
+    # deal with encoding of chars, this is just the set of printable
+    # chars minus ' ' (that is, dec 33-126, hex 21-7e)
+    $nuri =~ s/\&\#0*(3[3-9]|[4-9]\d|1[01]\d|12[0-6]);/sprintf "%c",$1/ge;
+    $nuri =~ s/\&\#x0*(2[1-9]|[3-6][a-f0-9]|7[0-9a-e]);/sprintf "%c",hex($1)/gei;
+
+    # deal with wierd hostname parts
+    if ($nuri =~ /^(https?:\/\/)([^\/]+)(\.?\/.*)$/i) {
+      my ($proto, $host, $rest) = ($1,$2,$3);
+
+      # remove "www.fakehostname.com@" username part
+      $host =~ s/^[^\@]+\@//gs;
+
+      # deal with 'http://213.172.0x1f.13/'; decode encoded octets
+      if ($host =~ /^([0-9a-fx]*\.)([0-9a-fx]*\.)([0-9a-fx]*\.)([0-9a-fx]*)$/ix)
+      {
+        my (@chunk) = ($1,$2,$3,$4);
+        for my $octet (0 .. 3) {
+          $chunk[$octet] =~ s/^0x([0-9a-f][0-9a-f])/sprintf "%d",hex($1)/gei;
+        }
+        my $parsed = join ('', $proto, @chunk, $rest);
+        if ($parsed ne $nuri) { push(@nuris, $parsed); }
+      }
+
+      # "http://0x7f000001/"
+      if ($host =~ /^0x[0-9a-f]+$/i) {
+        $host =~ s/^0x([0-9a-f]+)/sprintf "%d",hex($1)/gei;
+        $host = decode_ulong_to_ip ($host);
+        my $parsed = join ('', $proto, $host, $rest);
+        push(@nuris, $parsed);
+      }
+
+      # "http://1113343453/"
+      if ($host =~ /^[0-9]+$/) {
+        $host = decode_ulong_to_ip ($host);
+        my $parsed = join ('', $proto, $host, $rest);
+        push(@nuris, $parsed);
+      }
+    }
+
+    ($nuri) = Mail::SpamAssassin::Util::url_encode($nuri);
+    if ($nuri ne $uri) {
+      push(@nuris, $nuri);
+    }
+
+    # deal with http redirectors.  strip off one level of redirector
+    # and add back to the array.  the foreach loop will go over those
+    # and deal appropriately.
+    # bug 3308: redirectors like yahoo only need one '/' ... <grrr>
+    if ($nuri =~ m{^https?://.+?(https?:/{0,2}.+)$}i) {
+      push(@uris, $1);
+    }
+  }
+
+  # remove duplicates, merge nuris and uris
+  my %uris = map { $_ => 1 } @uris, @nuris;
+
+  return keys %uris;
+}
+
+sub decode_ulong_to_ip {
+  return join(".", unpack("CCCC",pack("H*", sprintf "%08lx", $_[0])));
+}
+
+###########################################################################
+
+sub first_date {
+  my (@strings) = @_;
+
+  foreach my $string (@strings) {
+    my $time = parse_rfc822_date($string);
+    return $time if defined($time) && $time;
+  }
+  return undef;
+}
+
+sub receive_date {
+  my ($header) = @_;
+
+  $header ||= '';
+  $header =~ s/\n[ \t]+/ /gs;	# fix continuation lines
+
+  my @rcvd = ($header =~ /^Received:(.*)/img);
+  my @local;
+  my $time;
+
+  if (@rcvd) {
+    if ($rcvd[0] =~ /qmail \d+ invoked by uid \d+/ ||
+	$rcvd[0] =~ /\bfrom (?:localhost\s|(?:\S+ ){1,2}\S*\b127\.0\.0\.1\b)/)
+    {
+      push @local, (shift @rcvd);
+    }
+    if (@rcvd && ($rcvd[0] =~ m/\bby localhost with \w+ \(fetchmail-[\d.]+/)) {
+      push @local, (shift @rcvd);
+    }
+    elsif (@local) {
+      unshift @rcvd, (shift @local);
+    }
+  }
+
+  if (@rcvd) {
+    $time = first_date(shift @rcvd);
+    return $time if defined($time);
+  }
+  if (@local) {
+    $time = first_date(@local);
+    return $time if defined($time);
+  }
+  if ($header =~ /^(?:From|X-From-Line:)\s+(.+)$/im) {
+    my $string = $1;
+    $string .= " ".local_tz() unless $string =~ /(?:[-+]\d{4}|\b[A-Z]{2,4}\b)/;
+    $time = first_date($string);
+    return $time if defined($time);
+  }
+  if (@rcvd) {
+    $time = first_date(@rcvd);
+    return $time if defined($time);
+  }
+  if ($header =~ /^Resent-Date:\s*(.+)$/im) {
+    $time = first_date($1);
+    return $time if defined($time);
+  }
+  if ($header =~ /^Date:\s*(.+)$/im) {
+    $time = first_date($1);
+    return $time if defined($time);
+  }
+
+  return time;
+}
+
+###########################################################################
+
+sub setuid_to_euid {
+  return if (RUNNING_ON_WINDOWS);
+
+  # remember the target uid, the first number is the important one
+  my $touid = $>;
+
+  if ($< != $touid) {
+    dbg ("changing real uid from $< to match effective uid $touid");
+    $< = $touid; # try the simple method first
+
+    # bug 3586: Some perl versions, typically those on a BSD-based
+    # platform, require RUID==EUID (and presumably == 0) before $<
+    # can be changed.  So this is a kluge for us to get around the
+    # typical spamd-ish behavior of: $< = 0, $> = someuid ...
+    if ( $< != $touid ) {
+      dbg("initial attempt to change real uid failed, trying BSD workaround");
+
+      $> = $<;			# revert euid to ruid
+      $< = $touid;		# change ruid to target
+      $> = $touid;		# change euid back to target
+    }
+
+    # Check that we have now accomplished the setuid
+    if ($< != $touid) {
+      die "setuid $< to $touid failed!";
+    }
+  }
+}
+
+# helper app command-line open
+sub helper_app_pipe_open {
+  if (RUNNING_ON_WINDOWS) {
+    return helper_app_pipe_open_windows (@_);
+  } else {
+    return helper_app_pipe_open_unix (@_);
+  }
+}
+
+sub helper_app_pipe_open_windows {
+  my ($fh, $stdinfile, $duperr2out, @cmdline) = @_;
+
+  # use a traditional open(FOO, "cmd |")
+  my $cmd = join(' ', @cmdline);
+  if ($stdinfile) { $cmd .= " < '$stdinfile'"; }
+  if ($duperr2out) { $cmd .= " 2>&1"; }
+  return open ($fh, $cmd.'|');
+}
+
+sub helper_app_pipe_open_unix {
+  my ($fh, $stdinfile, $duperr2out, @cmdline) = @_;
+
+  # do a fork-open, so we can setuid() back
+  my $pid = open ($fh, '-|');
+  if (!defined $pid) {
+    die "cannot fork: $!";
+  }
+
+  if ($pid != 0) {
+    return $pid;          # parent process; return the child pid
+  }
+
+  # else, child process.  go setuid...
+  setuid_to_euid();
+  dbg ("setuid: helper proc $$: ruid=$< euid=$>");
+
+  if ($stdinfile) {              # < $tmpfile
+    close STDIN;
+    open (STDIN, "<$stdinfile") or die "cannot open $stdinfile: $!";
+  }
+
+  if ($duperr2out) {             # 2>&1
+    close STDERR;
+    open STDERR, ">&STDOUT" or die "dup STDOUT failed: $!";
+  }
+
+  exec @cmdline;
+  die "exec failed: $!";
+}
 
 ###########################################################################
 

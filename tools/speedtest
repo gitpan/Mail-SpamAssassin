@@ -1,17 +1,25 @@
 #!/usr/bin/perl -w
-############################################################
-# The code in this file is copyright 2001 by Craig Hughes  #
-# It is licensed for use with the SpamAssassin distribution#
-# under the terms of the Perl Artistic License, the text of#
-# which is included as the file named "License"            #
-############################################################
+# <@LICENSE>
+# Copyright 2004 Apache Software Foundation
+# 
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+# 
+#     http://www.apache.org/licenses/LICENSE-2.0
+# 
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# </@LICENSE>
 
 use strict;
 
 use FindBin;
 use lib "$FindBin::Bin/../lib";
 use Mail::SpamAssassin;
-use Mail::SpamAssassin::NoMailAudit;
 
 my $spamtest = Mail::SpamAssassin->new({
     rules_filename => 'rules',
@@ -23,13 +31,12 @@ my $spamtest = Mail::SpamAssassin->new({
 
 for($_=shift @ARGV; defined($_); $_=shift @ARGV)
 {
-	open (STDIN, "<$_");
-	    my @msglines = (<STDIN>);
-	    my $mail = Mail::SpamAssassin::NoMailAudit->new (
-                                data => \@msglines
-                         );
+	open (FILE, "<$_");
+	my $mail = Mail::SpamAssassin->parse (\*FILE);
+	close(FILE);
 
-	    my $status = $spamtest->check($mail);
-            print $status->get_hits," $_ ",$status->get_names_of_tests_hit,"\n";
-	    $status->finish();
+	my $status = $spamtest->check($mail);
+        print $status->get_hits," $_ ",$status->get_names_of_tests_hit,"\n";
+	$status->finish();
+	$mail->finish();
 }

@@ -4,13 +4,21 @@
 # the next update. Use @@LOCAL_RULES_DIR@@/local.cf instead.
 # See 'perldoc Mail::SpamAssassin::Conf' for details.
 #
-# This program is free software; you can redistribute it and/or modify
-# it under the terms of either the Artistic License or the GNU General
-# Public License as published by the Free Software Foundation; either
-# version 1 of the License, or (at your option) any later version.
-#
-# See the file "License" in the top level of the SpamAssassin source
-# distribution for more details.
+# <@LICENSE>
+# Copyright 2004 Apache Software Foundation
+# 
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+# 
+#     http://www.apache.org/licenses/LICENSE-2.0
+# 
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# </@LICENSE>
 #
 ###########################################################################
 
@@ -19,13 +27,13 @@
 clear_report_template
 report Spam detection software, running on the system "_HOSTNAME_", has
 report identified this incoming email as possible spam.  The original message
-report has been attached to this so you can view it (if it isn't spam) or block
+report has been attached to this so you can view it (if it isn't spam) or label
 report similar future email.  If you have any questions, see
 report _CONTACTADDRESS_ for details.
 report 
 report Content preview:  _PREVIEW_
 report 
-report Content analysis details:   (_HITS_ points, _REQD_ required)
+report Content analysis details:   (_SCORE_ points, _REQD_ required)
 report
 report " pts rule name              description"
 report  ---- ---------------------- --------------------------------------------------
@@ -35,32 +43,6 @@ report _SUMMARY_
 # A 'contact address' users should contact for more info. (replaces
 # _CONTACTADDRESS_ above if present)
 report_contact	@@CONTACT_ADDRESS@@
-
-
-###########################################################################
-# and now, a template for spam-trap responses.  If the first few lines
-# begin with "Xxxxxx: " where Xxxxxx is a header, they'll be used as
-# headers.
-
-clear_spamtrap_template
-spamtrap Subject: this address is no longer available
-
-spamtrap [this message has been automatically generated]
-spamtrap 
-spamtrap Please note that this address is no longer in use, and nowadays
-spamtrap receives nothing but unsolicited commercial mail.  Accordingly,
-spamtrap any mail sent to it is added to several spam-tracking databases,
-spamtrap then automatically deleted.
-spamtrap
-spamtrap If you genuinely want to contact the owner of the address, please
-spamtrap re-check your contact lists, or search the web, to find their
-spamtrap current e-mail address.
-spamtrap 
-spamtrap The mail you sent is reproduced in full below, for resending to
-spamtrap the correct address.  Sorry for the inconvenience!
-spamtrap 
-spamtrap [-- Signed: the SpamAssassin mail filter]
-spamtrap 
 
 ###########################################################################
 
@@ -121,20 +103,19 @@ add_header spam Flag _YESNOCAPS_
 #X-Spam-Level: *************
 add_header all Level _STARS(*)_
 
-#X-Spam-Status: Yes, hits=14.0 required=5.0 tests=BAYES_99,CALL_FREE
+#X-Spam-Status: Yes, score=14.0 required=5.0 tests=BAYES_99,CALL_FREE
 #        DATE_IN_PAST_12_24,DCC_CHECK,DRASTIC_REDUCED,FROM_HAS_MIXED_NUMS
 #        FROM_HAS_MIXED_NUMS3,HOME_EMPLOYMENT,INVALID_DATE,INVALID_MSGID
 #        LINES_OF_YELLING,MSGID_HAS_NO_AT,NO_REAL_NAME,ONCE_IN_LIFETIME
-#        REMOVE_SUBJ,SMTPD_IN_RCVD,T_INVALID_DATE_2,T_INVALID_DATE_HMS
 #        UNDISC_RECIPS autolearn=spam version=2.60-cvs
-add_header all Status "_YESNO_, hits=_HITS_ required=_REQD_ tests=_TESTS_ autolearn=_AUTOLEARN_ version=_VERSION_"
+add_header all Status "_YESNO_, score=_SCORE_ required=_REQD_ tests=_TESTS_ autolearn=_AUTOLEARN_ version=_VERSION_"
 
 ###########################################################################
 # Default prefs values: users can override these in their 
 # ~/.spamassassin/user_prefs files.
 
-# How many hits before a mail is considered spam.
-required_hits           5
+# How many points before a mail is considered spam.
+required_score           5
 
 # Mail using locales used in these country codes will not be marked
 # as being possibly spam in a foreign language.
@@ -161,9 +142,4 @@ report_safe           1
 # unless the user override them. See the user_prefs.template file for
 # explanations.
 
-# rewrite_subject       0
-# subject_tag           *****SPAM*****
-# skip_rbl_checks       0
-# check_mx_attempts     2
-# check_mx_delay        5
 

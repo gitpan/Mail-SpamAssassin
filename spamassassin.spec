@@ -3,11 +3,13 @@
 # namely, making the tools RPM for masses, sql, and tools, and
 # the perl-Mail-SpamAssassin rpm for the modules only.
 
-#%include        /usr/lib/rpm/macros.perl
+# the version in the tar name
+%define real_version 3.0.0
+# the display version number
+%define version %{real_version}
 
 %define _unpackaged_files_terminate_build       0
 %define _missing_doc_files_terminate_build      0
-
 %define perl_sitelib %(eval "`%{__perl} -V:installsitelib`"; echo "$installsitelib")
 
 %define pdir    Mail
@@ -17,9 +19,6 @@
 Summary:        a spam filter for email which can be invoked from mail delivery agents
 Summary(pl):    Filtr antyspamowy, przeznaczony dla programów dostarczaj±cych pocztê (MDA)
 Group:          Applications/Mail
-
-%define real_version 2.64
-%define version %{real_version}
 
 # Release number can be specified with rpmbuild --define 'release SOMETHING' ...
 # If no such --define is used, the release number is 1.
@@ -43,14 +42,16 @@ Group:          Applications/Mail
 Name: %{name}
 Version: %{version}
 Release: %{release}
-License: Artistic
-URL: http://spamassassin.org/
-Source: http://spamassassin.org/released/Mail-SpamAssassin-%{real_version}.tar%{srcext}
+License: Apache License 2.0
+URL: http://spamassassin.apache.org/
+Source: http://spamassassin.apache.org/released/Mail-SpamAssassin-%{real_version}.tar%{srcext}
 Buildroot: %{_tmppath}/%{name}-root
 Prefix: %{_prefix}
 Prereq: /sbin/chkconfig
 Requires: perl-Mail-SpamAssassin = %{version}-%{release}
 Distribution: SpamAssassin
+Requires: perl(Pod::Usage)
+BuildRequires: perl >= 5.6.1 perl(Digest::SHA1)
 
 %define __find_provides /usr/lib/rpm/find-provides.perl
 %define __find_requires /usr/lib/rpm/find-requires.perl
@@ -59,23 +60,11 @@ Distribution: SpamAssassin
 SpamAssassin provides you with a way to reduce, if not completely eliminate,
 Unsolicited Bulk Email (or "spam") from your incoming email.  It can be
 invoked by a MDA such as sendmail or postfix, or can be called from a procmail
-script, .forward file, etc.  It uses a genetic-algorithm-evolved scoring system
+script, .forward file, etc.  It uses a perceptron-optimized scoring system
 to identify messages which look spammy, then adds headers to the message so
 they can be filtered by the user's mail reading software.  This distribution
-includes the spamd/spamc components which considerably speeds processing of
+includes the spamc/spamc components which considerably speeds processing of
 mail.
-
-%description -l pl
-SpamAssassin udostêpnia Ci mo¿liwo¶æ zredukowania, je¶li nie
-kompletnego wyeliminowania Niezamawianej Komercyjnej Poczty
-(Unsolicited Bulk Email, spamu) z Twojej poczty. Mo¿e byæ
-wywo³ywany z MDA, np. Sendmaila czy Postfixa, lub z pliku ~/.forward
-itp. U¿ywa ogólnego algorytmu oceniania w celu identyfikacji
-wiadomo¶ci, które wygl±daj± na spam, po czym dodaje nag³ówki do
-wiadomo¶ci, umo¿liwiaj±c filtrowanie przez oprogramowanie u¿ytkownika.
-Ta dystrybucja zawiera programy spamd/spamc, umo¿liwiaj±ce
-uruchomienie serwera, co znacznie przyspieszy proces przetwarzania
-poczty.
 
 %package tools
 Summary:        Miscellaneous tools and documentation for SpamAssassin
@@ -87,17 +76,11 @@ Requires: perl-Mail-SpamAssassin = %{version}-%{release}
 Miscellaneous tools and documentation from various authors, distributed
 with SpamAssassin.  See /usr/share/doc/SpamAssassin-tools-*/.
 
-%description tools -l pl
-Przeró¿ne narzêdzia, dystrybuowane razem z SpamAssassin. Zobacz
-/usr/share/doc/SpamAssassin-tools-*/.
-
 %package -n perl-Mail-SpamAssassin
 Summary:        %{pdir}::%{pnam} -- SpamAssassin e-mail filter Perl modules
 Summary(pl):    %{pdir}::%{pnam} -- modu³y Perla filtru poczty SpamAssassin
-Requires: perl >= 5.004 perl(Pod::Usage) perl(HTML::Parser)
-# PLD version:
-#Group:          Development/Languages/Perl
-# Red Hat version:
+Requires: perl >= 5.6.1 perl(HTML::Parser) perl(Digest::SHA1)
+BuildRequires: perl >= 5.6.1 perl(HTML::Parser) perl(Digest::SHA1)
 Group:          Development/Libraries
 
 %description -n perl-Mail-SpamAssassin
@@ -108,16 +91,6 @@ wide range of heuristic tests on mail headers and body text to identify
 mail can then be optionally tagged as spam for later filtering using the
 user's own mail user-agent application.
 
-%description -n perl-Mail-SpamAssassin -l pl
-Mail::SpamAssassin jest pluginem dla Mail::Audit, s³u¿±cym do
-identyfikacji spamu przy u¿yciu analizy zawarto¶ci i/lub internetowych
-czarnych list. Do zidentyfikowania jako ,,spam'' stosuje szeroki
-zakres testów heurystycznych na nag³ówkach i tre¶ci, posi³kuj±c siê
-stworzon± wcze¶niej baz± regu³. Po zidentyfikowaniu, poczta mo¿e byæ
-oznaczona jako spam w celu pó¼niejszego wyfiltrowania, np. przy u¿yciu
-aplikacji do czytania poczty.
-
-
 %prep
 %setup -q -n %{pdir}-%{pnam}-%{real_version}
 
@@ -125,7 +98,7 @@ aplikacji do czytania poczty.
 CFLAGS="$RPM_OPT_FLAGS"; export CFLAGS
 %{__perl} Makefile.PL PREFIX=%{_prefix} SYSCONFDIR=%{_sysconfdir} DESTDIR=$RPM_BUILD_ROOT < /dev/null
 %{__make}
-%{__make} spamd/libspamc.so
+%{__make} spamc/libspamc.so
 
 %install
 [ "$RPM_BUILD_ROOT" != "/" ] && rm -rf $RPM_BUILD_ROOT
@@ -141,8 +114,11 @@ CFLAGS="$RPM_OPT_FLAGS"; export CFLAGS
 install -d %buildroot/%{initdir}
 install -d %buildroot/%{_includedir}
 install -m 0755 spamd/redhat-rc-script.sh %buildroot/%{initdir}/spamassassin
-install -m 0644 spamd/libspamc.so %buildroot/%{_libdir}
-install -m 0644 spamd/libspamc.h %buildroot/%{_includedir}/libspamc.h
+install -m 0644 spamc/libspamc.so %buildroot/%{_libdir}
+install -m 0644 spamc/libspamc.h %buildroot/%{_includedir}/libspamc.h
+
+# Do this so that the spamd README file has a different name ...
+%{__mv} spamd/README spamd/README.spamd
 
 mkdir -p %{buildroot}/etc/mail/spamassassin
 
@@ -150,7 +126,7 @@ mkdir -p %{buildroot}/etc/mail/spamassassin
 
 %files 
 %defattr(-,root,root)
-%doc README Changes sample-nonspam.txt sample-spam.txt spamd/README.spamd INSTALL BUGS COPYRIGHT License TRADEMARK USAGE Razor2.patch
+%doc README Changes sample-nonspam.txt sample-spam.txt spamd/README.spamd INSTALL BUGS LICENSE TRADEMARK USAGE
 %attr(755,root,root) %{_bindir}/*
 %attr(644,root,root) %{_includedir}/*
 %attr(644,root,root) %{_libdir}/*.so
@@ -198,6 +174,9 @@ if [ "$1" -ge "1" ]; then
 fi
 
 %changelog
+* Fri May 28 2004 Theo Van Dinter <felicity@kluge.net> 3.0.0-1
+- updated to 3.0.0
+
 * Sun Sep 28 2003 Theo Van Dinter <felicity@kluge.net> 2.61-1
 - updated to 2.61
 - allow builds of tar.gz or tar.bz2 via the --define "srcext .bz2" option

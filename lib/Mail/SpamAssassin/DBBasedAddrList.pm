@@ -1,14 +1,24 @@
+# <@LICENSE>
+# Copyright 2004 Apache Software Foundation
+# 
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+# 
+#     http://www.apache.org/licenses/LICENSE-2.0
+# 
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# </@LICENSE>
+
 package Mail::SpamAssassin::DBBasedAddrList;
 
 use strict;
 use bytes;
 use Fcntl;
-
-# tell AnyDBM_File to prefer DB_File, if possible.
-# BEGIN { @AnyDBM_File::ISA = qw(DB_File GDBM_File NDBM_File SDBM_File); }
-# off until 3.0; there's lots of existing AWLs out there this breaks.
-
-use AnyDBM_File;
 
 use Mail::SpamAssassin::PersistentAddrList;
 use Mail::SpamAssassin::Util;
@@ -45,6 +55,13 @@ sub new_checker {
 
   my $path;
 
+  my @order = split (' ', $main->{conf}->{auto_whitelist_db_modules});
+  my $dbm_module = Mail::SpamAssassin::Util::first_available_module (@order);
+  if (!$dbm_module) {
+    die "Cannot find a usable DB package from auto_whitelist_db_modules: ".
+	$main->{conf}->{auto_whitelist_db_modules}."\n";
+  }
+
   my $umask = umask 0;
   if(defined($main->{conf}->{auto_whitelist_path})) # if undef then don't worry -- empty hash!
   {
@@ -56,7 +73,7 @@ sub new_checker {
       $self->{locked_file} = $path;
       $self->{is_locked} = 1;
       dbg("Tie-ing to DB file R/W in $path");
-      tie %{$self->{accum}},"AnyDBM_File",$path,
+      tie %{$self->{accum}},$dbm_module,$path,
 		  O_RDWR|O_CREAT,   #open rw w/lock
 		  (oct ($main->{conf}->{auto_whitelist_file_mode}) & 0666)
 	 or goto failed_to_tie;
@@ -64,7 +81,7 @@ sub new_checker {
     } else {
       $self->{is_locked} = 0;
       dbg("Tie-ing to DB file R/O in $path");
-      tie %{$self->{accum}},"AnyDBM_File",$path,
+      tie %{$self->{accum}},$dbm_module,$path,
 		  O_RDONLY,         #open ro w/o lock
 		  (oct ($main->{conf}->{auto_whitelist_file_mode}) & 0666)
 	 or goto failed_to_tie;
@@ -141,12 +158,12 @@ sub remove_entry {
   delete $self->{accum}->{$addr};
   delete $self->{accum}->{$addr.'|totscore'};
 
-  if ($addr =~ /^(.*)\|ip=cmd$/) {
+  if ($addr =~ /^(.*)\|ip=none$/) {
     # it doesn't have an IP attached.
     # try to delete any per-IP entries for this addr as well.
     # could be slow...
     my $mailaddr = $1;
-    my @keys = grep { /^\Q${mailaddr}\E\|ip=(?:\d+\.\d+|none)$/ }
+    my @keys = grep { /^\Q${mailaddr}\E\|ip=\d+\.\d+$/ }
 					keys %{$self->{accum}};
     foreach my $key (@keys) {
       delete $self->{accum}->{$key};

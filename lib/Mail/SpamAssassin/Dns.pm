@@ -1,3 +1,19 @@
+# <@LICENSE>
+# Copyright 2004 Apache Software Foundation
+# 
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+# 
+#     http://www.apache.org/licenses/LICENSE-2.0
+# 
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# </@LICENSE>
+
 package Mail::SpamAssassin::Dns;
 1;
 
@@ -5,18 +21,18 @@ package Mail::SpamAssassin::PerMsgStatus;
 
 use Mail::SpamAssassin::Conf;
 use Mail::SpamAssassin::PerMsgStatus;
+use Mail::SpamAssassin::Constants qw(:ip);
 use File::Spec;
 use IO::Socket;
 use IPC::Open2;
-use POSIX ":sys_wait_h";        # sorry Craig ;)
+use POSIX ":sys_wait_h";
 
 use strict;
 use bytes;
 use Carp;
 
 use vars qw{
-  $KNOWN_BAD_DIALUP_RANGES $IP_IN_RESERVED_RANGE
-  @EXISTING_DOMAINS $IS_DNS_AVAILABLE $VERSION
+  $KNOWN_BAD_DIALUP_RANGES @EXISTING_DOMAINS $IS_DNS_AVAILABLE $VERSION
 };
 
 # use very well-connected domains (fast DNS response, many DNS servers,
@@ -43,63 +59,6 @@ use vars qw{
   w3.org
   yahoo.com
 };
-
-# Initialize a regexp for reserved IPs, i.e. ones that could be
-# used inside a company and be the first or second relay hit by
-# a message. Some companies use these internally and translate
-# them using a NAT firewall. These are listed in the RBL as invalid
-# originators -- which is true, if you receive the mail directly
-# from them; however we do not, so we should ignore them.
-# cf. <http://www.iana.org/assignments/ipv4-address-space>,
-#     <http://duxcw.com/faq/network/privip.htm>,
-#     <http://duxcw.com/faq/network/autoip.htm>,
-#     <ftp://ftp.rfc-editor.org/in-notes/rfc3330.txt>
-#
-# Last update
-#   2003-04-15 Updated - bug 1784
-#   2003-04-07 Justin Mason - removed some now-assigned nets
-#   2002-08-24 Malte S. Stretz - added 172.16/12, 169.254/16
-#   2002-08-23 Justin Mason - added 192.168/16
-#   2002-08-12 Matt Kettler - mail to SpamAssassin-devel
-#              msgid:<5.1.0.14.0.20020812211512.00a33cc0@192.168.50.2>
-#
-$IP_IN_RESERVED_RANGE = qr{^(?:
-  10|                              # 10.0.0.0/8:          Private-Use Networks (see RFC3330) 
-  127|                             # 127/8:               Loopback (see RFC3330) 
-  128\.0|                          # 128.0/16:            Reserved (subject to allocation) (see RFC3330) 
-  169\.254|                        # 169.254/16:          Link Local (APIPA) (see RFC3330) 
-  172\.(?:1[6-9]|2[0-9]|3[01])|    # 172.16-172.31/16:    Private-Use Networks (see RFC3330) 
-  191\.255|                        # 191.255/16:          Reserved (subject to allocation) (see RFC3330) 
-  192\.0\.0|                       # 192.0.0/24:          Reserved (subject to allocation) (see RFC3330) 
-  192\.0\.2|                       # 192.0.2/24:          Test-Net (see RFC3330) 
-  192\.88\.99|                     # 192.88.99/24:        6to4 Relay Anycast (see RFC3330) 
-  192\.168|                        # 192.168.0.0/16:      Private-Use Networks (see RFC3330) 
-  198\.1[89]|                      # 198.18.0.0/15:       Device Benchmark Testing (see RFC3330) 
-  223\.255\.255|                   # 223.255.255.0/24:    Reserved (subject to allocation) (see RFC3330) 
-  [01257]|                         # 0/8:                 "This" Network (see RFC3330) 
-                                   # 1-2/8, 5/8, 7/8:     IANA Reserved 
-
-  2[37]|                           # 23/8, 27/8:          IANA Reserved 
-  3[1679]|                         # 31/8, 36/8, 37/8:    IANA Reserved 
-                                   # 39/8:                Reserved (subject to allocation) (see RFC3330) 
-  4[12]|                           # 41/8, 42/8:          IANA Reserved   
-  5[89]|                           # 58/8, 59/8:          IANA Reserved   
-  7[0-9]|                          # 70-79/8:             IANA Reserved    
-  8[3-9]|                          # 83-89/8:             IANA Reserved   
-  9[0-9]|                          # 90-99/8:             IANA Reserved   
-  1[01][0-9]|                      # 100-119/8:           IANA Reserved   
-  12[0-6]|                         # 120-126/8:           IANA Reserved   
-  17[3-9]|                         # 173-179/8:           IANA Reserved   
-  18[0-7]|                         # 180-187/8:           IANA Reserved   
-  189|                             # 189/8:               IANA Reserved   
-  19[07]|                          # 190/8, 197/8:        IANA Reserved   
-  223|                             # 223/8:               IANA Reserved   
-  22[4-9]|                         # 224-229/8:           Multicast (see RFC3330)  
-  23[0-9]|                         # 230-239/8:           Multicast (see RFC3330)  
-  24[0-9]|                         # 240-249/8:           Reserved for Future Use (see RFC3330) 
-  25[0-5]                          # 250-255/8:           Reserved for Future Use (see RFC3330) 
-
-)\.}x;
 
 $IS_DNS_AVAILABLE = undef;
 
@@ -131,7 +90,7 @@ BEGIN {
     require MIME::Base64;
   };
   eval {
-	require IO::Socket::UNIX;
+    require IO::Socket::UNIX;
   };
 };
 
@@ -147,22 +106,22 @@ sub do_rbl_lookup {
   my ($self, $rule, $set, $type, $server, $host, $subtest) = @_;
 
   # only make a specific query once
-  if (!defined $self->{dnscache}->{$type}->{$host}->[BGSOCK]) {
+  if (!defined $self->{dnspending}->{$type}->{$host}->[BGSOCK]) {
     dbg("rbl: launching DNS $type query for $host in background", "rbl", -1);
     $self->{rbl_launch} = time;
-    $self->{dnscache}->{$type}->{$host}->[BGSOCK] =
+    $self->{dnspending}->{$type}->{$host}->[BGSOCK] =
 	$self->{res}->bgsend($host, $type);
   }
 
   # always add set
-  push @{$self->{dnscache}->{$type}->{$host}->[SETS]}, $set;
+  push @{$self->{dnspending}->{$type}->{$host}->[SETS]}, $set;
 
   # sometimes match or always match
   if (defined $subtest) {
     $self->{dnspost}->{$set}->{$subtest} = $rule;
   }
   else {
-    push @{$self->{dnscache}->{$type}->{$host}->[RULES]}, $rule;
+    push @{$self->{dnspending}->{$type}->{$host}->[RULES]}, $rule;
   }
 }
 
@@ -170,6 +129,19 @@ sub do_rbl_lookup {
 sub register_rbl_subtest {
   my ($self, $rule, $set, $subtest) = @_;
   $self->{dnspost}->{$set}->{$subtest} = $rule;
+}
+
+sub do_dns_lookup {
+  my ($self, $rule, $type, $host) = @_;
+
+  # only make a specific query once
+  if (!defined $self->{dnspending}->{$type}->{$host}->[BGSOCK]) {
+    dbg("dns: launching DNS $type query for $host in background", "rbl", -1);
+    $self->{rbl_launch} = time;
+    $self->{dnspending}->{$type}->{$host}->[BGSOCK] =
+	$self->{res}->bgsend($host, $type);
+  }
+  push @{$self->{dnspending}->{$type}->{$host}->[RULES]}, $rule;
 }
 
 ###########################################################################
@@ -213,11 +185,28 @@ sub process_dnsbl_result {
 
   my $packet = $self->{res}->bgread($query->[BGSOCK]);
   undef $query->[BGSOCK];
-
-  return if !defined $packet;
+  return unless (defined $packet &&
+		 defined $packet->header &&
+		 defined $packet->question &&
+		 defined $packet->answer);
 
   my $question = ($packet->question)[0];
+  return if !defined $question;
+
+  # NO_DNS_FOR_FROM
+  if ($self->{sender_host} &&
+      $question->qname eq $self->{sender_host} &&
+      $question->qtype =~ /^(?:A|MX)$/ &&
+      $packet->header->rcode =~ /^(?:NXDOMAIN|SERVFAIL)$/ &&
+      ++$self->{sender_host_fail} == 2)
+  {
+    for my $rule (@{$query->[RULES]}) {
+      $self->got_hit($rule, "DNS: ");
+    }
+  }
+  # DNSBL tests are here
   foreach my $answer ($packet->answer) {
+    next if !defined $answer;
     # track all responses
     $self->dnsbl_uri($question, $answer);
     # TODO: there are some CNAME returns that might be useful
@@ -247,16 +236,31 @@ sub process_dnsbl_set {
       $self->dnsbl_hit($rule, $question, $answer);
     }
     # senderbase
-    elsif ($set =~ /^senderbase/) {
+    elsif ($subtest =~ s/^sb://) {
+      # SB rules are not available to users
+      if ($self->{conf}->{user_defined_rules}->{$rule}) {
+        dbg ("RBL: skipping rule '$rule': not supported when user-defined");
+        next;
+      }
+
       $rdatastr =~ s/^"?\d+-//;
       $rdatastr =~ s/"$//;
       my %sb = ($rdatastr =~ m/(?:^|\|)(\d+)=([^|]+)/g);
+      my $undef = 0;
       while ($subtest =~ m/\bS(\d+)\b/g) {
+	if (!defined $sb{$1}) {
+	  $undef = 1;
+	  last;
+	}
 	$subtest =~ s/\bS(\d+)\b/\$sb{$1}/;
       }
-      #print STDERR "$subtest\n";
-      #print STDERR "$rdatastr\n";
-      $self->got_hit($rule, "SenderBase: ") if eval "$subtest";
+
+      # untaint. doing the usual $subtest=$1 doesn't work! (bug 3325)
+      $subtest =~ /^(.*)$/;
+      my $untainted = $1;
+      $subtest = $untainted;
+
+      $self->got_hit($rule, "SenderBase: ") if !$undef && eval $subtest;
     }
     # bitmask
     elsif ($subtest =~ /^\d+$/) {
@@ -282,8 +286,9 @@ sub harvest_dnsbl_queries {
   return if !defined $self->{rbl_launch};
 
   my $timeout = $self->{conf}->{rbl_timeout} + $self->{rbl_launch};
-  my @waiting = (values %{ $self->{dnscache}->{A} },
-		 values %{ $self->{dnscache}->{TXT} });
+  my @waiting = (values %{ $self->{dnspending}->{A} },
+		 values %{ $self->{dnspending}->{MX} },
+		 values %{ $self->{dnspending}->{TXT} });
   my @left;
   my $total;
 
@@ -300,6 +305,9 @@ sub harvest_dnsbl_queries {
 	push(@left, $query);
       }
     }
+
+    $self->{main}->call_plugins ("check_tick", { permsgstatus => $self });
+
     last unless @left;
     last if time >= $timeout;
     @waiting = @left;
@@ -313,9 +321,15 @@ sub harvest_dnsbl_queries {
   dbg("RBL: success for " . ($total - @left) . " of $total queries", "rbl", 0);
   # timeouts
   for my $query (@left) {
-    my $sets = join(",", @{$query->[SETS]});
+    my $string = '';
+    if (defined @{$query->[SETS]}) {
+      $string = join(",", grep defined, @{$query->[SETS]});
+    }
+    elsif (defined @{$query->[RULES]}) {
+      $string = join(",", grep defined, @{$query->[RULES]});
+    }
     my $delay = time - $self->{rbl_launch};
-    dbg("RBL: timeout for $sets after $delay seconds", "rbl", 0);
+    dbg("DNS: timeout for $string after $delay seconds", "rbl", 0);
     undef $query->[BGSOCK];
   }
   # register hits
@@ -333,6 +347,7 @@ sub harvest_dnsbl_queries {
     $self->{tag_data}->{RBL} .= "<$dnsuri>" .
 	" [" . join(", ", @{ $answers }) . "]\n";
   }
+
   chomp $self->{tag_data}->{RBL} if defined $self->{tag_data}->{RBL};
 }
 
@@ -341,9 +356,21 @@ sub harvest_dnsbl_queries {
 sub rbl_finish {
   my ($self) = @_;
 
+  foreach my $type (keys %{$self->{dnspending}}) {
+    foreach my $host (keys %{$self->{dnspending}->{$type}}) {
+      if (defined $self->{dnspending}->{$type}->{$host}->[BGSOCK]) {
+	eval {
+	  # ensure the sockets are closed
+	  delete $self->{dnspending}->{$type}->{$host}->[BGSOCK];
+	};
+      }
+    }
+  }
   delete $self->{rbl_launch};
+  delete $self->{dnspending};
+
+  # TODO: do not remove these since they can be retained!
   delete $self->{dnscache};
-  # TODO: do not remove this since it can be retained!
   delete $self->{dnspost};
   delete $self->{dnsresult};
   delete $self->{dnsuri};
@@ -441,6 +468,23 @@ sub razor2_lookup {
 
 	  # if we got here, we're done doing remote stuff, abort the alert
 	  alarm 0;
+
+          # figure out if we have a log file we need to close...
+          if (ref($rc->{logref}) && exists $rc->{logref}->{fd}) {
+            # the fd can be stdout or stderr, so we need to find out if it is
+	    # so we don't close them by accident.  Note: we can't just
+	    # undef the fd here (like the IO::Handle manpage says we can)
+	    # because it won't actually close, unfortunately. :(
+            my $untie = 1;
+            foreach my $log ( *STDOUT{IO}, *STDERR{IO} ) {
+              if ($log == $rc->{logref}->{fd}) {
+                $untie = 0;
+                last;
+              }
+            }
+            close $rc->{logref}->{fd} if ($untie);
+          }
+
 
 	  dbg("Using results from Razor v".$Razor2::Client::Version::VERSION);
 
@@ -607,6 +651,11 @@ sub dccifd_lookup {
     return 0;
   }
 
+  if ($$fulltext eq '') {
+    dbg ("empty message, ignoring DCCifd");
+    return 0;
+  }
+
   if ( ! $self->{conf}->{dcc_home} ) {
 	dbg ("dcc_home not defined, should not get here");
     return 0;
@@ -743,7 +792,12 @@ sub dcc_lookup {
     }
 
     dbg("DCC command: ".join(' ', $path, "-H", $opts, "< '$tmpf'", "2>&1"),'dcc',-1);
-    my $pid = open(DCC, join(' ', $path, "-H", $opts, "< '$tmpf'", "2>&1", '|')) || die "$!\n";
+
+    # my $pid = open(DCC, join(' ', $path, "-H", $opts, "< '$tmpf'", "2>&1", '|')) || die "$!\n";
+    my $pid = Mail::SpamAssassin::Util::helper_app_pipe_open(*DCC,
+                $tmpf, 1, $path, "-H", split(' ', $opts));
+    $pid or die "$!\n";
+
     my @null = <DCC>;
     close DCC;
 
@@ -872,13 +926,16 @@ sub pyzor_lookup {
     # Note: not really tainted, this comes from system conf file.
     my $path = Mail::SpamAssassin::Util::untaint_file_path ($self->{conf}->{pyzor_path});
 
-    my $opts = '';
-    if ( $self->{conf}->{pyzor_options} =~ /^([^\;\'\"\0]+)$/ ) {
-      $opts = $1;
-    }
+    my $opts = $self->{conf}->{pyzor_options};
+    $opts =~ s/[^-A-Za-z0-9 \/_]/_/gs;	# sanitise
  
     dbg("Pyzor command: ".join(' ', $path, $opts, "check", "< '$tmpf'", "2>&1"),'pyzor',-1);
-    my $pid = open(PYZOR, join(' ', $path, $opts, "check", "< '$tmpf'", "2>&1", '|')) || die "$!\n";
+
+    #my $pid = open(PYZOR, join(' ', $path, $opts, "check", "< '$tmpf'", "2>&1", '|')) || die "$!\n";
+    my $pid = Mail::SpamAssassin::Util::helper_app_pipe_open(*PYZOR,
+                $tmpf, 1, $path, split(' ', $opts), "check");
+    $pid or die "$!\n";
+
     $response = <PYZOR>;
     close PYZOR;
 
@@ -952,34 +1009,95 @@ sub load_resolver {
     if (defined $self->{res}) {
       $self->{no_resolver} = 0;
       $self->{res}->retry(1);		# If it fails, it fails
+      $self->{res}->retrans(0);		# If it fails, it fails
       $self->{res}->dnsrch(0);		# ignore domain search-list
       $self->{res}->defnames(0);	# don't append stuff to end of query
+      $self->{res}->tcp_timeout(3);	# timeout of 3 seconds only
+      $self->{res}->udp_timeout(3);	# timeout of 3 seconds only
+      $self->{res}->persistent_tcp(1);
+      $self->{res}->persistent_udp(1);
     }
     1;
   };   #  or warn "eval failed: $@ $!\n";
 
   dbg ("is Net::DNS::Resolver available? " .
        ($self->{no_resolver} ? "no" : "yes"));
+  if (!$self->{no_resolver} && defined $Net::DNS::VERSION) {
+    dbg("Net::DNS version: ".$Net::DNS::VERSION);
+  }
 
   return (!$self->{no_resolver});
+}
+
+sub lookup_ns {
+  my ($self, $dom) = @_;
+
+  return unless $self->load_resolver();
+  return if ($self->server_failed_to_respond_for_domain ($dom));
+
+  my $nsrecords;
+  dbg ("looking up NS for '$dom'");
+
+  if (exists $self->{dnscache}->{NS}->{$dom}) {
+    $nsrecords = $self->{dnscache}->{NS}->{$dom};
+
+  } else {
+    eval {
+      my $query = $self->{res}->search($dom, 'NS');
+      my @nses = ();
+      if ($query) {
+	foreach my $rr ($query->answer) {
+	  if ($rr->type eq "NS") { push (@nses, $rr->nsdname); }
+	}
+      }
+      $nsrecords = $self->{dnscache}->{NS}->{$dom} = [ @nses ];
+    };
+    if ($@) {
+      dbg ("NS lookup failed horribly, perhaps bad resolv.conf setting?");
+      return undef;
+    }
+  }
+
+  $nsrecords;
 }
 
 sub lookup_mx {
   my ($self, $dom) = @_;
 
-  return 0 unless $self->load_resolver();
-  my $ret = 0;
+  return unless $self->load_resolver();
+  return if ($self->server_failed_to_respond_for_domain ($dom));
 
+  my $mxrecords;
   dbg ("looking up MX for '$dom'");
 
-  eval {
-    my @mxrecords = Net::DNS::mx($self->{res}, $dom);
-    $ret = 1 if @mxrecords;
-  };
-  if ($@) {
-    dbg ("MX lookup failed horribly, perhaps bad resolv.conf setting?");
-    return undef;
+  if (exists $self->{dnscache}->{MX}->{$dom}) {
+    $mxrecords = $self->{dnscache}->{MX}->{$dom};
+
+  } else {
+    eval {
+      my @recs = Net::DNS::mx ($self->{res}, $dom);
+
+      # just keep the IPs, drop the preferences.
+      my @ips = map { $_->exchange } @recs;
+
+      $mxrecords = $self->{dnscache}->{MX}->{$dom} = [ @ips ];
+    };
+    if ($@) {
+      dbg ("MX lookup failed horribly, perhaps bad resolv.conf setting?");
+      return undef;
+    }
   }
+
+  $mxrecords;
+}
+
+sub lookup_mx_exists {
+  my ($self, $dom) = @_;
+
+  my $ret = 0;
+  my $recs = $self->lookup_mx ($dom);
+  if (!defined $recs) { return undef; }
+  if (scalar @{$recs}) { $ret = 1; }
 
   dbg ("MX for '$dom' exists? $ret");
   return $ret;
@@ -994,34 +1112,85 @@ sub lookup_ptr {
     return undef;
   }
 
-  if ($dom =~ /^${IP_IN_RESERVED_RANGE}/) {
-    dbg ("IP is reserved, not looking up PTR");
+  my $IP_IN_RESERVED_RANGE = IP_IN_RESERVED_RANGE;
+
+  if ($dom =~ /${IP_IN_RESERVED_RANGE}/) {
+    dbg ("IP is reserved, not looking up PTR: $dom");
     return undef;
   }
+
+  return if ($self->server_failed_to_respond_for_domain ($dom));
 
   dbg ("looking up PTR record for '$dom'");
   my $name = '';
 
-  eval {
-        my $query = $self->{res}->search($dom);
-        if ($query) {
-	  foreach my $rr ($query->answer) {
-	    if ($rr->type eq "PTR") {
-	      $name = $rr->ptrdname; last;
-	    }
+  if (exists $self->{dnscache}->{PTR}->{$dom}) {
+    $name = $self->{dnscache}->{PTR}->{$dom};
+
+  } else {
+    eval {
+      my $query = $self->{res}->search($dom);
+      if ($query) {
+	foreach my $rr ($query->answer) {
+	  if ($rr->type eq "PTR") {
+	    $name = $rr->ptrdname; last;
 	  }
-        }
+	}
+      }
 
-  };
-  if ($@) {
-    dbg ("PTR lookup failed horribly, perhaps bad resolv.conf setting?");
-    return undef;
+      $name = $self->{dnscache}->{PTR}->{$dom} = $name;
+    };
+
+    if ($@) {
+      dbg ("PTR lookup failed horribly, perhaps bad resolv.conf setting?");
+      return undef;
+    }
   }
-
   dbg ("PTR for '$dom': '$name'");
 
   # note: undef is never returned, unless DNS is unavailable.
   return $name;
+}
+
+sub lookup_a {
+  my ($self, $name) = @_;
+
+  return undef unless $self->load_resolver();
+  if ($self->{main}->{local_tests_only}) {
+    dbg ("local tests only, not looking up A records");
+    return undef;
+  }
+
+  return if ($self->server_failed_to_respond_for_domain ($name));
+
+  dbg ("looking up A records for '$name'");
+  my @addrs = ();
+
+  if (exists $self->{dnscache}->{A}->{$name}) {
+    my $addrptr = $self->{dnscache}->{A}->{$name};
+    @addrs = @{$addrptr};
+
+  } else {
+    eval {
+      my $query = $self->{res}->search($name);
+      if ($query) {
+	foreach my $rr ($query->answer) {
+	  if ($rr->type eq "A") {
+	    push (@addrs, $rr->address);
+	  }
+	}
+      }
+      $self->{dnscache}->{A}->{$name} = [ @addrs ];
+    };
+
+    if ($@) {
+      dbg ("A lookup failed horribly, perhaps bad resolv.conf setting?");
+      return undef;
+    }
+  }
+
+  dbg ("A records for '$name': ".join (' ', @addrs));
+  return @addrs;
 }
 
 sub is_dns_available {
@@ -1046,14 +1215,32 @@ sub is_dns_available {
     dbg ("dns_available set to yes in config file, skipping test", "dnsavailable", -1);
     return $IS_DNS_AVAILABLE;
   }
-  
+
+  # Check version numbers - runtime check only
+  if (defined $Net::DNS::VERSION) {
+    if (Mail::SpamAssassin::Util::am_running_on_windows()) {
+      if ($Net::DNS::VERSION < 0.46) {
+	dbg("Net::DNS version is $Net::DNS::VERSION, but need 0.46 for Win32",
+	    "dnsavailable", -1);
+	return $IS_DNS_AVAILABLE;
+      }
+    }
+    else {
+      if ($Net::DNS::VERSION < 0.34) {
+	dbg("Net::DNS version is $Net::DNS::VERSION, but need 0.34",
+	    "dnsavailable", -1);
+	return $IS_DNS_AVAILABLE;
+      }
+    }
+  }
+
   goto done unless $self->load_resolver();
 
   if ($dnsopt =~ /test:\s+(.+)$/) {
     my $servers=$1;
     dbg("servers: $servers");
     @domains = split (/\s+/, $servers);
-    dbg("Looking up MX records for user specified servers: ".join(", ", @domains), "dnsavailable", -1);
+    dbg("Looking up NS records for user specified servers: ".join(", ", @domains), "dnsavailable", -1);
   } else {
     @domains = @EXISTING_DOMAINS;
   }
@@ -1064,27 +1251,44 @@ sub is_dns_available {
   for(my $retry = 3; $retry > 0 and $#domains>-1; $retry--) {
     my $domain = splice(@domains, rand(@domains), 1);
     dbg ("trying ($retry) $domain...", "dnsavailable", -2);
-    my $result = $self->lookup_mx($domain);
-    if(defined $result) {
+    my $result = $self->lookup_ns($domain);
+    if(defined $result && scalar @$result > 0) {
       if ( $result ) {
-        dbg ("MX lookup of $domain succeeded => Dns available (set dns_available to hardcode)", "dnsavailable", -1);
+        dbg ("NS lookup of $domain succeeded => Dns available (set dns_available to hardcode)", "dnsavailable", -1);
         $IS_DNS_AVAILABLE = 1;
         last;
       }
     }
     else {
-      dbg ("MX lookup of $domain failed horribly => Perhaps your resolv.conf isn't pointing at a valid server?", "dnsavailable", -1);
+      dbg ("NS lookup of $domain failed horribly => Perhaps your resolv.conf isn't pointing at a valid server?", "dnsavailable", -1);
       $IS_DNS_AVAILABLE = 0; # should already be 0, but let's be sure.
       last; 
     }
   }
 
-  dbg ("All MX queries failed => DNS unavailable (set dns_available to override)", "dnsavailable", -1) if ($IS_DNS_AVAILABLE == 0);
+  dbg ("All NS queries failed => DNS unavailable (set dns_available to override)", "dnsavailable", -1) if ($IS_DNS_AVAILABLE == 0);
 
 done:
   # jm: leaving this in!
   dbg ("is DNS available? $IS_DNS_AVAILABLE");
   return $IS_DNS_AVAILABLE;
+}
+
+###########################################################################
+
+sub server_failed_to_respond_for_domain {
+  my ($self, $dom) = @_;
+  if ($self->{dns_server_too_slow}->{$dom}) {
+    dbg ("DNS: server for '$dom' failed to reply previously, not asking again");
+    return 1;
+  }
+  return 0;
+}
+
+sub set_server_failed_to_respond_for_domain {
+  my ($self, $dom) = @_;
+  dbg ("DNS: server for '$dom' failed to reply, marking as bad");
+  $self->{dns_server_too_slow}->{$dom} = 1;
 }
 
 ###########################################################################

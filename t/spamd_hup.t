@@ -2,8 +2,9 @@
 
 use lib '.'; use lib 't';
 use SATest; sa_t_init("spamd_hup");
-use constant TEST_ENABLED => ($] >= 5.006);
-use Test; BEGIN { plan tests => (TEST_ENABLED ? 8 : 0) };
+use constant TEST_ENABLED => !$SKIP_SPAMD_TESTS && !$RUNNING_ON_WINDOWS;
+
+use Test; BEGIN { plan tests => (TEST_ENABLED? 8 : 0) };
 
 use File::Spec;
 
@@ -28,7 +29,7 @@ print "Waiting for spamd at pid $pid1 to restart...\n";
 # 20 retries works out to a total of 60 seconds
 my $timeout = 20;
 my $wait = 0;
-do {
+ do {
   sleep (int($wait++ / 4) + 1) if $timeout > 0;
   $timeout--;
 } while(!-e $pid_file && $timeout);

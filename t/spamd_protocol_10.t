@@ -2,12 +2,12 @@
 
 use lib '.'; use lib 't';
 use SATest; sa_t_init("spamd_protocol_10");
-use Test; BEGIN { plan tests => 10 };
+use Test; BEGIN { plan tests => ($SKIP_SPAMD_TESTS ? 0 : 10) };
+
+exit if $SKIP_SPAMD_TESTS;
 
 use File::Path;
 use IO::Socket;
-use Mail::SpamAssassin::PerMsgStatus;
-use Mail::SpamAssassin::Conf;
 
 # ---------------------------------------------------------------------------
 
@@ -15,7 +15,7 @@ use Mail::SpamAssassin::Conf;
 
 q{ SPAMD/1.1 0 EX_OK }, 'response-11',
 q{ Spam: True ; }, 'spamheader',	# we use a regexp later for the rest
-q{ GTUBE }, 'symbolshit',
+q{ GTUBE }, 'gtube',
 
 );
 
@@ -55,7 +55,7 @@ sub run_symbols {
   my($data, $proto10) = @_;
 
   $socket = new IO::Socket::INET(
-                  PeerAddr => 'localhost',
+                  PeerAddr => '127.0.0.1',
                   PeerPort => $spamdport,
                   Proto    => "tcp",
                   Type     => SOCK_STREAM

@@ -27,24 +27,14 @@ Steps to take for every installation:
     with a report from SpamAssassin, and there should be no errors when you
     run the commands.
 
-    Even though sample-nonspam.txt is not spam, nonspam.out will contain a
-    SpamAssassin report anyway.  This is a side-effect of the "-t" (test)
-    switch.  However, there should be less than 5 hits accumulated; when
-    the "-t" switch is not in use, the report text would not be added.
+    Even though sample-nonspam.txt is not spam, nonspam.out will
+    contain a SpamAssassin report anyway.  This is a side-effect of
+    the "-t" (test) switch.  However, there should be less than 5
+    points accumulated; when the "-t" switch is not in use, the report
+    text would not be added.
 
     If the commands do not work, DO NOT PROCEED TO THE NEXT STEP, as you
     will lose mail!
-
-
-
-If you use Mail::Audit already:
-
-  - run "perldoc Mail::SpamAssassin" and take a look at the synopsis, it
-    outlines what you need to add to your audit script.
-
-  - Copy the configuration files (see CUSTOMISING, below) to a known
-    location, so your script can set the appropriate options for the
-    Mail::SpamAssassin constructor to load them.
 
 
 
@@ -92,9 +82,9 @@ If you use procmail, or haven't decided on any of the above examples:
 
 If you want to use SpamAssassin site-wide:
 
-  - take a look at the notes on the website, at
-    http://spamassassin.org/sitewide.html .  You will probably want to use
-    'spamd' (see below).
+  - take a look at the notes on the Wiki website, currently at
+    <http://wiki.apache.org/spamassassin/UsingSiteWide>.  You will probably
+    want to use 'spamd' (see below).
 
   - *PLEASE* let your users know you've installed it, and how to turn it
     off!   This is our #1 tech support query, and the users are usually
@@ -112,26 +102,22 @@ If you want to use SpamAssassin site-wide:
 The Auto-Whitelist
 ------------------
 
-The auto-whitelist is enabled using the -a flag to spamassassin or spamd.  
-
-The algorithm works using a database of entries. Each entry has a key formed by
-the From: address of the mail, and the IP address it originated at, and
-contains a TOTAL score and a COUNT number. The MEAN score is TOTAL/COUNT. The
-current algorithm works as follows:
-
-   1. Compute the SCORE of the message without AWL (auto-whitelist)
-   2. Compute AWL DELTA as (MEAN-SCORE)*auto_whitelist_factor
-   3. Increment TOTAL by SCORE
-   4. Increment COUNT by one
-   5. Set the final score of the message to SCORE+DELTA
-
-auto_whitelist_factor can be tweaked in the configuration, and you
-may find this useful when starting off.  The contents of the database
-can be examined using the program 'tools/check_whitelist'.
+The auto-whitelist is enabled using the 'use_auto_whitelist' option.
+(See http://wiki.apache.org/spamassassin/AutoWhitelist for details on
+how it works, if you're curious.)
 
 
 Other Installation Notes
 ------------------------
+
+  
+  - Hashcash is a useful system; it requires that senders exercise a
+    CPU-intensive task before they can send mail to you, so we give that
+    some bonus points.  However, it requires that you list what addresses
+    you expect to receive mail from, by adding 'hashcash_accept' lines to
+    your ~/.spamassassin/user_prefs or /etc/mail/spamassassin/local.cf
+    files.  See the Mail::SpamAssassin::Conf manual page for details on
+    how to specify these.
 
 
   - SpamAssassin now uses a temporary file in /tmp (or $TMPDIR, if that's
@@ -168,9 +154,22 @@ Other Installation Notes
     checks to be more accurate.
 
 
+  - A very handy new feature is SPF support, which allows you to check
+    that the message sender is permitted by their domain to send from the
+    IP address used.  This has the potential to greatly cut down on mail
+    forgery.  (see http://spf.pobox.com/ for more details.)   However,
+    sendmail will not expose the MAIL FROM: sender address by default.  So
+    if you're using sendmail, please add this to /etc/sendmail.cf :
+
+      H?l?X-Envelope-From: $f
+
+
   - MDaemon users should add this line to their "local.cf" file:
 
       report_safe_copy_headers X-MDRcpt-To X-MDRemoteIP X-MDaemon-Deliver-To
+
+    Otherwise, MDaemon's internal delivery will fail when SpamAssassin
+    rewrites a message as spam.
 
 
   - The distribution includes 'spamd', a daemonized version of the
@@ -187,10 +186,8 @@ Other Installation Notes
 
   - If you get spammed, it is helpful to everyone else if you re-run
     spamassassin with the "-r" option to report the message in question as
-    "verified spam".  This will add it to Vipul's Razor
-    (http://razor.sourceforge.net/), a collaborative spam filtering
-    network, if you've installed the Razor modules and registered an
-    account.
+    "verified spam".  This will add it to Vipul's Razor, DCC and Pyzor,
+    assuming you've set these up appropriately.
 
       spamassassin -r < spam-message
 
@@ -209,47 +206,18 @@ Other Installation Notes
     ''SPAM TRAPPING'' section of the spamassassin manual page for details.
 
     If you don't want to go to the bother of setting up a system yourself
-    to do this, feel free to set up a simple alias to forward any mails to
-    <someaddress@spamtraps.taint.org> -- replace "someaddress" with
-    something to identify you, such as your email addr or website with
-    non-alphanumeric chars replaced by underscores, or similar.  (Please
-    also send me a mail at jm - spamtraps at jmason dot org if you do
-    this, so that I know who to contact if it starts going haywire, or the
-    quality drops.)
-    
-    Mails sent to an address at the spamtraps domain are fed into the
-    SpamAssassin.org spam-trapping system, where they will then be
-    virus-scanned, de-duplicated, and fed into Razor, DCC, Pyzor and OPM.
+    to do this, take a look here [1] for a simple forwarding-based
+    alternative.
 
-    Some notes: I monitor the quality of feeds coming into this, and if it
-    turns out to contain occasional bits of non-spam mail, I'll start
-    bouncing your feed with a 550 -- as a spam feed that isn't reliably
-    spam-only is *not* suitable for a spamtrap.
-    
-    Also, messages relayed to the spamtrap must be either (a) direct
-    relaying as performed by a sendmail alias, or (b) message/rfc822
-    attachments with no Content-Transfer-Encoding.  Again, if they're not,
-    I'll 550 them.  And finally, if I can't figure out who's in control of
-    the feed, you guessed it, 550.  So try to keep the quality control
-    up!
+      [1]: http://wiki.apache.org/spamassassin/SpamTrapping
 
 
   - Scores and other user preferences can now be loaded from an SQL
     database; see the 'sql' subdirectory for more details.
 
 
-  - Edward Fang <edfang /at/ visi.net> has contributed the
-    'communigate.sh' script for CommunigatePro (see the 'contrib'
-    directory).
-
-
-  - James Henstridge <james /at/ daa.com.au> has contributed an LMTP proxy
-    server (designed for Cyrus, but probably will work fine with others),
-    again it's in the contrib directory.
-
-
   - Lots more ways to integrate SpamAssassin can be read at
-    http://news.SpamAssassin.org/ .
+    http://wiki.SpamAssassin.org/ .
 
 
 (end of USAGE)

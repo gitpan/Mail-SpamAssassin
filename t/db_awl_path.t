@@ -22,7 +22,7 @@ close OUT;
 tstprefs ("
         $default_cf_lines
         auto_whitelist_path ./log/awl/shouldbeinaccessible
-        auto_whitelist_mode 0755
+        auto_whitelist_file_mode 0755
 ");
 
 my $fh = IO::File->new_tmpfile();
@@ -42,6 +42,6 @@ ok($error, qr/(cannot create tmp lockfile)|(unlink of lock file.*failed)/, "Chec
 
 # and this mail should *not* be whitelisted as a result.
 %patterns = %is_spam_patterns;
-sarun ("-L -a -t < data/spam/004", \&patterns_run_cb);
+sarun ("-L -t < data/spam/004", \&patterns_run_cb);
 ok_all_patterns();
 

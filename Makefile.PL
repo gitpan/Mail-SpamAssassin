@@ -1,12 +1,14 @@
-require 5.005;
+#!/usr/bin/perl
+require 5.6.1;
 
 use strict;
+use warnings;
 use Config;
 
-use ExtUtils::MakeMaker;
+use ExtUtils::MakeMaker 5.45;
 
-use constant RUNNING_ON_WINDOWS => ($^O =~ /^(?:mswin|dos|os2)/oi);
-
+use constant RUNNING_ON_WINDOWS => ($^O =~ /^(mswin|dos|os2)/oi);
+use constant HAS_DBI => eval { require DBI; };
 
 my @ATT_KEYS = (
   # PLEASE READ THE FILE 'PACKAGING' FOR INFORMATION ON THESE VARIABLES.
@@ -49,19 +51,19 @@ my @ATT_KEYS = (
   'INSTALLSITECONF',  #
   'INSTALLVENDORCONF',#
 
-  'DEFRULESDIR',      # A synonyme for 'DATADIR'.
-  'LOCALRULESDIR',    # " "        "   'CONFDIR'.
+  'DEFRULESDIR',      # A synonym for 'DATADIR'.
+  'LOCALRULESDIR',    # " "       "   'CONFDIR'.
 
   'PERL_BIN',         # Sets the Perl interpreter used by the scripts.
-  'PERL_VERSION',     # Some parts in SpamAssassin are dependant on the version
+  'PERL_VERSION',     # Some parts in SpamAssassin were dependant on the version
   'PERL_WARN',        # Can be used to disable warnings in the scripts
   'PERL_TAINT',       # "   "  "    "  "    taint mode for the scripts (DON'T)
 
 
+  'BUILD_SPAMC'  ,    # Set to 'no' to skip build of spamc.
   'ENABLE_SSL',       # Set to 'yes' to build spamc with SSL support.
-  'CONTACT_ADDRESS',  # Don't ask for the contact address, use this string.
-  'RUN_RAZOR_TESTS',  # Don't ask wether the Razor tests should be run, use
-    'RUN_RAZOR2_TESTS'# this setting.
+  'CONTACT_ADDRESS',  # To not ask for the contact address, use this.
+  'RUN_NET_TESTS',    # To not ask whether net tests should be run, use this.
 );
 
 
@@ -94,9 +96,10 @@ sub yesno {
 
 
 my %opt = (
+  'build_spamc'        => undef,
   'enable_ssl'      => undef,
   'contact_address' => undef,
-  'run_razor_tests' => undef,
+  'run_net_tests'   => undef,
   'destdir'         => undef,
   '__cruft'         => undef,
   'ignore_cruft'    => undef,
@@ -119,25 +122,25 @@ ARGV: foreach (@ARGV) {
 
 
 # Gather some information about what EU::MM offers and/or needs
-my($mm_version, $mm_has_destdir, $mm_has_good_destdir, $mm_needs_destdir, $mm_has_pm_filter);
+my(
+  $mm_version,
+  $mm_knows_destdir,
+  $mm_has_destdir,
+  $mm_has_good_destdir,
+  $mm_needs_destdir,
+);
 
 # Store the version for later use
 $mm_version          = $ExtUtils::MakeMaker::VERSION;
 
 # MakeMaker prior to 6.11 doesn't support DESTDIR which is needed for
 # packaging with builddir!=destdir. See bug 2388.
-$mm_has_destdir      = $ExtUtils::MakeMaker::Recognized_Att_Keys{DESTDIR};
+$mm_knows_destdir    = $ExtUtils::MakeMaker::Recognized_Att_Keys{DESTDIR};
 $mm_has_good_destdir = $mm_version >= 6.11;
 # Add DESTDIR hack only if it's requested (and necessary)
-$mm_needs_destdir    = $opt{'destdir'} && !$mm_has_destdir;
-$mm_has_destdir    ||= $mm_needs_destdir;
-push(@ATT_KEYS, 'DESTDIR') if $mm_has_destdir;
-
-# MakeMaker prior to 5.46 doesn't support PM_FILTER, so we have to
-# implement it ourselves. Also bear in mind that MakeMaker (5.45) from
-# Perl 5.6.1 supports that option while the one from 5.6.0 doesn't; they
-# do have the same version though! See bug 1652.
-$mm_has_pm_filter    = $mm_version >  5.45 || ($mm_version == 5.45 && $] > 5.006);
+$mm_needs_destdir    = $opt{'destdir'} && !$mm_has_good_destdir;
+$mm_has_destdir      = $mm_knows_destdir || $mm_needs_destdir;
+push(@ATT_KEYS, 'DESTDIR') if $mm_needs_destdir;
 
 # Now make EU::MM understand our extended vars
 foreach my $key (@ATT_KEYS) {
@@ -146,14 +149,9 @@ foreach my $key (@ATT_KEYS) {
 
 
 # Gather the rules files in the range 00-69; we do this in perl because it's more portable
-my @rulesfiles = map { s,^rules/,,; $_ } (<rules/*.cf>);
-my $rulesfiles = join(' ', (grep { /^[0-6][0-9]_/ } @rulesfiles), qw(user_prefs.template triplets.txt languages));
+my @datafiles = map { s,^rules/,,; $_ } (<rules/*.cf>);
+my $datafiles = join(' ', (grep { /^[0-6][0-9]_/ } @datafiles), qw(user_prefs.template triplets.txt languages));
 
-# Only build spamd and spamc on non-Windows platforms
-my @SPAMD_EXE_FILES = ();
-if (!RUNNING_ON_WINDOWS) {
-  @SPAMD_EXE_FILES = ('spamd/spamc$(EXE_EXT)', 'spamd/spamd');
-}
 
 # See lib/ExtUtils/MakeMaker.pm for details of how to influence
 # the contents of the Makefile that is written.
@@ -162,58 +160,71 @@ my %makefile = (
     'VERSION_FROM' => 'lib/Mail/SpamAssassin.pm', # finds $VERSION
 
     'EXE_FILES'	=> [
-			'spamassassin', 'sa-learn',
-			@SPAMD_EXE_FILES
-		],
+        'spamassassin', 'sa-learn',
+        'spamc/spamc$(EXE_EXT)', # must next to last one
+        'spamd/spamd',	# must be the last one
+    ],
 
     'MAN1PODS' => {
-	'spamassassin'    => '$(INST_MAN1DIR)/spamassassin.$(MAN1EXT)',
-	'sa-learn'        => '$(INST_MAN1DIR)/sa-learn.$(MAN1EXT)',
-	'spamd/spamc.pod' => '$(INST_MAN1DIR)/spamc.$(MAN1EXT)',
-	'spamd/spamd'     => '$(INST_MAN1DIR)/spamd.$(MAN1EXT)',
+        'spamassassin'    => '$(INST_MAN1DIR)/spamassassin.$(MAN1EXT)',
+        'sa-learn'        => '$(INST_MAN1DIR)/sa-learn.$(MAN1EXT)',
+        'spamc/spamc.pod' => '$(INST_MAN1DIR)/spamc.$(MAN1EXT)',
+        'spamd/spamd'     => '$(INST_MAN1DIR)/spamd.$(MAN1EXT)',
     },
 
     'PL_FILES' => { },
 
     'PMLIBDIRS' => [ 'lib' ],
 
-    'PM_FILTER' => '$(PERL) build/preprocessor -Mconditional $(FIXBYTES) -Mvars -DVERSION="$(VERSION)" -DPREFIX="$(I_PREFIX)"',
+    'PM_FILTER' => '$(PREPROCESS) -Mconditional -Mvars -DVERSION="$(VERSION)" -DPREFIX="$(I_PREFIX)"',
 
     'macro' => {
-	RULES => $rulesfiles,
+        DATAFILES => $datafiles,
     },
 
     # be quite explicit about this; afaik CPAN.pm is sensible using this
     'PREREQ_PM' => {
-	'ExtUtils::MakeMaker' => 5.45 *0, # we have compatibility code in build/preprocessor.pm
-	'File::Spec'    => 0.8,           # older versions lack some routines we need
-	'File::Copy'    => 2.02,          # this version is shipped with 5.005_03, the oldest version known to work
-	'Pod::Usage'    => 1.10,          # all versions prior to this do seem to be buggy
-	'HTML::Parser'  => 3.24,          # the HTML code is based on this parser
-	'Text::Wrap'    => 98.112902,     # this version is shipped with 5.005_03, the oldest version known to work
-	'Sys::Hostname' => 0,
-	'Time::Local'   => 0,
-	'Errno'         => 0,
+        'Digest::SHA1'  => 0,             # 2.0 is oldest tested version
+        'File::Spec'    => 0.8,           # older versions lack some routines we need
+        'File::Copy'    => 2.02,          # this version is shipped with 5.005_03, the oldest version known to work
+        'Pod::Usage'    => 1.10,          # all versions prior to this do seem to be buggy
+        'HTML::Parser'  => 3.24,          # the HTML code is based on this parser
+        'Text::Wrap'    => 98.112902,     # this version is shipped with 5.005_03, the oldest version known to work
+        'Sys::Hostname' => 0,
+        'Time::Local'   => 0,
+        'Errno'         => 0,
     },
 
     'dist' => {
-		COMPRESS => 'gzip -9f', SUFFIX => 'gz',
-		DIST_DEFAULT => 'tardist'
-	      },
-
-    'clean' => { FILES => join(' ' =>
-        'doc', 'pod2htm*',
-        'spamassassin', 'sa-learn',
-        'spamd/spamd', 'spamd/spamc$(EXE_EXT)',
-        'spamd/libspamc.so', 'spamd/libsslspamc.so',
-        'spamd/binaries.mk', 'spamd/config.h', 'spamd/config.status',
-        'spamd/config.cache', 'spamd/config.log', 'spamd/autom4te.cache',
-        'qmail/qmail-spamc',
-        't/do_razor2', 't/log'
-      )
+        COMPRESS => 'gzip -9f',
+        SUFFIX => 'gz',
+        DIST_DEFAULT => 'tardist'
     },
 
-    'AUTHOR'   => 'Justin Mason <jm@jmason.org>',
+    'clean' => { FILES => join(' ' =>
+        'spamassassin', 'sa-learn',
+
+        'spamd/spamd',
+
+        'spamc/spamc$(EXE_EXT)',
+        'spamc/qmail-spamc$(EXE_EXT)',
+        'spamc/*.o*', 'spamc/replace/*.o*',
+        'spamc/*.so',
+        'spamc/Makefile',
+        'spamc/config.h', 'spamc/version.h',
+        'spamc/config.status', 'spamc/config.cache', 'spamc/config.log', 'spamc/autom4te.cache',
+        'spamd/*spamc*', 'qmail',
+
+        'doc', 'pod2htm*',
+
+	'version.env',
+
+        't/bayessql.cf', 't/do_net', 't/log', 't/sql_based_whitelist.cf',
+      )
+
+    },
+
+    'AUTHOR'   => 'SpamAssassin Project <spamassassin-dev@incubator.apache.org>',
     'ABSTRACT' => 'identify spam mail using text analysis',
 
     # We have only this Makefile.PL and this option keeps MakeMaker from
@@ -289,34 +300,29 @@ DESTDIR_BUG
 }
 
 
-if (!$mm_has_pm_filter) {
-  my $error = <<ANCIENT_VERSION;
-
-    ***********************************************************************
-    Your version of ExtUtils::MakeMaker does not support PM_FILTER.
-    The \"make\" process will almost certainly have many warnings and it is
-    very likely to fail.
-
-    You can use either the CPAN shell or go to
-      <http://search.cpan.org/search?module=ExtUtils::MakeMaker>
-    to get an up-to-date version.
-
-    Perl 5.6.1 and later versions also include recent versions by default.
-    ***********************************************************************
-
-ANCIENT_VERSION
-  $error =~ s/^ {4}//gm;
-  warn $error;
-
-  $makefile{SKIP} = [ 'pm_to_blib' ];
-  $makefile{macro}{PM_FILTER} = $makefile{PM_FILTER};
-  delete $makefile{PM_FILTER};
-}
-
-
 # All the $(*MAN1*) stuff is empty/zero if Perl was Configured with -Dman1dir=none
 unless($Config{installman1dir}) {
   delete $makefile{MAN1PODS};
+}
+
+
+# Windows platforms need some adjustments
+if (RUNNING_ON_WINDOWS) {
+  # Don't build spamd
+  pop    @{$makefile{EXE_FILES}};
+  delete $makefile{MAN1PODS}{'spamd/spamd'};
+  # building spamc is optional under Win32 because not everyone has compiler
+  if (!defined $opt{'build_spamc'}) {
+    $opt{'build_spamc'} = bool(prompt(
+      "Build spamc.exe (environment must be set up for C compiler)? (y/n)",
+      'y'));
+  } else {
+    $opt{'build_spamc'} = bool($opt{'build_spamc'});
+  }
+  if (!$opt{'build_spamc'}) {
+    pop    @{$makefile{EXE_FILES}};
+    delete $makefile{MAN1PODS}{'spamc/spamc.pod'};
+  }
 }
 
 
@@ -333,27 +339,81 @@ if (!defined $opt{'contact_address'}) {
 }
 $makefile{'macro'}{'CONTACT_ADDRESS'} = $opt{'contact_address'};
 
-if (!defined $opt{'run_razor_tests'}) {
-  my $got_razor2 = eval { require Razor2::Client::Agent };
-
-  if ($got_razor2) {
-    $opt{'run_razor_tests'} = prompt(
-      "Run Razor v2 tests (these may fail due to network problems)? (y/n)",
-      'n'
-    );
-    print "\n";
-  }
+if (!defined $opt{'run_net_tests'}) {
+  $opt{'run_net_tests'} = prompt(
+    "Check network rules during 'make test' (test scripts may fail due to\n".
+    "network problems)? (y/n)",
+    'n');
+  print "\n";
 }
-$opt{'run_razor_tests'} = bool($opt{'run_razor_tests'});
-if ($opt{'run_razor_tests'}) {
-  open(FLAG, "> t/do_razor2");
+$opt{'run_net_tests'} = bool($opt{'run_net_tests'});
+if ($opt{'run_net_tests'}) {
+  open(FLAG, "> t/do_net");
   close(FLAG);
 }
 else {
-  unlink("t/do_razor2");
+  unlink("t/do_net");
 }
-$makefile{'macro'}{'TEST_RUN_RAZOR'} = yesno($opt{'run_razor_tests'});
+$makefile{'macro'}{'RUN_NET_TESTS'} = yesno($opt{'run_net_tests'});
 
+if (HAS_DBI) {
+  $opt{'run_awl_sql_tests'} = prompt(
+    "Run SQL-based Auto-whitelist tests during 'make test' (additional\n".
+    "information required) (y/n)", "n");
+  print "\n";
+
+  $opt{'run_awl_sql_tests'} = bool($opt{'run_awl_sql_tests'});
+}
+
+if ($opt{'run_awl_sql_tests'}) {
+  my $user_awl_dsn = prompt("SQL AWL DSN (user_awl_dsn): ", "dbi:mysql:spamassassin:localhost");
+  my $user_awl_sql_username = prompt("SQL AWL DB username (user_awl_sql_username): ", "");
+  my $user_awl_sql_password = prompt("SQL AWL DB password (user_awl_sql_password): ", "");
+  my $user_awl_sql_table = prompt("SQL AWL tablename (user_awl_sql_table): ", "awl") || 'awl';
+  print "\n";
+
+  open(FILE, ">t/sql_based_whitelist.cf");
+  print FILE "user_awl_dsn $user_awl_dsn\n";
+  # These two can be blank and the conf parser doesn't really like
+  # blank variables, so do not print them if blank
+  print FILE "user_awl_sql_username $user_awl_sql_username\n" if ($user_awl_sql_username);
+  print FILE "user_awl_sql_password $user_awl_sql_password\n" if ($user_awl_sql_password);
+  print FILE "user_awl_sql_table $user_awl_sql_table\n";
+
+  close(FILE);
+}
+else {
+  unlink("t/sql_based_whitelist.cf");
+}
+
+if (HAS_DBI) {
+  $opt{'run_bayes_sql_tests'} = prompt(
+    "Run Bayes SQL storage tests during 'make test' (additional\n".
+    "information required)? (y/n)", 'n');
+  print "\n";
+
+  $opt{'run_bayes_sql_tests'} = bool($opt{'run_bayes_sql_tests'});
+}
+
+if ($opt{'run_bayes_sql_tests'}) {
+  my $bayes_sql_dsn = prompt("Bayes SQL DSN (bayes_sql_dsn): ", "dbi:mysql:spamassassin:localhost");
+  my $bayes_sql_username = prompt("Bayes SQL DB username (bayes_sql_username): ", "");
+  my $bayes_sql_password = prompt("Bayes SQL DB password (bayes_sql_password): ", "");
+  print "\n";
+  
+  open(FILE, ">t/bayessql.cf");
+  print FILE "bayes_sql_dsn $bayes_sql_dsn\n";
+  # These two can be blank and the conf parser doesn't really like
+  # blank variables, so do not print them if blank
+  print FILE "bayes_sql_username $bayes_sql_username\n" if ($bayes_sql_username);
+  print FILE "bayes_sql_password $bayes_sql_password\n" if ($bayes_sql_password);
+  close(FILE);
+}
+else {
+  unlink("t/bayessql.cf");
+}
+
+#######################################################################
 
 # Now dump the Makefile
 WriteMakefile(%makefile);
@@ -366,6 +426,8 @@ package MY;
 
 use vars qw(
   $MY_GLOBALS_ARE_SANE
+
+  $RUNNING_ON_WINDOWS
 
   @REPOSITORIES
 
@@ -408,6 +470,9 @@ sub init_MY_globals {
   # To assign or own macros we'll follow the first assignment string we find;
   # normally " = ".
   $EQ = undef;
+
+  # Inherit our Windows-Flag.
+  $RUNNING_ON_WINDOWS = ::RUNNING_ON_WINDOWS;
 }
 
 # Unset $SELF to avoid any leaking memory.
@@ -462,8 +527,10 @@ sub macro_ref {
 # If it is omitted, the value set in the current EU::MM instance is used.
 sub macro_def {
   my($name, $val) = (@_, undef);
+  my $MUST_NOT_HAPPEN = "THIS MUST NOT HAPPEN. PLEASE REPORT A BUG VIA <http://bugzilla.spamassassin.org>";
+  die $MUST_NOT_HAPPEN  unless defined $name;
+  die $MUST_NOT_HAPPEN  unless defined $EQ;
   $val = $SELF->{$name} unless defined $val;
-  die unless defined $EQ;
 
   return $name . $EQ . $val;
 }
@@ -735,8 +802,35 @@ sub _set_macro_PERL_TAINT {
   _set_macro_PERL_yesno('TAINT');
 }
 
+# This routine sets the value for PREPROCESS.
+#
+# There are no parameters.
+#
+# If PREPROCESS wasn't set at the command line, it chooses our default
+# perl-called preprocessor.
+sub _set_macro_PREPROCESS {
 
-# Override the libscan routine so it skips CVS stuff and some common
+  return if get_macro('PREPROCESS');
+  set_macro('PREPROCESS', join(' ', macro_ref('PERL_BIN'), qq{build/preprocessor}));
+}
+
+# This routine sets the value for CONFIGURE (spamc only).
+#
+# There are no parameters.
+#
+# If CONFIGURE wasn't set at the command line, it chooses our default
+# perl-wrapped configure.
+sub _set_macro_CONFIGURE {
+
+  return if get_macro('CONFIGURE');
+  set_macro('CONFIGURE', join(' ', macro_ref('PERL_BIN'), qq{spamc/configure.pl}));
+}
+
+
+
+
+
+# Override the libscan routine so it skips SVN/CVS stuff and some common
 # patch/backup extensions.
 sub MY::libscan {
   my $self = shift;
@@ -744,8 +838,8 @@ sub MY::libscan {
   init_MY_globals($self);
 
   return q{} if $path =~ m{
-                  (^|/)(\.svn|CVS)(/|$)|
-                  [/.](orig|old|rej|diff|patch|bak|backup|my)$
+                  (^|/)(CVS|\.svn)(/|$)|
+                  [/.](orig|old|rej|r\d+|diff|patch|bak|backup|mine|my)$
                 }ix;
 
   clean_MY_globals($self);
@@ -778,8 +872,6 @@ sub MY::install {
 }
 
 
-
-
 # Now override the constants routine to add our own macros.
 sub MY::constants {
   my $self = shift;
@@ -795,6 +887,13 @@ sub MY::constants {
     # Store the assignment string if necessary.
     set_EQ_from_line($line);
 
+    # Store a nicer version string for later use.
+    if (line_has_macro_def($line, 'VERSION')) {
+      get_macro('VERSION') =~ /^(\d)\.(\d\d\d)_?(\d\d\d)/;
+      set_macro('VERSION_COOL', join(".", $1*1, $2*1, $3*1));
+      $line .= "\n" . macro_def('VERSION_COOL');
+    }
+
     # Add some "dummy" (PERL|SITE|VENDOR)PREFIX macros for later use (only if
     # necessary for old EU::MMs of course)
     if (line_has_macro_def($line, 'PREFIX')) {
@@ -806,6 +905,16 @@ sub MY::constants {
           $line .= "\n" . macro_def($rprefix);
         }
       }
+    }
+
+    if (line_has_macro_def($line, 'MM_VERSION')) {
+      # These macros are just for debugging purposes.
+      $line = join("\n", $line,
+         macro_def(MM_HAS_DESTDIR      => ::yesno($mm_has_destdir)),
+         macro_def(MM_HAS_GOOD_DESTDIR => ::yesno($mm_has_good_destdir)),
+         macro_def(MM_KNOWS_DESTDIR    => ::yesno($mm_knows_destdir)),
+         macro_def(MM_NEEDS_DESTDIR    => ::yesno($mm_needs_destdir)),
+       );
     }
 
     # Add DESTDIR support if necessary
@@ -820,6 +929,7 @@ sub MY::constants {
       }
     }
   }
+  push(@code, qq{});
 
   # Add some additional target dirs
   {
@@ -834,6 +944,7 @@ sub MY::constants {
 
     # ... and add it to the Makefile.
     push(@code, qq{});
+    push(@code, qq{# Where to install config files});
     push(@code, macro_def('SYSCONFDIR'));
     foreach my $r (@REPOSITORIES) {
       push(@code, macro_def($r . 'SYSCONFDIR'));
@@ -861,8 +972,43 @@ sub MY::constants {
 
     # Add it to the Makefile.
     push(@code, qq{});
+    push(@code, qq{# Some details about our Perl});
     foreach my $m (qw(BIN VERSION WARN TAINT)) {
       push(@code, macro_def('PERL_' . $m));
+    }
+  }
+
+  # Set the preprocessor and configure scripts
+  {
+    _set_macro_PREPROCESS;
+    _set_macro_CONFIGURE;
+
+    # Add it to the Makefile.
+    push(@code, qq{});
+    push(@code, macro_def('PREPROCESS'));
+    push(@code, macro_def('CONFIGURE'));
+  }
+
+  # Set some additional helper/shortcut macros.
+  {
+    my($repository);
+    $repository = uc($SELF->{INSTALLDIRS}) || 'SITE';
+
+    foreach my $macro (qw(PREFIX SYSCONFDIR)) {
+      push(@code, macro_def('I_' . $macro,
+                    macro_ref($repository . $macro)));
+    }
+    foreach my $macro (qw(DATA CONF LIB)) {
+      push(@code, macro_def('I_' . $macro . 'DIR',
+                    macro_ref('INSTALL' . repository($repository) . $macro)));
+
+      if ($mm_has_destdir) {
+        push(@code, macro_def('B_' . $macro . 'DIR',
+                      macro_ref('DESTINSTALL' . repository($repository) . $macro)));
+      } else {
+        push(@code, macro_def('B_' . $macro . 'DIR',
+                      macro_ref('I_' . $macro . 'DIR')));
+      }
     }
   }
 
@@ -870,37 +1016,38 @@ sub MY::constants {
   return join("\n", @code);
 }
 
-sub MY::postamble {
+# Override some vars in the dist section.
+sub MY::dist {
   my $self = shift;
-  my @code = ();
+  my @code = split(/\n/, $self->SUPER::dist(@_));
   init_MY_globals($self);
 
-  my($repository);
-  $repository = uc($SELF->{INSTALLDIRS}) || 'SITE';
+  foreach my $line (@code) {
+    # Skip comments
+    next if $line =~ /^\s*#/;
+     # Skip everything which isn't a var assignment.
+    next unless line_has_macro_def($line);
 
-  foreach my $macro (qw(PREFIX SYSCONFDIR)) {
-    push(@code, macro_def('I_' . $macro,
-                    macro_ref($repository . $macro)));
-  }
-  foreach my $macro (qw(DATA CONF LIB)) {
-    push(@code, macro_def('I_' . $macro . 'DIR',
-                    macro_ref('INSTALL' . repository($repository) . $macro)));
-
-    if ($mm_has_destdir) {
-      push(@code, macro_def('B_' . $macro . 'DIR',
-                    macro_ref('DESTINSTALL' . repository($repository) . $macro)));
-    } else {
-      push(@code, macro_def('B_' . $macro . 'DIR',
-                    macro_ref('I_' . $macro . 'DIR')));
+    # Store the assignment string if necessary.
+    set_EQ_from_line($line);
+    
+    if (line_has_macro_def($line, 'DISTVNAME') && get_macro('VERSION_COOL')) {
+      set_macro('DISTVNAME', '$(DISTNAME)-$(VERSION_COOL)');
+      $line = macro_def('DISTVNAME');
     }
   }
 
-  my $code = join("\n", @code);
-  @code = (); # free mem
+  clean_MY_globals($self);
+  return join("\n", @code);
+}
+      
+
+sub MY::postamble {
+  my $self = shift;
+  my $code = "";
+  init_MY_globals($self);
 
   $code .= <<'  EOD';
-
-PREPROCESS    = $(PERL) build/preprocessor
 
 FIXVARS		= -Mvars \
 		  -DVERSION="$(VERSION)" \
@@ -910,29 +1057,11 @@ FIXVARS		= -Mvars \
 		  -DINSTALLSITELIB="$(I_LIBDIR)" \
 		  -DCONTACT_ADDRESS="$(CONTACT_ADDRESS)"
 
-FIXBYTES	= -Mbytes \
-		  -DPERL_VERSION="$(PERL_VERSION)"
-
 FIXBANG		= -Msharpbang \
 		  -DPERL_BIN="$(PERL_BIN)" \
 		  -DPERL_WARN="$(PERL_WARN)" \
 		  -DPERL_TAINT="$(PERL_TAINT)"
 
-SPAMC_SOURCES	= spamd/spamc.c spamd/libspamc.c spamd/utils.c qmail/qmail-spamc.c
-
-  EOD
-
-  if (!$mm_has_pm_filter) {
-    $code .= <<'    EOD';
-pm_to_blib: $(TO_INST_PM)
-	@ $(PERL) "-I$(INST_ARCHLIB)" "-I$(INST_LIB)" \
-	"-I$(PERL_ARCHLIB)" "-I$(PERL_LIB)" -Ibuild \
-	-MExtUtils::Install -Mpreprocessor \
-	-e "ExtUtils::Install::Post545::pm_to_blib({qw{$(PM_TO_BLIB)}}, '$(INST_LIB)/auto', '$(PM_FILTER)')"
-    EOD
-  }
-
-  $code .= <<'  EOD';
 
 spamassassin: spamassassin.raw
 	$(PREPROCESS) $(FIXBYTES) $(FIXVARS) $(FIXBANG) -m$(PERM_RWX) -i$? -o$@
@@ -940,39 +1069,68 @@ spamassassin: spamassassin.raw
 sa-learn: sa-learn.raw
 	$(PREPROCESS) $(FIXBYTES) $(FIXVARS) $(FIXBANG) -m$(PERM_RWX) -i$? -o$@
 
+
 spamd/spamd: spamd/spamd.raw
 	$(PREPROCESS) $(FIXBYTES) $(FIXVARS) $(FIXBANG) -m$(PERM_RWX) -i$? -o$@
 
-spamd/libspamc.so: spamd/binaries.mk $(SPAMC_SOURCES)
-	$(MAKE) -f spamd/binaries.mk $@
 
-spamd/libspamc.dll: spamd/binaries.mk $(SPAMC_SOURCES)
-	$(MAKE) -f spamd/binaries.mk $@
+SPAMC_MAKEFILE  = spamc/Makefile
+MAKE_SPAMC      = $(MAKE) -f $(SPAMC_MAKEFILE)
+MAKE_SPAMC_OLD  = $(MAKE) SOURCE=$< TARGET=$@ spamc_has_moved
 
-spamd/spamc$(EXE_EXT): spamd/binaries.mk $(SPAMC_SOURCES)
-	$(MAKE) -f spamd/binaries.mk $@
+SPAMC_SRC       = spamc/spamc.c spamc/utils.c
+QSPAMC_SRC      = spamc/qmail-spamc.c spamc/utils.c
+LIBSPAMC_SRC    = spamc/libspamc.c spamc/utils.c
 
-spamd/libsslspamc.so: spamd/binaries.mk $(SPAMC_SOURCES)
-	$(MAKE) -f spamd/binaries.mk $@
+$(SPAMC_MAKEFILE): $(SPAMC_MAKEFILE).in $(SPAMC_MAKEFILE).win
+	$(CONFIGURE) --prefix="$(I_PREFIX)" --sysconfdir="$(I_CONFDIR)" --datadir="$(I_DATADIR)" --enable-ssl="$(ENABLE_SSL)"
 
-spamd/libsslspamc.dll: spamd/binaries.mk $(SPAMC_SOURCES)
-	$(MAKE) -f spamd/binaries.mk $@
+spamc_has_moved:
+	$(NOECHO) echo "***"
+	$(NOECHO) echo "*** spamc now has its own directory: $(TARGET) is $(SOURCE)"
+	$(NOECHO) echo "***"
+	$(PERL) -MFile::Spec -MFile::Copy \
+	  -e "copy(q{$(SOURCE)}, q{$(TARGET)});"
 
-qmail/qmail-spamc: spamd/binaries.mk $(SPAMC_SOURCES)
-	$(MAKE) -f spamd/binaries.mk $@
+spamc/libspamc.so: $(SPAMC_MAKEFILE) $(LIBSPAMC_SRC) 
+	$(MAKE_SPAMC) $@
 
-spamd/binaries.mk: spamd/configure
-	cd spamd; ./configure --prefix="$(I_PREFIX)" --sysconfdir="$(I_SYSCONFDIR)" --datadir="$(I_DATADIR)" --enable-ssl="$(ENABLE_SSL)"
+spamd/libspamc.so: spamc/libspamc.so
+	$(MAKE_SPAMC_OLD)
+
+spamc/libsslspamc.so: $(SPAMC_MAKEFILE) $(LIBSPAMC_SRC)
+	$(MAKE_SPAMC) $@
+
+spamd/libsslspamc.so: spamc/libsslspamc.so
+	$(MAKE_SPAMC_OLD)
+
+spamc/spamc$(EXE_EXT): $(SPAMC_MAKEFILE) $(SPAMC_SRC)
+	$(MAKE_SPAMC) $@
+
+spamd/spamc$(EXE_EXT): spamc/spamc$(EXE_EXT)
+	$(MAKE_SPAMC_OLD)
+	$(CHMOD) $(PERM_RWX) $@
+
+spamc/qmail-spamc$(EXE_EXT): $(SPAMC_MAKEFILE) $(QSPAMC_SRC)
+	$(MAKE_SPAMC) $@
+
+qmail/qmail-spamc$(EXE_EXT): spamc/qmail-spamc$(EXE_EXT)
+	$(MKPATH) qmail
+	$(MAKE_SPAMC_OLD)
+	$(CHMOD) $(PERM_RWX) $@
+
 
 conf__install:
 	-$(MKPATH) $(B_CONFDIR)
 	$(PERL) -MFile::Spec -MFile::Copy \
 	  -e "copy(q{rules/local.cf}, q{$(B_CONFDIR)/local.cf}) unless -f q{$(B_CONFDIR)/local.cf};"
+	$(PERL) -MFile::Spec -MFile::Copy \
+	  -e "copy(q{rules/init.pre}, q{$(B_CONFDIR)/init.pre}) unless -f q{$(B_CONFDIR)/init.pre};"
 
 data__install:
 	-$(MKPATH) $(B_DATADIR)
 	$(PERL) -e "map unlink, <$(B_DATADIR)/*>"
-	$(PREPROCESS) $(FIXVARS) -m$(PERM_RW) -Irules -O$(B_DATADIR) $(RULES)
+	$(PREPROCESS) $(FIXVARS) -m$(PERM_RW) -Irules -O$(B_DATADIR) $(DATAFILES)
 	$(CHMOD) $(PERM_RWX) $(B_DATADIR)
 
 text_html_doc: made-doc-stamp
@@ -985,6 +1143,14 @@ made-doc-stamp: doc $(MAN1PODS) $(MAN3PODS) $(EXTRAPODS)
 	$(PERL) build/convert_pods_to_doc $(MAN1PODS) $(MAN3PODS) $(EXTRAPODS)
 	$(TOUCH) made-doc-stamp
 	$(RM_F) pod2htm*
+
+
+version.env: lib/Mail/SpamAssassin.pm Makefile
+	$(RM_F) $@
+	$(PERL) -Ilib -MMail::SpamAssassin -e 'printf("FULL_VERSION=%s\n", Mail::SpamAssassin::Version())' >> $@
+	$(PERL) -e 'print "DIST_VERSION=$(VERSION_COOL)\n"' >> $@
+	$(PERL) -e 'print "CPAN_VERSION=$(VERSION)\n"' >> $@
+
   EOD
 
   clean_MY_globals($self);

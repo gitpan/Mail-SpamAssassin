@@ -1,3 +1,19 @@
+# <@LICENSE>
+# Copyright 2004 Apache Software Foundation
+# 
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+# 
+#     http://www.apache.org/licenses/LICENSE-2.0
+# 
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# </@LICENSE>
+
 =head1 NAME
 
 Mail::SpamAssassin::AutoWhitelist - auto-whitelist handler for SpamAssassin
@@ -79,8 +95,6 @@ sub check_address {
 
   $self->{entry} = undef;
 
-  # note: $origip could be undef here, if no public IP was found in the
-  # message headers.
   my $fulladdr = $self->pack_addr ($addr, $origip);
   $self->{entry} = $self->{checker}->get_addr_entry ($fulladdr);
 
@@ -88,14 +102,17 @@ sub check_address {
     # no entry found
     if (defined $origip) {
       # try upgrading a default entry (probably from "add-addr-to-foo")
-      my $noipaddr = $self->pack_addr ($addr, 'cmd');
+      my $noipaddr = $self->pack_addr ($addr, undef);
       my $noipent = $self->{checker}->get_addr_entry ($noipaddr);
 
       if (defined $noipent->{count} && $noipent->{count} > 0) {
 	dbg ("AWL: found entry w/o IP address for $addr: replacing with $origip");
 	$self->{checker}->remove_entry($noipent);
-	$self->{entry} = $noipent;
-	$self->{entry}->{addr} = $fulladdr;
+        # Now assign proper entry the count and totscore values of the no ip entry
+        # instead of assigning the whole value to avoid wiping out any information added
+        # to the previous entry.
+	$self->{entry}->{count} = $noipent->{count};
+	$self->{entry}->{totscore} = $noipent->{totscore};
       }
     }
   }
@@ -173,7 +190,7 @@ sub modify_address {
     return undef;		# no factory defined; we can't check
   }
 
-  my $fulladdr = $self->pack_addr ($addr, 'cmd');
+  my $fulladdr = $self->pack_addr ($addr, undef);
   my $entry = $self->{checker}->get_addr_entry ($fulladdr);
 
   # remove any old entries (will remove per-ip entries as well)
@@ -202,16 +219,6 @@ sub finish {
 
 ###########################################################################
 
-# Entries in the db can have:
-#
-#   "from@addr|ip=nnn.nnn"	= from <from@addr>, IP addr nnn.nnn.*.*
-#   "from@addr|ip=none"		= from <from@addr>, via private networks
-#   "from@addr|ip=cmd"		= from <from@addr>, "commandline"
-#
-# the "commandline" variant is used for command-line manipulation of the
-# AWL; it'll be upgraded into an "ip=nnn.nnn" entry first time it is
-# used.
-
 sub pack_addr {
   my ($self, $addr, $origip) = @_;
 
@@ -222,13 +229,11 @@ sub pack_addr {
     # could not find an IP address to use, could be localhost mail or from
     # the user running "add-addr-to-*".
     $origip = 'none';
-  } elsif ($origip eq 'cmd') {
-    # pass that through
   } else {
     $origip =~ s/\.\d{1,3}\.\d{1,3}$//gs;
   }
 
-  $origip =~ s/[^0-9\.noecmd]/_/gs;	# paranoia
+  $origip =~ s/[^0-9\.noe]/_/gs;	# paranoia
   $addr."|ip=".$origip;
 }
 

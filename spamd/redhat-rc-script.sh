@@ -2,10 +2,10 @@
 #
 # spamassassin This script starts and stops the spamd daemon
 #
-# chkconfig: 2345 80 30
-#
-# description: spamd is a daemon process which uses SpamAssassin to check
-#              email messages for SPAM.  It is normally called by spamc
+# chkconfig: - 80 30
+# processname: spamd
+# description: spamd is a daemon process which uses SpamAssassin to check \
+#              email messages for SPAM.  It is normally called by spamc \
 #	       from a MDA.
 
 # Source function library.
@@ -17,11 +17,12 @@
 # Check that networking is up.
 [ ${NETWORKING} = "no" ] && exit 0
 
+# Set default spamd configuration.
+SPAMDOPTIONS="-d -c -m5 -H"
+
 # Source spamd configuration.
 if [ -f /etc/sysconfig/spamassassin ] ; then
-        . /etc/sysconfig/spamassassin
-else
-        SPAMDOPTIONS="-d -c -a -m5 -H"
+	. /etc/sysconfig/spamassassin
 fi
 
 [ -f /usr/bin/spamd -o -f /usr/local/bin/spamd ] || exit 0
@@ -32,7 +33,7 @@ case "$1" in
   start)
 	# Start daemon.
 	echo -n "Starting spamd: "
-	daemon spamd $SPAMDOPTIONS
+	daemon $NICELEVEL spamd $SPAMDOPTIONS
 	RETVAL=$?
         echo
         [ $RETVAL = 0 ] && touch /var/lock/subsys/spamassassin
@@ -54,6 +55,7 @@ case "$1" in
        ;;
   status)
 	status spamd
+	RETVAL=$?
 	;;
   *)
 	echo "Usage: $0 {start|stop|restart|status|condrestart}"

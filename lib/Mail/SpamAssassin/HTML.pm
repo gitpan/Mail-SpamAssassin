@@ -1,69 +1,248 @@
-# $Id: HTML.pm,v 1.96 2003/09/12 00:04:27 quinlan Exp $
+# $Id: HTML.pm,v 1.101 2003/10/15 08:08:05 quinlan Exp $
 
-package Mail::SpamAssassin::HTML;
-1;
+# <@LICENSE>
+# Copyright 2004 Apache Software Foundation
+# 
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+# 
+#     http://www.apache.org/licenses/LICENSE-2.0
+# 
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# </@LICENSE>
 
-package Mail::SpamAssassin::PerMsgStatus;
-use HTML::Parser 3.24 ();
+# HTML decoding TODOs
+# - add URIs to list for faster URI testing
 
 use strict;
 use bytes;
 
-use vars qw{
-  $re_loose $re_strict $events
-};
+package Mail::SpamAssassin::HTML;
 
-# HTML decoding TODOs
-# - add URIs to list for faster URI testing
+require Exporter;
+my @ISA = qw(Exporter);
+my @EXPORT = qw($re_start $re_loose $re_strict get_results);
+my @EXPORT_OK = qw();
+
+use HTML::Parser 3.24 ();
+use vars qw($re_start $re_loose $re_strict $re_other);
+
+# elements that trigger HTML rendering in text/plain in some mail clients
+# (repeats ones listed in $re_strict)
+$re_start = 'body|head|html|img|pre|table|title';
 
 # elements defined by the HTML 4.01 and XHTML 1.0 DTDs (do not change them!)
 $re_loose = 'applet|basefont|center|dir|font|frame|frameset|iframe|isindex|menu|noframes|s|strike|u';
 $re_strict = 'a|abbr|acronym|address|area|b|base|bdo|big|blockquote|body|br|button|caption|cite|code|col|colgroup|dd|del|dfn|div|dl|dt|em|fieldset|form|h1|h2|h3|h4|h5|h6|head|hr|html|i|img|input|ins|kbd|label|legend|li|link|map|meta|noscript|object|ol|optgroup|option|p|param|pre|q|samp|script|select|small|span|strong|style|sub|sup|table|tbody|td|textarea|tfoot|th|thead|title|tr|tt|ul|var';
 
 # loose list of HTML events
-$events = 'on(?:activate|afterupdate|beforeactivate|beforecopy|beforecut|beforedeactivate|beforeeditfocus|beforepaste|beforeupdate|blur|change|click|contextmenu|controlselect|copy|cut|dblclick|deactivate|errorupdate|focus|focusin|focusout|help|keydown|keypress|keyup|load|losecapture|mousedown|mouseenter|mouseleave|mousemove|mouseout|mouseover|mouseup|mousewheel|move|moveend|movestart|paste|propertychange|readystatechange|reset|resize|resizeend|resizestart|select|submit|timeerror|unload)';
+my $events = 'on(?:activate|afterupdate|beforeactivate|beforecopy|beforecut|beforedeactivate|beforeeditfocus|beforepaste|beforeupdate|blur|change|click|contextmenu|controlselect|copy|cut|dblclick|deactivate|errorupdate|focus|focusin|focusout|help|keydown|keypress|keyup|load|losecapture|mousedown|mouseenter|mouseleave|mousemove|mouseout|mouseover|mouseup|mousewheel|move|moveend|movestart|paste|propertychange|readystatechange|reset|resize|resizeend|resizestart|select|submit|timeerror|unload)';
+
+# other non-standard tags
+$re_other = 'o:\w+/?|x-sigsep|x-tab';
+
+# attributes: HTML 4.01 deprecated, loose DTD, frameset DTD
+my $re_attr = 'abbr|accept-charset|accept|accesskey|action|align|alink|alt|archive|axis|background|bgcolor|border|cellpadding|cellspacing|char|charoff|charset|checked|cite|class|classid|clear|code|codebase|codetype|color|cols|colspan|compact|content|coords|data|datetime|declare|defer|dir|disabled|enctype|face|for|frame|frameborder|headers|height|href|hreflang|hspace|http-equiv|id|ismap|label|lang|language|link|longdesc|marginheight|marginwidth|maxlength|media|method|multiple|name|nohref|noresize|noshade|nowrap|object|onblur|onchange|onclick|ondblclick|onfocus|onkeydown|onkeypress|onkeyup|onload|onmousedown|onmousemove|onmouseout|onmouseover|onmouseup|onreset|onselect|onsubmit|onunload|profile|prompt|readonly|rel|rev|rows|rowspan|rules|scheme|scope|scrolling|selected|shape|size|span|src|standby|start|style|summary|tabindex|target|text|title|type|usemap|valign|value|valuetype|version|vlink|vspace|width';
+
+# attributes: stuff we accept
+my $re_attr_extra = 'family|wrap|/';
+
+# style attribute not accepted
+my $re_attr_no_style = 'base|basefont|head|html|meta|param|script|style|title';
+
+# style attributes
+my %ok_attribute = (
+		 text => [qw(body)],
+		 color => [qw(basefont font)],
+		 bgcolor => [qw(body table tr td th marquee)],
+		 face => [qw(basefont font)],
+		 size => [qw(basefont font)],
+		 link => [qw(body)],
+		 alink => [qw(body)],
+		 vlink => [qw(body)],
+		 background => [qw(body marquee)],
+		 );
 
 my %tested_colors;
 
-sub html_init {
+sub new {
+  my $this = shift;
+  my $class = ref($this) || $this;
+  my $self = {};
+  bless($self, $class);
+
+  $self->html_start();
+
+  return $self;
+}
+
+sub html_start {
   my ($self) = @_;
 
-  push @{ $self->{bgcolor_color} }, "#ffffff";
-  push @{ $self->{bgcolor_tag} }, "default";
-  push @{ $self->{fgcolor_color} }, "#000000";
-  push @{ $self->{fgcolor_tag} }, "default";
-  undef %tested_colors;
+  $self->{basefont} = 3;
+
+  undef $self->{text_style};
+  my %default = (tag => "default",
+		 fgcolor => "#000000",
+		 bgcolor => "#ffffff",
+		 size => $self->{basefont});
+  push @{ $self->{text_style} }, \%default;
+}
+
+sub html_end {
+  my ($self) = @_;
+
+  $self->display_text();
+}
+
+sub get_results {
+  my ($self) = @_;
+
+  return $self->{html};
+}
+
+sub html_render {
+  my ($self, $text) = @_;
+
+  # clean this up later
+  for my $key (keys %{ $self->{html} }) {
+    delete $self->{html}{$key};
+  }
+
+  $self->{html}{ratio} = 0;
+  $self->{html}{image_area} = 0;
+  $self->{html}{shouting} = 0;
+  $self->{html}{max_shouting} = 0;
+  $self->{html}{anchor_index} = -1;
+  $self->{html}{title_index} = -1;
+  $self->{html}{max_size} = 3;	# start at default size
+  $self->{html}{min_size} = 3;	# start at default size
+
+  $self->{html_text} = [];
+  $self->{html_visible_text} = [];
+  $self->{html_invisible_text} = [];
+  $self->{last_text} = "";
+  $self->{last_visible_text} = "";
+  $self->{last_invisible_text} = "";
+  $self->{html_last_tag} = 0;
+  $self->{html}{closed_html} = 0;
+  $self->{html}{closed_body} = 0;
+
+  $self->{html}{length} += $1 if (length($text) =~ m/^(\d+)$/);	# untaint
+
+  # NOTE: We *only* need to fix the rendering when we verify that it
+  # differs from what people see in their MUA.  Testing is best done with
+  # the most common MUAs and browsers, if you catch my drift.
+
+  # NOTE: HTML::Parser can cope with: <?xml pis>, <? with space>, so we
+  # don't need to fix them here.
+
+  # bug #1551: HTML declarations, like <!foo>, are being used by spammers
+  # for obfuscation, and they aren't stripped out by HTML::Parser prior to
+  # version 3.28.  We have to modify these out *before* the parser is
+  # invoked, because otherwise a spammer could do "&lt;! body of message
+  # &gt;", which would get turned into "<! body of message >" by the
+  # parser, and then the whole body message would be stripped.
+
+  # convert <!foo> to <!--foo-->
+  if ($HTML::Parser::VERSION < 3.28) {
+    $text =~ s/<!((?!--|doctype)[^>]*)>/<!--$1-->/gsi;
+  }
+
+  # remove empty close tags: </>, </ >, </ foo>
+  if ($HTML::Parser::VERSION < 3.29) {
+    $text =~ s/<\/(?:\s.*?)?>//gs;
+  }
+
+  # HTML::Parser 3.31, at least, converts &nbsp; into a question mark "?" for some reason.
+  # Let's convert them to spaces.
+  $text =~ s/&nbsp;/ /g;
+
+  my $hp = HTML::Parser->new(
+		api_version => 3,
+		handlers => [
+		  start_document => [sub { $self->html_start(@_) }],
+		  start => [sub { $self->html_tag(@_) }, "tagname,attr,'+1'"],
+		  end_document => [sub { $self->html_end(@_) }],
+		  end => [sub { $self->html_tag(@_) }, "tagname,attr,'-1'"],
+		  text => [sub { $self->html_text(@_) }, "dtext"],
+		  comment => [sub { $self->html_comment(@_) }, "text"],
+		  declaration => [sub { $self->html_declaration(@_) }, "text"],
+		],
+		marked_sections => 1);
+
+  # ALWAYS pack it into byte-representation, even if we're using 'use bytes',
+  # since the HTML::Parser object may use Unicode internally.
+  # (bug 1417, maybe)
+  $hp->parse(pack ('C0A*', $text));
+  $hp->eof;
+
+  delete $self->{html_last_tag};
+
+  return $self->{html_text};
 }
 
 sub html_tag {
   my ($self, $tag, $attr, $num) = @_;
 
-  $self->{html_inside}{$tag} += $num;
+  my $is_element = ($tag =~ /^(?:$re_strict|$re_loose|$re_other)$/io);
 
-  $self->{html}{elements}++ if $tag =~ /^(?:$re_strict|$re_loose)$/io;
+  # general tracking
+  if ($is_element) {
+    $self->{html}{elements}++;
+    $self->{html}{elements_seen}++ if !exists $self->{html}{"inside_$tag"};
+  }
   $self->{html}{tags}++;
+  $self->{html}{tags_seen}++ if !exists $self->{html}{"inside_$tag"};
+  $self->{html}{"inside_$tag"} += $num;
+  $self->{html}{"inside_$tag"} = 0 if $self->{html}{"inside_$tag"} < 0;
 
-  if ($tag =~ /^(?:body|table|tr|th|td)$/) {
-    $self->html_bgcolor($tag, $attr, $num);
-  }
-  if ($tag =~ /^(?:body|font)$/) {
-    $self->html_fgcolor($tag, $attr, $num);
-  }
-
-  if ($num == 1) {
-    $self->html_format($tag, $attr, $num);
-    $self->html_uri($tag, $attr, $num);
-    $self->html_tests($tag, $attr, $num);
-
-    $self->{html_last_tag} = $tag;
-  }
-
-  if ($tag =~ /^(?:b|i|u|strong|em|big|center|h\d)$/) {
-    $self->{html}{shouting} += $num;
-
-    if ($self->{html}{shouting} > $self->{html}{max_shouting}) {
-      $self->{html}{max_shouting} = $self->{html}{shouting};
+  # check attributes
+  for my $name (keys %$attr) {
+    if ($name !~ /^(?:$re_attr|$re_attr_extra)$/io) {
+      $self->{html}{attr_bad}++;
+      $self->{html}{attr_unique_bad}++ if !exists $self->{"attr_seen_$name"};
     }
+    $self->{html}{attr_all}++;
+    $self->{html}{attr_unique_all}++ if !exists $self->{"attr_seen_$name"};
+    $self->{"attr_seen_$name"} = 1;
+  }
+
+  # ignore non-elements
+  if ($is_element) {
+    if ($tag =~ /^(?:body|font|table|tr|th|td|big|small|basefont|marquee)$/) {
+      $self->text_style($tag, $attr, $num);
+    }
+    # TODO: cover "style" and CSS
+    if ($tag !~ /^(?:$re_attr_no_style)$/ && exists $attr->{style}) {
+      $self->css_style($tag, $attr, $num);
+    }
+
+    # start tags
+    if ($num == 1) {
+      $self->html_format($tag, $attr, $num);
+      $self->html_uri($tag, $attr, $num);
+      $self->html_tests($tag, $attr, $num);
+    }
+    # end tags
+    elsif ($num == -1) {
+      $self->{html}{closed_html} = 1 if $tag eq "html";
+      $self->{html}{closed_body} = 1 if $tag eq "body";
+    }
+    # shouting
+    if ($tag =~ /^(?:b|i|u|strong|em|big|center|h\d)$/) {
+      $self->{html}{shouting} += $num;
+      if ($self->{html}{shouting} > $self->{html}{max_shouting}) {
+	$self->{html}{max_shouting} = $self->{html}{shouting};
+      }
+    }
+
+    $self->{html_last_tag} = (($num < 0) ? "/" : "") . $tag;
   }
 }
 
@@ -71,50 +250,199 @@ sub html_format {
   my ($self, $tag, $attr, $num) = @_;
 
   # ordered by frequency of tag groups
-  if ($tag eq "br") {
+  if ($tag eq "br" || $tag eq "div") {
+    $self->display_text();
+    push @{$self->{html_visible_text}}, "\n";
+    push @{$self->{html_invisible_text}}, "\n";
     push @{$self->{html_text}}, "\n";
   }
-  elsif ($tag eq "li" || $tag eq "td") {
+  elsif ($tag =~ /^(?:li|t[hd]|d[td])$/) {
+    $self->display_text();
+    push @{$self->{html_visible_text}}, " ";
+    push @{$self->{html_invisible_text}}, " ";
     push @{$self->{html_text}}, " ";
   }
-  elsif ($tag eq "p" || $tag eq "hr") {
+  elsif ($tag =~ /^(?:p|hr|blockquote|pre)$/) {
+    $self->display_text();
+    push @{$self->{html_visible_text}}, "\n\n";
+    push @{$self->{html_invisible_text}}, "\n\n";
     push @{$self->{html_text}}, "\n\n";
   }
-  elsif ($tag eq "img" && exists $attr->{alt} && $attr->{alt} ne "") {
-    push @{$self->{html_text}}, " $attr->{alt} ";
+}
+
+use constant URI_STRICT => 0;
+
+# resolving relative URIs as defined in RFC 2396 (steps from section 5.2)
+# using draft http://www.gbiv.com/protocols/uri/rev-2002/rfc2396bis.html
+sub parse_uri {
+  my ($u) = @_;
+  my %u;
+  ($u{scheme}, $u{authority}, $u{path}, $u{query}, $u{fragment}) =
+    $u =~ m|^(?:([^:/?#]+):)?(?://([^/?#]*))?([^?#]*)(?:\?([^#]*))?(?:#(.*))?|;
+  return %u;
+}
+
+sub remove_dot_segments {
+  my ($input) = @_;
+  my $output = "";
+
+  $input =~ s@^(?:\.\.?/)@/@;
+
+  while ($input) {
+    if ($input =~ s@^/\.(?:$|/)@/@) {
+    }
+    elsif ($input =~ s@^/\.\.(?:$|/)@/@) {
+      $output =~ s@/?[^/]*$@@;
+    }
+    elsif ($input =~ s@(/?[^/]*)@@) {
+      $output .= $1;
+    }
   }
+  return $output;
+}
+
+sub merge_uri {
+  my ($base_authority, $base_path, $r_path) = @_;
+
+  if (defined $base_authority && !$base_path) {
+    return "/" . $r_path;
+  }
+  else {
+    if ($base_path =~ m|/|) {
+      $base_path =~ s|(?<=/)[^/]*$||;
+    }
+    else {
+      $base_path = "";
+    }
+    return $base_path . $r_path;
+  }
+}
+
+sub target_uri {
+  my ($base, $r) = @_;
+
+  my %r = parse_uri($r);	# parsed relative URI
+  my %base = parse_uri($base);	# parsed base URI
+  my %t;			# generated temporary URI
+
+  if ((not URI_STRICT) and
+      (defined $r{scheme} && defined $base{scheme}) and
+      ($r{scheme} eq $base{scheme}))
+  {
+    undef $r{scheme};
+  }
+
+  if (defined $r{scheme}) {
+    $t{scheme} = $r{scheme};
+    $t{authority} = $r{authority};
+    $t{path} = remove_dot_segments($r{path});
+    $t{query} = $r{query};
+  }
+  else {
+    if (defined $r{authority}) {
+      $t{authority} = $r{authority};
+      $t{path} = remove_dot_segments($r{path});
+      $t{query} = $r{query};
+    }
+    else {
+      if ($r{path} eq "") {
+	$t{path} = $base{path};
+	if (defined $r{query}) {
+	  $t{query} = $r{query};
+	}
+	else {
+	  $t{query} = $base{query};
+	}
+      }
+      else {
+	if ($r{path} =~ m|^/|) {
+	  $t{path} = remove_dot_segments($r{path});
+	}
+	else {
+	  $t{path} = merge_uri($base{authority}, $base{path}, $r{path});
+	  $t{path} = remove_dot_segments($t{path});
+	}
+	$t{query} = $r{query};
+      }
+      $t{authority} = $base{authority};
+    }
+    $t{scheme} = $base{scheme};
+  }
+  $t{fragment} = $r{fragment};
+
+  # recompose URI
+  my $result = "";
+  if ($t{scheme}) {
+    $result .= $t{scheme} . ":";
+  }
+  elsif (defined $t{authority}) {
+    # this block is not part of the RFC
+    # TODO: figure out what MUAs actually do with unschemed URIs
+    # maybe look at URI::Heuristic
+    if ($t{authority} =~ /^www\d*\./i) {
+      # some spammers are using unschemed URIs to escape filters
+      $result .= "http:";
+    }
+    elsif ($t{authority} =~ /^ftp\d*\./i) {
+      $result .= "ftp:";
+    }
+  }
+  if ($t{authority}) {
+    $result .= "//" . $t{authority};
+  }
+  $result .= $t{path};
+  if ($t{query}) {
+    $result .= "?" . $t{query};
+  }
+  if ($t{fragment}) {
+    $result .= "#" . $t{fragment};
+  }
+  return $result;
+}
+
+sub push_uri {
+  my ($self, $uri) = @_;
+
+  $uri ||= '';
+
+  # URIs don't have leading/trailing whitespace ...
+  $uri =~ s/^\s+//;
+  $uri =~ s/\s+$//;
+
+  my $target = target_uri($self->{html}{base_href} || "", $uri);
+  push @{$self->{html}{uri}}, $target if $target;
 }
 
 sub html_uri {
   my ($self, $tag, $attr, $num) = @_;
-  my $uri;
 
   # ordered by frequency of tag groups
   if ($tag =~ /^(?:body|table|tr|td)$/) {
-    push @{$self->{html_text}}, "URI:$uri " if $uri = $attr->{background};
+    $self->push_uri($attr->{background});
   }
   elsif ($tag =~ /^(?:a|area|link)$/) {
-    push @{$self->{html_text}}, "URI:$uri " if $uri = $attr->{href};
+    $self->push_uri($attr->{href});
   }
   elsif ($tag =~ /^(?:img|frame|iframe|embed|script)$/) {
-    push @{$self->{html_text}}, "URI:$uri " if $uri = $attr->{src};
+    $self->push_uri($attr->{src});
   }
   elsif ($tag eq "form") {
-    push @{$self->{html_text}}, "URI:$uri " if $uri = $attr->{action};
+    $self->push_uri($attr->{action});
   }
   elsif ($tag eq "base") {
-    if ($uri = $attr->{href}) {
+    if (my $uri = $attr->{href}) {
       # use <BASE HREF="URI"> to turn relative links into absolute links
 
       # even if it is a base URI, handle like a normal URI as well
-      push @{$self->{html_text}}, "URI:$uri ";
+      push @{$self->{html}{uri}}, $uri;
 
       # a base URI will be ignored by browsers unless it is an absolute
       # URI of a standard protocol
-      if ($uri =~ m@^(?:ftp|https?)://@i) {
+      if ($uri =~ m@^(?:https?|ftp):/{0,2}@i) {
 	# remove trailing filename, if any; base URIs can have the
 	# form of "http://foo.com/index.html"
-	$uri =~ s@^([a-z]+://[^/]+/.*?)[^/\.]+\.[^/\.]{2,4}$@$1@i;
+	$uri =~ s@^([a-z]+:/{0,2}[^/]+/.*?)[^/\.]+\.[^/\.]{2,4}$@$1@i;
+
 	# Make sure it ends in a slash
 	$uri .= "/" unless $uri =~ m@/$@;
 	$self->{html}{base_href} = $uri;
@@ -123,194 +451,303 @@ sub html_uri {
   }
 }
 
-# input values from 0 to 255
-sub rgb_to_hsv {
-  my ($r, $g, $b) = @_;
-  my ($h, $s, $v, $max, $min);
-
-  if ($r > $g) {
-    $max = $r; $min = $g;
-  }
-  else {
-    $min = $r; $max = $g;
-  }
-  $max = $b if $b > $max;
-  $min = $b if $b < $min;
-  $v = $max;
-  $s = $max ? ($max - $min) / $max : 0;
-  if ($s == 0) {
-    $h = undef;
-  }
-  else {
-    my $cr = ($max - $r) / ($max - $min);
-    my $cg = ($max - $g) / ($max - $min);
-    my $cb = ($max - $b) / ($max - $min);
-    if ($r == $max) {
-      $h = $cb - $cg;
-    }
-    elsif ($g == $max) {
-      $h = 2 + $cr - $cb;
-    }
-    elsif ($b == $max) {
-      $h = 4 + $cg - $cr;
-    }
-    $h *= 60;
-    $h += 360 if $h < 0;
-  }
-  return ($h, $s, $v);
-}
-
-# HTML 4 defined 16 colors
 my %html_color = (
-  aqua		=> '#00ffff',
-  black		=> '#000000',
-  blue		=> '#0000ff',
-  fuchsia	=> '#ff00ff',
-  gray		=> '#808080',
-  green		=> '#008000',
-  lime		=> '#00ff00',
-  maroon	=> '#800000',
-  navy		=> '#000080',
-  olive		=> '#808000',
-  purple	=> '#800080',
-  red		=> '#ff0000',
-  silver	=> '#c0c0c0',
-  teal		=> '#008080',
-  white		=> '#ffffff',
-  yellow	=> '#ffff00',
-);
-
-# popular X11 colors specified in CSS3 color module
-my %name_color = (
-  aliceblue	=> '#f0f8ff',
-  cyan		=> '#00ffff',
-  darkblue	=> '#00008b',
-  darkcyan	=> '#008b8b',
-  darkgray	=> '#a9a9a9',
-  darkgreen	=> '#006400',
-  darkred	=> '#8b0000',
-  firebrick	=> '#b22222',
-  gold		=> '#ffd700',
-  lightslategray=> '#778899',
-  magenta	=> '#ff00ff',
-  orange	=> '#ffa500',
-  pink		=> '#ffc0cb',
-  whitesmoke	=> '#f5f5f5',
+  # HTML 4 defined 16 colors
+  aqua => 0x00ffff,
+  black => 0x000000,
+  blue => 0x0000ff,
+  fuchsia => 0xff00ff,
+  gray => 0x808080,
+  green => 0x008000,
+  lime => 0x00ff00,
+  maroon => 0x800000,
+  navy => 0x000080,
+  olive => 0x808000,
+  purple => 0x800080,
+  red => 0xff0000,
+  silver => 0xc0c0c0,
+  teal => 0x008080,
+  white => 0xffffff,
+  yellow => 0xffff00,
+  # colors specified in CSS3 color module
+  aliceblue => 0xf0f8ff,
+  antiquewhite => 0xfaebd7,
+  aqua => 0x00ffff,
+  aquamarine => 0x7fffd4,
+  azure => 0xf0ffff,
+  beige => 0xf5f5dc,
+  bisque => 0xffe4c4,
+  black => 0x000000,
+  blanchedalmond => 0xffebcd,
+  blue => 0x0000ff,
+  blueviolet => 0x8a2be2,
+  brown => 0xa52a2a,
+  burlywood => 0xdeb887,
+  cadetblue => 0x5f9ea0,
+  chartreuse => 0x7fff00,
+  chocolate => 0xd2691e,
+  coral => 0xff7f50,
+  cornflowerblue => 0x6495ed,
+  cornsilk => 0xfff8dc,
+  crimson => 0xdc143c,
+  cyan => 0x00ffff,
+  darkblue => 0x00008b,
+  darkcyan => 0x008b8b,
+  darkgoldenrod => 0xb8860b,
+  darkgray => 0xa9a9a9,
+  darkgreen => 0x006400,
+  darkgrey => 0xa9a9a9,
+  darkkhaki => 0xbdb76b,
+  darkmagenta => 0x8b008b,
+  darkolivegreen => 0x556b2f,
+  darkorange => 0xff8c00,
+  darkorchid => 0x9932cc,
+  darkred => 0x8b0000,
+  darksalmon => 0xe9967a,
+  darkseagreen => 0x8fbc8f,
+  darkslateblue => 0x483d8b,
+  darkslategray => 0x2f4f4f,
+  darkslategrey => 0x2f4f4f,
+  darkturquoise => 0x00ced1,
+  darkviolet => 0x9400d3,
+  deeppink => 0xff1493,
+  deepskyblue => 0x00bfff,
+  dimgray => 0x696969,
+  dimgrey => 0x696969,
+  dodgerblue => 0x1e90ff,
+  firebrick => 0xb22222,
+  floralwhite => 0xfffaf0,
+  forestgreen => 0x228b22,
+  fuchsia => 0xff00ff,
+  gainsboro => 0xdcdcdc,
+  ghostwhite => 0xf8f8ff,
+  gold => 0xffd700,
+  goldenrod => 0xdaa520,
+  gray => 0x808080,
+  green => 0x008000,
+  greenyellow => 0xadff2f,
+  grey => 0x808080,
+  honeydew => 0xf0fff0,
+  hotpink => 0xff69b4,
+  indianred => 0xcd5c5c,
+  indigo => 0x4b0082,
+  ivory => 0xfffff0,
+  khaki => 0xf0e68c,
+  lavender => 0xe6e6fa,
+  lavenderblush => 0xfff0f5,
+  lawngreen => 0x7cfc00,
+  lemonchiffon => 0xfffacd,
+  lightblue => 0xadd8e6,
+  lightcoral => 0xf08080,
+  lightcyan => 0xe0ffff,
+  lightgoldenrodyellow => 0xfafad2,
+  lightgray => 0xd3d3d3,
+  lightgreen => 0x90ee90,
+  lightgrey => 0xd3d3d3,
+  lightpink => 0xffb6c1,
+  lightsalmon => 0xffa07a,
+  lightseagreen => 0x20b2aa,
+  lightskyblue => 0x87cefa,
+  lightslategray => 0x778899,
+  lightslategrey => 0x778899,
+  lightsteelblue => 0xb0c4de,
+  lightyellow => 0xffffe0,
+  lime => 0x00ff00,
+  limegreen => 0x32cd32,
+  linen => 0xfaf0e6,
+  magenta => 0xff00ff,
+  maroon => 0x800000,
+  mediumaquamarine => 0x66cdaa,
+  mediumblue => 0x0000cd,
+  mediumorchid => 0xba55d3,
+  mediumpurple => 0x9370db,
+  mediumseagreen => 0x3cb371,
+  mediumslateblue => 0x7b68ee,
+  mediumspringgreen => 0x00fa9a,
+  mediumturquoise => 0x48d1cc,
+  mediumvioletred => 0xc71585,
+  midnightblue => 0x191970,
+  mintcream => 0xf5fffa,
+  mistyrose => 0xffe4e1,
+  moccasin => 0xffe4b5,
+  navajowhite => 0xffdead,
+  navy => 0x000080,
+  oldlace => 0xfdf5e6,
+  olive => 0x808000,
+  olivedrab => 0x6b8e23,
+  orange => 0xffa500,
+  orangered => 0xff4500,
+  orchid => 0xda70d6,
+  palegoldenrod => 0xeee8aa,
+  palegreen => 0x98fb98,
+  paleturquoise => 0xafeeee,
+  palevioletred => 0xdb7093,
+  papayawhip => 0xffefd5,
+  peachpuff => 0xffdab9,
+  peru => 0xcd853f,
+  pink => 0xffc0cb,
+  plum => 0xdda0dd,
+  powderblue => 0xb0e0e6,
+  purple => 0x800080,
+  red => 0xff0000,
+  rosybrown => 0xbc8f8f,
+  royalblue => 0x4169e1,
+  saddlebrown => 0x8b4513,
+  salmon => 0xfa8072,
+  sandybrown => 0xf4a460,
+  seagreen => 0x2e8b57,
+  seashell => 0xfff5ee,
+  sienna => 0xa0522d,
+  silver => 0xc0c0c0,
+  skyblue => 0x87ceeb,
+  slateblue => 0x6a5acd,
+  slategray => 0x708090,
+  slategrey => 0x708090,
+  snow => 0xfffafa,
+  springgreen => 0x00ff7f,
+  steelblue => 0x4682b4,
+  tan => 0xd2b48c,
+  teal => 0x008080,
+  thistle => 0xd8bfd8,
+  tomato => 0xff6347,
+  turquoise => 0x40e0d0,
+  violet => 0xee82ee,
+  wheat => 0xf5deb3,
+  white => 0xffffff,
+  whitesmoke => 0xf5f5f5,
+  yellow => 0xffff00,
+  yellowgreen => 0x9acd32,
 );
 
 sub name_to_rgb {
-  return $html_color{$_[0]} || $name_color{$_[0]} || $_[0];
+  my $color = lc $_[0];
+  if (my $hex = $html_color{$color}) {
+      return sprintf("#%06x", $hex);
+  }
+  return $color;
 }
 
-sub pop_bgcolor {
-  my ($self) = @_;
+# this might not be quite right, may need to pay attention to table nesting
+sub close_table_tag {
+  my ($self, $tag) = @_;
 
-  pop @{ $self->{bgcolor_color} };
-  pop @{ $self->{bgcolor_tag} };
+  # don't close if never opened
+  return unless grep { $_->{tag} eq $tag } @{ $self->{text_style} };
+
+  my $top;
+  while (@{ $self->{text_style} } && ($top = $self->{text_style}[-1]->{tag})) {
+    if (($tag eq "td" && $top =~ /^(?:font|td)$/) ||
+	($tag eq "tr" && $top =~ /^(?:font|td|tr)$/))
+    {
+      pop @{ $self->{text_style} };
+    }
+    else {
+      last;
+    }
+  }
 }
 
-sub html_bgcolor {
+sub close_tag {
+  my ($self, $tag) = @_;
+
+  # don't close if never opened
+  return if !grep { $_->{tag} eq $tag } @{ $self->{text_style} };
+
+  # close everything up to and including tag
+  while (my %current = %{ pop @{ $self->{text_style} } }) {
+    last if $current{tag} eq $tag;
+  }
+}
+
+# process CSS style attribute
+sub css_style {
   my ($self, $tag, $attr, $num) = @_;
 
+  # TODO: something here
+}
+
+# body, font, table, tr, th, td, big, small
+sub text_style {
+  my ($self, $tag, $attr, $num) = @_;
+
+  # treat <th> as <td>
+  $tag = "td" if $tag eq "th";
+
+  # open
   if ($num == 1) {
+    # HTML browsers generally only use first <body> for colors,
+    # so only push if we haven't seen a body tag yet
+    if ($tag eq "body") {
+      # TODO: skip if we've already seen body
+    }
+
+    # change basefont (only change size)
+    if ($tag eq "basefont" &&
+	exists $attr->{size} && $attr->{size} =~ /^\s*(\d+)/)
+    {
+      $self->{basefont} = $1;
+      return;
+    }
+
     # close elements with optional end tags
-    if ($tag eq "body") {
-      # compromise between HTML browsers generally only using first
-      # body and some messages including multiple HTML attachments:
-      # pop everything except first body color
-      while ($self->{bgcolor_tag}[-1] !~ /^(?:default|body)$/) {
-	$self->pop_bgcolor();
+    $self->close_table_tag($tag) if ($tag eq "td" || $tag eq "tr");
+
+    # copy current text state
+    my %new = %{ $self->{text_style}[-1] };
+
+    # change tag name!
+    $new{tag} = $tag;
+
+    # big and small tags
+    if ($tag eq "big") {
+      $new{size} += 1;
+      push @{ $self->{text_style} }, \%new;
+      return;
+    }
+    if ($tag eq "small") {
+      $new{size} -= 1;
+      push @{ $self->{text_style} }, \%new;
+      return;
+    }
+
+    # tag attributes
+    for my $name (keys %$attr) {
+      next unless (grep { $_ eq $tag } @{ $ok_attribute{$name} });
+      if ($name =~ /^(?:text|color)$/) {
+	# two different names for text color
+	$new{fgcolor} = name_to_rgb(lc($attr->{$name}));
+      }
+      elsif ($name eq "size" && $attr->{size} =~ /^\s*([+-]\d+)/) {
+	# relative font size
+	$new{size} = $self->{basefont} + $1;
+      }
+      else {
+	if ($name eq "bgcolor") {
+	  # overwrite with hex value, $new{bgcolor} is set below
+	  $attr->{bgcolor} = name_to_rgb(lc($attr->{bgcolor}));
+	}
+	if ($name eq "size" && $attr->{size} !~ /^\s*([+-])(\d+)/) {
+	  # attribute is malformed
+	}
+	else {
+	  # attribute is probably okay
+	  $new{$name} = $attr->{$name};
+	}
+      }
+      if ($new{size} > $self->{html}{max_size}) {
+	$self->{html}{max_size} = $new{size};
+      }
+      elsif ($new{size} < $self->{html}{min_size}) {
+	$self->{html}{min_size} = $new{size};
       }
     }
-    if ($tag eq "tr") {
-      while ($self->{bgcolor_tag}[-1] =~ /^t[hd]$/) {
-	$self->pop_bgcolor();
-      }
-      $self->pop_bgcolor() if $self->{bgcolor_tag}[-1] eq "tr";
-    }
-    elsif ($tag =~ /^t[hd]$/) {
-      $self->pop_bgcolor() if $self->{bgcolor_tag}[-1] =~ /^t[hd]$/;
-    }
-    # figure out new bgcolor
-    my $bgcolor;
-    if (exists $attr->{bgcolor}) {
-      $bgcolor = name_to_rgb(lc($attr->{bgcolor}));
-    }
-    else {
-      $bgcolor = $self->{bgcolor_color}[-1];
-    }
-    # tests
-    if ($tag eq "body" && $bgcolor !~ /^\#?ffffff$/) {
-      $self->{html}{bgcolor_nonwhite} = 1;
-    }
-    # push new bgcolor
-    push @{ $self->{bgcolor_color} }, $bgcolor;
-    push @{ $self->{bgcolor_tag} }, $tag;
+    push @{ $self->{text_style} }, \%new;
   }
+  # explicitly close a tag
   else {
-    # close elements
-    if ($tag eq "body") {
-      $self->pop_bgcolor() if $self->{bgcolor_tag}[-1] eq "body";
-    }
-    elsif ($tag eq "table") {
-      while ($self->{bgcolor_tag}[-1] =~ /^t[rhd]$/) {
-	$self->pop_bgcolor();
-      }
-      $self->pop_bgcolor() if $self->{bgcolor_tag}[-1] eq "table";
-    }
-    elsif ($tag eq "tr") {
-      while ($self->{bgcolor_tag}[-1] =~ /^t[hd]$/) {
-	$self->pop_bgcolor();
-      }
-      $self->pop_bgcolor() if $self->{bgcolor_tag}[-1] eq "tr";
-    }
-    elsif ($tag =~ /^t[hd]$/) {
-      $self->pop_bgcolor() if $self->{bgcolor_tag}[-1] =~ /^t[hd]$/;
-    }
-  }
-}
-  
-sub pop_fgcolor {
-  my ($self) = @_;
-
-  pop @{ $self->{fgcolor_color} };
-  pop @{ $self->{fgcolor_tag} };
-}
-
-sub html_fgcolor {
-  my ($self, $tag, $attr, $num) = @_;
-
-  if ($num == 1) {
-    if ($tag eq "body") {
-      # compromise between HTML browsers generally only using first
-      # body and some messages including multiple HTML attachments:
-      # pop everything except first body color
-      while ($self->{fgcolor_tag}[-1] !~ /^(?:default|body)$/) {
-	$self->pop_fgcolor();
-      }
-    }
-    # figure out new fgcolor
-    my $fgcolor;
-    if ($tag eq "font" && exists $attr->{color}) {
-      $fgcolor = name_to_rgb(lc($attr->{color}));
-    }
-    elsif ($tag eq "body" && exists $attr->{text}) {
-      $fgcolor = name_to_rgb(lc($attr->{text}));
-    }
-    else {
-      $fgcolor = $self->{fgcolor_color}[-1];
-    }
-    # push new fgcolor
-    push @{ $self->{fgcolor_color} }, $fgcolor;
-    push @{ $self->{fgcolor_tag} }, $tag;
-  }
-  else {
-    # close elements
-    if ($tag eq "body") {
-      $self->pop_fgcolor() if $self->{fgcolor_tag}[-1] eq "body";
-    }
-    if ($tag eq "font") {
-      $self->pop_fgcolor() if $self->{fgcolor_tag}[-1] eq "font";
+    if ($tag ne "body") {
+      # don't close body since browsers seem to render text after </body>
+      $self->close_tag($tag);
     }
   }
 }
@@ -318,15 +755,14 @@ sub html_fgcolor {
 sub html_font_invisible {
   my ($self, $text) = @_;
 
-  my $fg = $self->{fgcolor_color}[-1];
-  my $bg = $self->{bgcolor_color}[-1];
-
-  return if exists $tested_colors{"$fg\000$bg"};
-  $tested_colors{"$fg\000$bg"}++;
+  my $fg = $self->{text_style}[-1]->{fgcolor};
+  my $bg = $self->{text_style}[-1]->{bgcolor};
+  my $visible_for_bayes = 1;
 
   # invisibility
   if (substr($fg,-6) eq substr($bg,-6)) {
     $self->{html}{font_invisible} = 1;
+    $visible_for_bayes = 0;
   }
   # near-invisibility
   elsif ($fg =~ /^\#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/) {
@@ -348,100 +784,62 @@ sub html_font_invisible {
       # increases (near-invisible text is at about 0.95% of spam and
       # 1.25% of HTML spam right now), but please test any changes first
       if ($distance < 12) {
-	$self->{html}{"font_near_invisible"} = 1;
+	$self->{html}{"font_low_contrast"} = 1;
+        $visible_for_bayes = 0;
       }
     }
   }
+
+  return $visible_for_bayes;
 }
 
 sub html_tests {
   my ($self, $tag, $attr, $num) = @_;
+  local ($_);
 
   if ($tag eq "table" && exists $attr->{border} && $attr->{border} =~ /(\d+)/)
   {
     $self->{html}{thick_border} = 1 if $1 > 1;
   }
-  if ($tag eq "script") {
-    $self->{html}{javascript} = 1;
-  }
+  # if ($tag eq "script") {
+  # $self->{html}{javascript} = 1;
+  # }
   if ($tag =~ /^(?:a|body|div|input|form|td|layer|area|img)$/i) {
     for (keys %$attr) {
       if (/\b(?:$events)\b/io)
       {
 	$self->{html}{html_event} = 1;
       }
-      if (/\bon(?:blur|contextmenu|focus|load|resize|submit|unload)\b/i &&
+      if (/\bon(?:contextmenu|load|resize|submit|unload)\b/i &&
 	  $attr->{$_})
       {
 	$self->{html}{html_event_unsafe} = 1;
-        if ($attr->{$_} =~ /\.open\s*\(/) { $self->{html}{window_open} = 1; }
-        if ($attr->{$_} =~ /\.blur\s*\(/) { $self->{html}{window_blur} = 1; }
-        if ($attr->{$_} =~ /\.focus\s*\(/) { $self->{html}{window_focus} = 1; }
+        # if ($attr->{$_} =~ /\.open\s*\(/) { $self->{html}{window_open} = 1; }
       }
     }
   }
   if ($tag eq "font" && exists $attr->{size}) {
-    $self->{html}{big_font} = 1 if (($attr->{size} =~ /^\s*(\d+)/ && $1 > 3) ||
-			    ($attr->{size} =~ /\+(\d+)/ && $1 >= 1));
-  }
-  if ($tag eq "font" && exists $attr->{color}) {
-    my $bg = $self->{bgcolor_color}[-1];
-    my $fg = lc($attr->{color});
-    if ($fg =~ /^\#?[0-9a-f]{6}$/ && $fg !~ /^\#?(?:00|33|66|80|99|cc|ff){3}$/)
-    {
-      $self->{html}{font_color_unsafe} = 1;
-    }
-    if ($fg !~ /^\#?[0-9a-f]{6}$/ && !exists $html_color{$fg})
-    {
-      $self->{html}{font_color_name} = 1;
-    }
-    if ($fg =~ /^\#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/) {
-      my ($h, $s, $v) = rgb_to_hsv(hex($1), hex($2), hex($3));
-      if (!defined($h)) {
-	$self->{html}{font_gray} = 1 unless ($v == 0 || $v == 255);
-      }
-      elsif ($h < 30 || $h >= 330) {
-	$self->{html}{font_red} = 1;
-      }
-      elsif ($h < 90) {
-	$self->{html}{font_yellow} = 1;
-      }
-      elsif ($h < 150) {
-	$self->{html}{font_green} = 1;
-      }
-      elsif ($h < 210) {
-	$self->{html}{font_cyan} = 1;
-      }
-      elsif ($h < 270) {
-	$self->{html}{font_blue} = 1;
-      }
-      elsif ($h < 330) {
-	$self->{html}{font_magenta} = 1;
-      }
-    }
-    else {
-      $self->{html}{font_color_unknown} = 1;
-    }
+    my $size = $attr->{size};
+    $self->{html}{tiny_font} = 1 if (($size =~ /^\s*(\d+)/ && $1 < 1) ||
+				     ($size =~ /\-(\d+)/ && $1 >= 3));
+    $self->{html}{big_font} = 1 if (($size =~ /^\s*(\d+)/ && $1 > 3) ||
+				    ($size =~ /\+(\d+)/ && $1 >= 1));
   }
   if ($tag eq "font" && exists $attr->{face}) {
-    #print STDERR "FONT " . $attr->{face} . "\n";
     if ($attr->{face} =~ /[A-Z]{3}/ && $attr->{face} !~ /M[ST][A-Z]|ITC/) {
       $self->{html}{font_face_caps} = 1;
     }
     if ($attr->{face} !~ /^[a-z][a-z -]*[a-z](?:,\s*[a-z][a-z -]*[a-z])*$/i) {
       $self->{html}{font_face_bad} = 1;
     }
-    for (split(/,/, lc($attr->{face}))) {
-      $self->{html}{font_face_odd} = 1 if ! /^\s*(?:arial|arial black|courier new|geneva|helvetica|ms sans serif|sans serif|sans-serif|sans-serif;|serif|sunsans-regular|swiss|tahoma|times|times new roman|trebuchet|trebuchet ms|verdana)\s*$/i;
-    }
   }
   if (exists($attr->{style})) {
     if ($attr->{style} =~ /font(?:-size)?:\s*(\d+(?:\.\d*)?|\.\d+)(p[tx])/i) {
-      my $size = $1;
-      my $type = $2;
-
-      $self->{html}{big_font} = 1 if (lc($type) eq "pt" && $size > 12);
+      $self->examine_text_style ($1, $2);
     }
+  }
+  if ($tag eq "img") {
+    push @{ $self->{html}{img_src} }, $attr->{src} if exists $attr->{src};
   }
   if ($tag eq "img" && exists $attr->{width} && exists $attr->{height}) {
     my $width = 0;
@@ -457,6 +855,9 @@ sub html_tests {
       $height = $1;
       $height *= 6 if (defined $2 && $2 eq "%");
     }
+    # guess size
+    $width = 200 if $width <= 0;
+    $height = 200 if $height <= 0;
     if ($width > 0 && $height > 0) {
       $area = $width * $height;
       $self->{html}{image_area} += $area;
@@ -471,17 +872,22 @@ sub html_tests {
   if ($tag eq "form" && exists $attr->{action}) {
     $self->{html}{form_action_mailto} = 1 if $attr->{action} =~ /mailto:/i
   }
-  if ($tag =~ /^i?frame$/) {
-    $self->{html}{relaying_frame} = 1;
-  }
   if ($tag =~ /^(?:object|embed)$/) {
     $self->{html}{embeds} = 1;
   }
-  if ($tag eq "title" &&
-      !(exists $self->{html_inside}{body} && $self->{html_inside}{body} > 0))
-  {
-    $self->{html}{title_text} = "";
+
+  # special text delimiters - <a> and <title>
+  if ($tag eq "a") {
+    $self->{html}{anchor_index}++;
+    $self->{html}{anchor}->[$self->{html}{anchor_index}] = "";
   }
+  if ($tag eq "title") {
+    $self->{html}{title_index}++;
+    $self->{html}{title}->[$self->{html}{title_index}] = "";
+
+    # $self->{html}{title_extra}++ if $self->{html}{title_index} > 0;
+  }
+
   if ($tag eq "meta" &&
       exists $attr->{'http-equiv'} &&
       exists $attr->{content} &&
@@ -490,66 +896,113 @@ sub html_tests {
   {
     $self->{html}{charsets} .= exists $self->{html}{charsets} ? " $1" : $1;
   }
+}
 
-  $self->{html}{anchor_text} ||= "" if ($tag eq "a");
+sub examine_text_style {
+  my ($self, $size, $type) = @_;
+  $type = lc $type;
+  $self->{html}{tiny_font} = 1 if ($type eq "pt" && $size < 4);
+  $self->{html}{tiny_font} = 1 if ($type eq "pt" && $size < 4);
+  $self->{html}{big_font} = 1 if ($type eq "pt" && $size > 14);
+  $self->{html}{big_font} = 1 if ($type eq "px" && $size > 18);
+}
+
+sub display_text {
+  my ($self) = @_;
+
+  for my $type ('text', 'visible_text', 'invisible_text') {
+    my $text = $self->{"last_$type"};
+    $text =~ s/[ \t\n\r\f\x0b\xa0]+/ /g;
+    $text =~ s/^ //;
+    $text =~ s/ $//;
+    push @{$self->{"html_$type"}}, $text;
+    $self->{"last_$type"} = "";
+  }
 }
 
 sub html_text {
   my ($self, $text) = @_;
 
-  if (exists $self->{html_inside}{a} && $self->{html_inside}{a} > 0) {
-    $self->{html}{anchor_text} .= " $text";
-  }
+  # note: this comes back from HTML::Parser as UTF-8-tainted.  Enforce byte
+  # mode by repacking the string in byte mode, to avoid 'Malformed UTF-8
+  # character (unexpected non-continuation byte)' warnings
+  $text = pack ("C0A*", $text);
 
-  if (exists $self->{html_inside}{script} && $self->{html_inside}{script} > 0)
+  # text that is not part of body
+  if (exists $self->{html}{inside_script} && $self->{html}{inside_script} > 0)
   {
-    if ($text =~ /\b(?:$events)\b/io)
-    {
-      $self->{html}{html_event} = 1;
-    }
     if ($text =~ /\bon(?:blur|contextmenu|focus|load|resize|submit|unload)\b/i)
     {
       $self->{html}{html_event_unsafe} = 1;
     }
-    if ($text =~ /\.open\s*\(/) { $self->{html}{window_open} = 1; }
-    if ($text =~ /\.blur\s*\(/) { $self->{html}{window_blur} = 1; }
-    if ($text =~ /\.focus\s*\(/) { $self->{html}{window_focus} = 1; }
+    if ($text =~ /\b(?:$events)\b/io) { $self->{html}{html_event} = 1; }
+    # if ($text =~ /\.open\s*\(/) { $self->{html}{window_open} = 1; }
     return;
   }
-
-  if (exists $self->{html_inside}{style} && $self->{html_inside}{style} > 0) {
+  if (exists $self->{html}{inside_style} && $self->{html}{inside_style} > 0) {
     if ($text =~ /font(?:-size)?:\s*(\d+(?:\.\d*)?|\.\d+)(p[tx])/i) {
-      my $size = $1;
-      my $type = $2;
-
-      $self->{html}{big_font} = 1 if (lc($type) eq "pt" && $size > 12);
+      $self->examine_text_style ($1, $2);
     }
     return;
   }
 
-  if (!(exists $self->{html_inside}{body} && $self->{html_inside}{body} > 0) &&
-        exists $self->{html_inside}{title} && $self->{html_inside}{title} > 0)
-  {
-    $self->{html}{title_text} .= $text;
+  # text that is part of body and also stored separately
+  if (exists $self->{html}{inside_a} && $self->{html}{inside_a} > 0) {
+    $self->{html}{anchor}->[$self->{html}{anchor_index}] .= $text;
+  }
+  if (exists $self->{html}{inside_title} && $self->{html}{inside_title} > 0) {
+    $self->{html}{title}->[$self->{html}{title_index}] .= $text;
   }
 
-  $self->html_font_invisible($text) if $text =~ /[^ \t\n\r\f\x0b\xa0]/;
+  my $visible_for_bayes = 1;
+  if ($text =~ /[^ \t\n\r\f\x0b\xa0]/) {
+    $visible_for_bayes = $self->html_font_invisible($text);
+    $self->{html}{text_after_body} = 1 if $self->{html}{closed_body};
+    $self->{html}{text_after_html} = 1 if $self->{html}{closed_html};
+  }
 
-  $text =~ s/^\n//s if $self->{html_last_tag} eq "br";
-  push @{$self->{html_text}}, $text;
+  if ($self->{last_text}) {
+    # ideas discarded since they would be easy to evade:
+    # 1. using \w or [A-Za-z] instead of \S or non-punctuation
+    # 2. exempting certain tags
+    if ($text =~ /^[^\s\x21-\x2f\x3a-\x40\x5b-\x60\x7b-\x7e]/s &&
+	$self->{last_text} =~ /[^\s\x21-\x2f\x3a-\x40\x5b-\x60\x7b-\x7e]\z/s)
+    {
+      $self->{html}{obfuscation}++;
+    }
+    if ($self->{last_text} =~
+	/\b([^\s\x21-\x2f\x3a-\x40\x5b-\x60\x7b-\x7e]{1,7})\z/s)
+    {
+      my $start = length($1);
+      if ($text =~ /^([^\s\x21-\x2f\x3a-\x40\x5b-\x60\x7b-\x7e]{1,7})\b/s) {
+	my $backhair = $start . "_" . length($1);
+	$self->{html}{backhair}->{$backhair}++;
+	$self->{html}{backhair_count} = keys %{ $self->{html}{backhair} };
+      }
+    }
+  }
+
+  if ($visible_for_bayes) {
+    $self->{last_visible_text} .= $text;
+  }
+  else {
+    $self->{last_invisible_text} .= $text;
+  }
+  $self->{last_text} .= $text;
 }
 
+# note: $text includes <!-- and -->
 sub html_comment {
   my ($self, $text) = @_;
 
-  $self->{html}{comment_8bit} = 1 if $text =~ /[\x80-\xff]{3,}/;
-  $self->{html}{comment_email} = 1 if $text =~ /\S+\@\S+/;
-  $self->{html}{comment_egp} = 1 if $text =~ /\S+begin egp html banner\S+/;
-  $self->{html}{comment_saved_url} = 1 if $text =~ /<!-- saved from url=\(\d{4}\)/;
-  $self->{html}{comment_sky} = 1 if $text =~ /SKY-(?:Email-Address|Database|Mailing|List)/;
-  $self->{html}{total_comment_length} += length($text) + 7; # "<!--" + "-->"
+  push @{ $self->{html}{comment} }, $text;
 
-  if (exists $self->{html_inside}{script} && $self->{html_inside}{script} > 0)
+  if ($self->{html_last_tag} eq "div" &&
+      $text =~ /Converted from text\/plain format/)
+  {
+    $self->{html}{div_converted} = 1;
+  }
+  if (exists $self->{html}{inside_script} && $self->{html}{inside_script} > 0)
   {
     if ($text =~ /\b(?:$events)\b/io)
     {
@@ -559,18 +1012,13 @@ sub html_comment {
     {
       $self->{html}{html_event_unsafe} = 1;
     }
-    if ($text =~ /\.open\s*\(/) { $self->{html}{window_open} = 1; }
-    if ($text =~ /\.blur\s*\(/) { $self->{html}{window_blur} = 1; }
-    if ($text =~ /\.focus\s*\(/) { $self->{html}{window_focus} = 1; }
+    # if ($text =~ /\.open\s*\(/) { $self->{html}{window_open} = 1; }
     return;
   }
 
-  if (exists $self->{html_inside}{style} && $self->{html_inside}{style} > 0) { 
+  if (exists $self->{html}{inside_style} && $self->{html}{inside_style} > 0) {
     if ($text =~ /font(?:-size)?:\s*(\d+(?:\.\d*)?|\.\d+)(p[tx])/i) {
-      my $size = $1;
-      my $type = $2;
-
-      $self->{html}{big_font} = 1 if (lc($type) eq "pt" && $size > 12);
+      $self->examine_text_style ($1, $2);
     }
   }
 
@@ -587,109 +1035,7 @@ sub html_declaration {
 
     $self->{html}{elements}++;
     $self->{html}{tags}++;
-    $self->{html_inside}{$tag} = 0;
-  }
-}
-
-###########################################################################
-# HTML parser tests
-###########################################################################
-
-sub html_tag_balance {
-  my ($self, undef, $rawtag, $rawexpr) = @_;
-  $rawtag =~ /^([a-zA-Z0-9]+)$/; my $tag = $1;
-  $rawexpr =~ /^([\<\>\=\!\-\+ 0-9]+)$/; my $expr = $1;
-
-  return 0 unless exists $self->{html_inside}{$tag};
-
-  $self->{html_inside}{$tag} =~ /^([\<\>\=\!\-\+ 0-9]+)$/;
-  my $val = $1;
-  return eval "$val $expr";
-}
-
-sub html_image_only {
-  my ($self, undef, $min, $max) = @_;
-
-  return (exists $self->{html_inside}{'img'} &&
-	  exists $self->{html}{non_space_len} &&
-	  $self->{html}{non_space_len} > $min &&
-	  $self->{html}{non_space_len} <= $max &&
-	  $self->get('X-eGroups-Return') !~ /^sentto-.*\@returns\.groups\.yahoo\.com$/);
-}
-
-sub html_image_ratio {
-  my ($self, undef, $min, $max) = @_;
-
-  return 0 unless (exists $self->{html}{non_space_len} &&
-		   exists $self->{html}{image_area} &&
-		   $self->{html}{image_area} > 0);
-  my $ratio = $self->{html}{non_space_len} / $self->{html}{image_area};
-  return ($ratio > $min && $ratio <= $max);
-}
-
-sub html_charset_faraway {
-  my ($self) = @_;
-
-  return 0 unless exists $self->{html}{charsets};
-
-  my @locales = $self->get_my_locales();
-  return 0 if grep { $_ eq "all" } @locales;
-
-  my $okay = 0;
-  my $bad = 0;
-  for my $c (split(' ', $self->{html}{charsets})) {
-    if (Mail::SpamAssassin::Locales::is_charset_ok_for_locales($c, @locales)) {
-      $okay++;
-    }
-    else {
-      $bad++;
-    }
-  }
-  return ($bad && ($bad >= $okay));
-}
-
-sub html_tag_exists {
-  my ($self, undef, $tag) = @_;
-  return exists $self->{html_inside}{$tag};
-}
-
-sub html_test {
-  my ($self, undef, $test) = @_;
-  return $self->{html}{$test};
-}
-
-sub html_eval {
-  my ($self, undef, $test, $expr) = @_;
-  return exists $self->{html}{$test} && eval "qq{\Q$self->{html}{$test}\E} $expr";
-}
-
-sub html_message {
-  my ($self) = @_;
-
-  return (exists $self->{html}{elements} &&
-	  ($self->{html}{elements} >= 8 ||
-	   $self->{html}{elements} >= $self->{html}{tags} / 2));
-}
-
-sub html_range {
-  my ($self, undef, $test, $min, $max) = @_;
-
-  return 0 unless exists $self->{html}{$test};
-
-  $test = $self->{html}{$test};
-
-  # not all perls understand what "inf" means, so we need to do
-  # non-numeric tests!  urg!
-  if ( !defined $max || $max eq "inf" ) {
-    return ( $test eq "inf" ) ? 1 : ($test > $min);
-  }
-  elsif ( $test eq "inf" ) {
-    # $max < inf, so $test == inf means $test > $max
-    return 0;
-  }
-  else {
-    # if we get here everything should be a number
-    return ($test > $min && $test <= $max);
+    $self->{html}{"inside_$tag"} = 0;
   }
 }
 

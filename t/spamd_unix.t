@@ -2,14 +2,17 @@
 
 use lib '.'; use lib 't';
 use SATest; sa_t_init("spamd_unix");
-use Test; BEGIN { plan tests => 4 };
+
+use Test; BEGIN { plan tests => ((!$SKIP_SPAMD_TESTS && !$RUNNING_ON_WINDOWS)? 4 : 0) };
+
+exit unless (!$SKIP_SPAMD_TESTS && !$RUNNING_ON_WINDOWS);
 
 # ---------------------------------------------------------------------------
 
 %patterns = (
 
 q{ Subject: There yours for FREE!}, 'subj',
-q{ X-Spam-Status: Yes, hits=}, 'status',
+q{ X-Spam-Status: Yes, score=}, 'status',
 q{ X-Spam-Flag: YES}, 'flag',
 
 

@@ -1,3 +1,19 @@
+# <@LICENSE>
+# Copyright 2004 Apache Software Foundation
+# 
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+# 
+#     http://www.apache.org/licenses/LICENSE-2.0
+# 
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# </@LICENSE>
+
 =head1 NAME
 
 Mail::SpamAssassin::PerMsgLearner - per-message status (spam or not-spam)
@@ -6,12 +22,13 @@ Mail::SpamAssassin::PerMsgLearner - per-message status (spam or not-spam)
 
   my $spamtest = new Mail::SpamAssassin ({
     'rules_filename'      => '/etc/spamassassin.rules',
-    'userprefs_filename'  => $ENV{HOME}.'/.spamassassin.cf'
+    'userprefs_filename'  => $ENV{HOME}.'/.spamassassin/user_prefs'
   });
-  my $mail = Mail::SpamAssassin::NoMailAudit->new();
+  my $mail = $spamtest->parse();
 
-  my $status = $spamtest->learn ($mail);
-  ...
+  my $status = $spamtest->learn($mail,$id,$isspam,$forget);
+  my $didlearn = $status->did_learn();
+  $status->finish();
 
 
 =head1 DESCRIPTION
@@ -65,15 +82,16 @@ sub new {
 
 ###########################################################################
 
-=item $status->learn_spam($id)
-
-Learn the message as spam.
-
-C<$id> is an optional message-identification string, used internally
-to tag the message.  If it is C<undef>, the Message-Id of the message
-will be used.  It should be unique to that message.
-
-=cut
+# $status->learn_spam($id)
+# 
+# Learn the message as spam.
+# 
+# C<$id> is an optional message-identification string, used internally
+# to tag the message.  If it is C<undef>, the Message-Id of the message
+# will be used.  It should be unique to that message.
+# 
+# This is a semi-private API; callers should use
+# C<$spamtest-E<gt>learn($mail,$id,$isspam,$forget)> instead.
 
 sub learn_spam {
   my ($self, $id) = @_;
@@ -90,15 +108,16 @@ sub learn_spam {
 
 ###########################################################################
 
-=item $status->learn_ham($id)
-
-Learn the message as ham.
-
-C<$id> is an optional message-identification string, used internally
-to tag the message.  If it is C<undef>, the Message-Id of the message
-will be used.  It should be unique to that message.
-
-=cut
+# $status->learn_ham($id)
+# 
+# Learn the message as ham.
+# 
+# C<$id> is an optional message-identification string, used internally
+# to tag the message.  If it is C<undef>, the Message-Id of the message
+# will be used.  It should be unique to that message.
+# 
+# This is a semi-private API; callers should use
+# C<$spamtest-E<gt>learn($mail,$id,$isspam,$forget)> instead.
 
 sub learn_ham {
   my ($self, $id) = @_;
@@ -112,15 +131,16 @@ sub learn_ham {
 
 ###########################################################################
 
-=item $status->forget($id)
-
-Forget about a previously-learned message.
-
-C<$id> is an optional message-identification string, used internally
-to tag the message.  If it is C<undef>, the Message-Id of the message
-will be used.  It should be unique to that message.
-
-=cut
+# $status->forget($id)
+# 
+# Forget about a previously-learned message.
+# 
+# C<$id> is an optional message-identification string, used internally
+# to tag the message.  If it is C<undef>, the Message-Id of the message
+# will be used.  It should be unique to that message.
+# 
+# This is a semi-private API; callers should use
+# C<$spamtest-E<gt>learn($mail,$id,$isspam,$forget)> instead.
 
 sub forget {
   my ($self, $id) = @_;
@@ -158,6 +178,7 @@ sub finish {
   delete $self->{main};
   delete $self->{msg};
   delete $self->{conf};
+  delete $self->{bayes_scanner};
 }
 
 ###########################################################################

@@ -7,13 +7,21 @@
 # the next update. Use @@LOCAL_RULES_DIR@@/local.cf instead.
 # See 'perldoc Mail::SpamAssassin::Conf' for details.
 #
-# This program is free software; you can redistribute it and/or modify
-# it under the terms of either the Artistic License or the GNU General
-# Public License as published by the Free Software Foundation; either
-# version 1 of the License, or (at your option) any later version.
-#
-# See the file "License" in the top level of the SpamAssassin source
-# distribution for more details.
+# <@LICENSE>
+# Copyright 2004 Apache Software Foundation
+# 
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+# 
+#     http://www.apache.org/licenses/LICENSE-2.0
+# 
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# </@LICENSE>
 #
 ###########################################################################
 
@@ -25,60 +33,18 @@ header RATWARE_HASH_2_V2	X-Mailer =~ /^[A-Za-z0-9\._]{14,}$/
 describe RATWARE_HASH_2_V2	Bulk email fingerprint (hash 2 v2) found
 header RATWARE_JPFREE		X-Mailer =~ /jpfree Group Mail Express/
 describe RATWARE_JPFREE		Bulk email fingerprint (jpfree) found
-header RATWARE_VC_IPA		X-Mailer =~ /2\.0-b55-VC_IPA/
-describe RATWARE_VC_IPA		Bulk email fingerprint (VC_IPA) found
 
 # Note that the tests which look at the "ALL" pseudoheader are slower than
 # the specific header.
-header RATWARE_GR		X-Mailer =~ /GRMessageQueue/
-describe RATWARE_GR		Bulk email fingerprint (GRMessageQueue) found
-header RATWARE_OE_PI		X-Mailer =~ /Out[Ll]ook Express 3\.14159/
-describe RATWARE_OE_PI		X-Mailer contains "OutLook Express 3.14159"
 # 100% overlap with X-Stormpost-To: header, but seems wise to leave it in
-header RATWARE_STORM		X-Mailer =~ /StormPost/
-describe RATWARE_STORM		Bulk email fingerprint (StormPost) found
 uri RATWARE_STORM_URI		m{http://\S+/sp/t\.pl\?id=\d+:\d+}i
 describe RATWARE_STORM_URI	Bulk email fingerprint (StormPost) found
-header RATWARE_JIXING		X-Mailer =~ /JiXing .{0,30}Design By JohnnieHuang/
-describe RATWARE_JIXING		Bulk email fingerprint (JiXing) found
-header RATWARE_SCREWUP_1	X-Mailer =~ /^X-Mailer: /
-describe RATWARE_SCREWUP_1	Bulk email fingerprint (screwup 1) found
-header RATWARE_MMAILER		X-Mailer =~ /MMailer v3\.0/
-describe RATWARE_MMAILER	Bulk email fingerprint (MMailer) found in headers
 header RATWARE_OE_MALFORMED	X-Mailer =~ /^Microsoft Outlook Express \d(?:\.\d+){3} \w+$/
 describe RATWARE_OE_MALFORMED	X-Mailer has malformed Outlook Express version
-header RATWARE_EVAMAIL		X-Mailer =~ /EVAMAIL/
-describe RATWARE_EVAMAIL	Bulk email fingerprint (EVAMAIL) found
-header RATWARE_SCREWUP_2	X-Mailer =~ /^: /
-describe RATWARE_SCREWUP_2	Bulk email fingerprint (screwup 2) found
-header RATWARE_IMKTG		ALL =~ /Internet Marketing/
-describe RATWARE_IMKTG		Bulk email fingerprint (IMktg) found
-header RATWARE_XMAILER		X-Mailer =~ /{%xmailer%}/
-describe RATWARE_XMAILER	Bulk email fingerprint (xmailer tag) found
-header RATWARE_POWERC		X-Mailer =~ /PowerCampaign/
-describe RATWARE_POWERC		Bulk email fingerprint (PowerCampaign) found
-header RATWARE_DIFFOND		ALL =~ /DiffondiCool/
-describe RATWARE_DIFFOND	Bulk email fingerprint (DiffondiCool) found
-header RATWARE_CHARSET		X-Mailer =~ /\Qcharset(89)\E/
-describe RATWARE_CHARSET	Bulk email fingerprint (charset) found
-header RATWARE_CHARSET_V2	X-Mailer =~ /^normal \W \W\s*charset.*=\"/
-describe RATWARE_CHARSET_V2 	Bulk email fingerprint (charset 2) found
-header RATWARE_CARETOP		X-Mailer =~ /Caretop 2604/
-describe RATWARE_CARETOP	Bulk email fingerprint (Caretop) found
-header RATWARE_LC_OUTLOOK	X-Mailer =~ /^outlook$/
-describe RATWARE_LC_OUTLOOK	Bulk email fingerprint ("outlook") found
-header RATWARE_EMWAC		Received =~ /EMWAC SMTPRS/
-describe RATWARE_EMWAC		Bulk email fingerprint ("EMWAC SMTPRS") found
-header RATWARE_BANG_HASH	X-Mailer =~ /!.*\#.*\*/
-describe RATWARE_BANG_HASH 	Bulk email fingerprint (bang-hash) found
-header RATWARE_FLOAT		X-Mailer =~ /^\d\.\d\d/
-describe RATWARE_FLOAT 		Bulk email fingerprint (float) found
-header RATWARE_DIRECT_EMAIL	X-Mailer =~ /Direct Email/i
-describe RATWARE_DIRECT_EMAIL	Bulk email fingerprint (Direct Email) found
 header RATWARE_RCVD_LC_ESMTP	Received =~ /^from (?:(?:unknown|\d+\.\d+\.\d+\.\d+) \(\S+\)|\[\d+\.\d+\.\d+\.\d+\]) by \S+ with (?:esmtp|local|smtp); /m
 describe RATWARE_RCVD_LC_ESMTP	Bulk email fingerprint ('esmtp' Received) found
-header RATWARE_RCVD_BONUS_SPC	Received =~ /\) by  [a-zA-Z0-9]/
-describe RATWARE_RCVD_BONUS_SPC	Bulk email fingerprint (bonus space) found
+header RATWARE_MOZ_MALFORMED	User-Agent =~ /Mozilla\/5\.0\d\d/
+describe RATWARE_MOZ_MALFORMED	Bulk email fingerprint (Mozilla malformed) found
 
 ###########################################################################
 # Now, detect forgeries of real MUAs
@@ -90,18 +56,8 @@ describe RATWARE_RCVD_BONUS_SPC	Bulk email fingerprint (bonus space) found
 # (yet) chain from other meta tests.
 header __UNUSABLE_MSGID		eval:check_messageid_not_usable()
 
-# forgeries of MSN Explorer.
-header __HAS_XOAT		X-Originalarrivaltime =~ /FILETIME/
-header __HAS_XOIP		X-Originating-Ip =~ /^\[/
-meta FORGED_MUA_MSN		(__USER_AGENT_MSN && (!__HAS_XOAT || !__HAS_XOIP))
-describe FORGED_MUA_MSN		Forged mail pretending to be from MSN
-
-# AOL -- the "fat" version of the client, not Communicator
-# seen in spam:
-# X-Mailer: AOL 7.0 for Windows US sub 118
-# X-Mailer: AOL 8.0 for Windows US sub 230
-# X-Mailer: AOL 4.0 for Windows UK sub 1285
-header __FAT_AOL_MUA           X-Mailer =~ /AOL \S+ for Windows/
+# AOL
+header __AOL_MUA		X-Mailer =~ /\bAOL\b/
 
 # Internet Mail Service
 header __IMS_MUA		X-Mailer =~ /Internet Mail Service/
@@ -140,42 +96,44 @@ describe FORGED_MUA_OIMO	Forged mail pretending to be from MS Outlook IMO
 # updated to fix bugs 2047, 2598, 2654
 # NOTE: this is the *only* spammish Eudora MUA pattern that wasn't
 # ignored using __OLD_EUDORA1 and __OLD_EUDORA2 under previous rules.
-header __EUDORA_MUA             X-Mailer =~ /^QUALCOMM Windows Eudora (?:Pro |Light |)Version [3456]\./
+header __EUDORA_MUA             X-Mailer =~ /^QUALCOMM Windows Eudora (?:Pro |Light )?Version [3456]\./
 header __EUDORA_MSGID		MESSAGEID =~ /^<(?:\d\d?\.){3,5}\d{14}\.[a-f0-9]{8}\@\S+(?:\sport\s\d+)?>$/m
 header __HAS_X_LOOP		exists:X-Loop
 header __HAS_X_MAILING_LIST	exists:X-Mailing-List
 meta FORGED_MUA_EUDORA          (__EUDORA_MUA && !__EUDORA_MSGID && !__UNUSABLE_MSGID && !__HAS_X_LOOP && !__HAS_X_MAILING_LIST)
 describe FORGED_MUA_EUDORA	Forged mail pretending to be from Eudora
-
+  
 # Mar 26 2003 jm: AOL MUAs add a Received line, and do not use "real names" in
 # From or To headers, as far as I can see, quinlan: also see bug 1426
 header __AOL_FROM		From:addr =~ /\@aol\.com$/i
-meta FORGED_MUA_AOL_FROM	(__FAT_AOL_MUA && !__AOL_FROM)
+meta FORGED_MUA_AOL_FROM	(__AOL_MUA && !__AOL_FROM)
 describe FORGED_MUA_AOL_FROM	Forged mail pretending to be from AOL (by From)
 
 # From private mail with developers.  Some top tips here!
 header __THEBAT_MUA		X-Mailer =~ /The Bat!/
-header __THEBAT_MUA_V1		X-Mailer =~ /^\QThe Bat! (v1.\E/
-header __THEBAT_MUA_V2		X-Mailer =~ /^\QThe Bat! (v2.\E/
+header __THEBAT_MUA_V1		X-Mailer =~ /^The Bat! \(v1\./
+header __THEBAT_MUA_V2		X-Mailer =~ /^The Bat! \(v2\./
 header __CTYPE_CHARSET_QUOTED	Content-Type =~ /charset=\"/i
 header __CTYPE_HAS_BOUNDARY	Content-Type =~ /boundary/i
 header __BAT_BOUNDARY		Content-Type =~ /boundary=\"?-{10}/
+header __MAILMAN_21             X-Mailman-Version =~ /\d/
 meta FORGED_MUA_THEBAT_CS	(__THEBAT_MUA && __CTYPE_CHARSET_QUOTED)
-meta FORGED_MUA_THEBAT_BOUN	(__THEBAT_MUA && !__THEBAT_MUA_V2 && __CTYPE_HAS_BOUNDARY && !__BAT_BOUNDARY)
-describe FORGED_MUA_THEBAT	Mail pretending to be from The Bat! (mid)
+meta FORGED_MUA_THEBAT_BOUN     (__THEBAT_MUA && !__THEBAT_MUA_V2 && __CTYPE_HAS_BOUNDARY && !__BAT_BOUNDARY && !__MAILMAN_21)
 describe FORGED_MUA_THEBAT_CS	Mail pretending to be from The Bat! (charset)
 describe FORGED_MUA_THEBAT_BOUN Mail pretending to be from The Bat! (boundary)
 
-meta FORGED_OUTLOOK_HTML	(__OUTLOOK_MUA && MIME_HTML_ONLY)
+meta FORGED_OUTLOOK_HTML	(__ANY_OUTLOOK_MUA && MIME_HTML_ONLY)
 describe FORGED_OUTLOOK_HTML	Outlook can't send HTML message only
 
-meta FORGED_AOL_HTML		(__FAT_AOL_MUA && MIME_HTML_ONLY)
-describe FORGED_AOL_HTML	AOL can't send HTML message only
-
-meta FORGED_IMS_HTML		(__IMS_MUA && MIME_HTML_ONLY)
+# bug 2525: FORGED_IMS_HTML fp'ing because new IMS *DOES* use text/html
+# ctype.  ARGH.  This was noted in build 5.5.2656.59, so permit builds
+# after that to get away with it.
+header __IMS_HTML_BUILDS	X-Mailer =~ /^Internet Mail Service .(?:[6789]\.|5\.[6789]|5\.5\.(?:[3456789]|2[789]|26[6789]|265[6789]))/
+header __IMS_HTML_RCVD		Received =~ /\bby \S+ with Internet Mail Service .(?:[6789]\.|5\.[6789]|5\.5\.(?:[3456789]|2[789]|26[6789]|265[6789]))/
+meta FORGED_IMS_HTML		(__IMS_MUA && MIME_HTML_ONLY && !(__IMS_HTML_BUILDS && __IMS_HTML_RCVD))
 describe FORGED_IMS_HTML	IMS can't send HTML message only
 
-meta FORGED_THEBAT_HTML		(__THEBAT_MUA && MIME_HTML_ONLY)
+meta FORGED_THEBAT_HTML		(__THEBAT_MUA_V1 && MIME_HTML_ONLY)
 describe FORGED_THEBAT_HTML	The Bat! can't send HTML message only
 
 # bug 1561
@@ -191,8 +149,6 @@ header __X_MAILER_APPLEMAIL	X-Mailer =~ /^Apple Mail \(\d\.\d+\)$/
 header __MSGID_APPLEMAIL        Message-Id =~ /^<[0-9A-F]{8}-(?:[0-9A-F]{4}-){3}[0-9A-F]{12}\@\S+>$/
 header __MIME_VERSION_APPLEMAIL	Mime-Version =~ /^1\.0 \(Apple Message framework v\d+\)$/
 meta __USER_AGENT_APPLEMAIL	!__CTYPE_HTML && __X_MAILER_APPLEMAIL && (__MSGID_APPLEMAIL || __MIME_VERSION_APPLEMAIL)
-meta FORGED_MUA_APPLEMAIL	(__X_MAILER_APPLEMAIL && !__UNUSABLE_MSGID && !__USER_AGENT_APPLEMAIL)
-describe FORGED_MUA_APPLEMAIL	AppleMail can't send HTML message only
 
 # 2003-02-23: quinlan
 # some useful meta rule sub-elements
@@ -206,6 +162,7 @@ body __TAG_EXISTS_HEAD		eval:html_tag_exists('head')
 body __TAG_EXISTS_HTML		eval:html_tag_exists('html')
 body __TAG_EXISTS_META		eval:html_tag_exists('meta')
 
+header __ANY_QUALCOMM_MUA       X-Mailer =~ /\bQUALCOMM\b/
 meta FORGED_QUALCOMM_TAGS	(__ANY_QUALCOMM_MUA && __MIME_HTML && !__TAG_EXISTS_HTML)
 describe FORGED_QUALCOMM_TAGS	QUALCOMM mailers can't send HTML in this format
 
@@ -218,15 +175,82 @@ describe FORGED_IMS_TAGS	IMS mailers can't send HTML in this format
 meta FORGED_OUTLOOK_TAGS	(__ANY_OUTLOOK_MUA && __MIME_HTML && !(__TAG_EXISTS_HTML && __TAG_EXISTS_HEAD && __TAG_EXISTS_META && __TAG_EXISTS_BODY))
 describe FORGED_OUTLOOK_TAGS	Outlook can't send HTML in this format
 
-header RATWARE_BAD_REFS		References =~ /^[^<]\S+\$\S+\@\S+[^>]$/
-describe RATWARE_BAD_REFS	References header has bad format
+# Send-Safe ratware (idea from Alan Curry)
+# random alphanumerics, separated into groups of 16 by dashes (the first
+# and last group may be shorter), with a lowercase "l" and a number
+# appended. The final number is the length of the whole string not
+# including the dashes or the "l<number>".  Why? I have no idea.  It's
+# not a tracking code - the spamware does not save it locally.
+#
+# jm: it's specifically to throw off MIME base64 encoding, to evade AOL's
+# filters.
+#
+# http://groups.google.com/groups?selm=atp1ip0n22%40enews3.newsguy.com
+rawbody RATWARE_HASH_DASH	/[a-z\d]+-([a-z\d]{16}-)+[a-z\d]+(?-i:l)\d+/i
+describe RATWARE_HASH_DASH	Contains a hashbuster in Send-Safe format
 
-# http://marc.theaimsgroup.com/?l=spamassassin-talk&m=105203882531351&w=2
-header RATWARE_X_SCANNER	X-Scanner =~ /^: /
-describe RATWARE_X_SCANNER	Has X-Scanner header
+# spammer tool, sometimes has "netIP with HTTP;" in Received: header
+header RATWARE_NETIP		Content-Type =~ /boundary="--ALT--[A-Z]{4}\d/
+describe RATWARE_NETIP		Bulk email fingerprint (netIP) found
 
-header __RATWARE_EXISCAN	X-Scanner =~ /exiscan/
-header __RATWARE_ANTIABUSE	X-AntiAbuse =~ /Originator.Caller UID.GID - \[\d \d\] \/ \[\d \d\]/
-meta RATWARE_EXISCAN_FORGED	(__RATWARE_EXISCAN && __RATWARE_ANTIABUSE && __HAS_MSMAIL_PRI)
-describe RATWARE_EXISCAN_FORGED	Headers indicate forged Exiscan message
+# this is really badly faked.  Also the spammer who uses "25250101"
+# for the build is a total hippie.
+header RATWARE_GECKO_BUILD	User-Agent =~ /Gecko\/(?!200\d\d\d\d\d)\d/
+describe RATWARE_GECKO_BUILD	Bulk email fingerprint (Gecko faked) found
 
+########################################################################
+# Most ratware uses message templates I would guess.
+# Here's two popular ones...
+header HDR_ORDER_MTSRIX		ALL =~ /\nMessage-ID: <\S+@\S+>\nTo: [^\n]+ <\S+>\nSubject: [^\n]+\nReferences: <\S+@\S+>\nIn-Reply-To: <\S+@\S+>\nX-Mailer: /
+describe HDR_ORDER_MTSRIX	Headers are in order found in spam (MTSRIX)
+header HDR_ORDER_TRIMRS		ALL =~ /\nTo: [^\n]+\nReferences: <\S+@\S+>\nIn-Reply-To: <\S+@\S+>\nMessage-ID: <\S+@\S+>\nReply-To: [^\n]+\nSender: /
+describe HDR_ORDER_TRIMRS	Headers are in order found in spam (TRIMRS)
+
+########################################################################
+# This ratware always uses a +0000 TZ in the Date header, and has a multiplicity
+# of From: header formats. ("From" header samples from Steven Champeon
+# <schampeo.hesketh.com> via the spamtools.lists.abuse.net and SPAM-L lists).
+#
+# "First Last" <firstlast_[a-z][a-z]@somedomain>        1
+# "First Last" <firstlast[a-z][a-z]@somedomain>         1
+# "First Last" <first.last[a-z][a-z]@somedomain>        1
+# "First Last" <first_last[a-z][a-z]@somedomain>        1
+# "First Last" <first_last_[a-z][a-z]@somedomain>       1
+# "First Last" <flast_[a-z][a-z]@somedomain>            2
+# "First Last" <flast[a-z][a-z]@somedomain>             2
+# "First Last" <f.last_[a-z][a-z]@somedomain>           2
+# "First Last" <f.last[a-z][a-z]@somedomain>            2
+# "First Last" <f_last[a-z][a-z]@somedomain>            2
+# "First Last" <last[a-z][a-z]@somedomain>              3
+# "First M. Last" <firstlast_[a-z][a-z]@somedomain>     4
+# "First M. Last" <firstlast[a-z][a-z]@somedomain>      4
+# "First M. Last" <first.m.last[a-z][a-z]@somedomain>   5
+# "First M. Last" <firstmlast[a-z][a-z]@somedomain>     5
+# "First M. Last" <firstmlast_[a-z][a-z]@somedomain>    5
+# "First M. Last" <fmlast_[a-z][a-z]@somedomain>        6
+# "First M. Last" <mlast[a-z][a-z]@somedomain>          7
+# "First M. Last" <m.last[a-z][a-z]@somedomain>         7
+header __0_TZ_1      From =~ /^\"(\w)(\w+) (\w+)\" <\1\2[\._]?\3_?[a-z][a-z]\@/i
+header __0_TZ_2      From =~ /^\"(\w)(\w+) (\w+)\" <\1[\._]?\3_?[a-z][a-z]\@/i
+header __0_TZ_3      From =~ /^\"(\w)(\w+) (\w+)\" <\3_?[a-z][a-z]\@/i
+header __0_TZ_4      From =~ /^\"(\w)(\w+) (\w)\. (\w+)\" <\1\2[\._]?\4_?[a-z][a-z]\@/i
+header __0_TZ_5      From =~ /^\"(\w)(\w+) (\w)\. (\w+)\" <\1\2[\._]?\3[\._]?\4_?[a-z][a-z]\@/i
+header __0_TZ_6      From =~ /^\"(\w)(\w+) (\w)\. (\w+)\" <\1\3\4_?[a-z][a-z]\@/i
+header __0_TZ_7      From =~ /^\"(\w)(\w+) (\w)\. (\w+)\" <\3[\._]?\4_?[a-z][a-z]\@/i
+
+header __RATWARE_0_TZ_DATE	Date =~ / \+0000$/
+
+meta RATWARE_ZERO_TZ   		(__RATWARE_0_TZ_DATE && __CTYPE_HTML && (__0_TZ_1 || __0_TZ_2 || __0_TZ_3 || __0_TZ_4 || __0_TZ_5 || __0_TZ_6 || __0_TZ_7))
+describe RATWARE_ZERO_TZ	Bulk email fingerprint (+0000) found
+
+header RCVD_BONUS_SPC_DATE	Received =~ /with SMTP;  \d\d \S\S\S /
+describe RCVD_BONUS_SPC_DATE	Bulk email fingerprint (bonus space) found
+
+header X_MESSAGE_INFO		exists:X-Message-Info
+describe X_MESSAGE_INFO		Bulk email fingerprint (X-Message-Info) found
+
+header RATWARE_RCVD_PF		Received =~ / \(Postfix\) with ESMTP id [^;]+\; \S+ \d+ \S+ \d+ \d+:\d+:\d+ \S+$/s
+describe RATWARE_RCVD_PF	Bulk email fingerprint (Received PF) found
+
+header RATWARE_RCVD_AT		Received =~ / by \S+\@\S+ with Microsoft SMTPSVC/
+describe RATWARE_RCVD_AT	Bulk email fingerprint (Received @) found

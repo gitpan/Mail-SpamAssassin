@@ -1,104 +1,133 @@
 #!/usr/bin/perl -w
+#
+# <@LICENSE>
+# Copyright 2004 Apache Software Foundation
+# 
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+# 
+#     http://www.apache.org/licenses/LICENSE-2.0
+# 
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# </@LICENSE>
 
-# options
-#
-# -c=file       set configuration/rules directory
-# -f=file       read list of targets from <file>
-# -j=jobs       specify the number of check jobs to run simultaneously
-# --mh          find_missed('ham.log')
-# --ms          find_missed('spam.log')
-# --net         turn on network checks!
-# --mid         report Message-ID from each message
-# --debug       report debugging information
-# --progress    show progress updates during check
-# --rewrite=OUT save rewritten message to OUT (default is /tmp/out)
-# --showdots    print a dot for each scanned message
-# --rules=RE    Only test rules matching the given regexp RE
-# --restart=N   restart all of the children after processing N messages
-# --after=N     only test mails received after time_t N (negative values
-#               are an offset from current time, e.g. -86400 = last day)
-#               or after date as parsed by Time::ParseDate (e.g. '-6 months')
-#
-# log options
-# -o            write all logs to stdout
-# --loghits     log the text hit for patterns (useful for debugging)
-# --hamlog=log  use <log> as ham log ('ham.log' is default)
-# --spamlog=log use <log> as spam log ('spam.log' is default)
-#
-# message selection options
-# -n            no date sorting or spam/ham interleaving
-# --all         don't skip big messages
-# --head=N      only check first N ham and N spam (N messages if -n used)
-# --tail=N      only check last N ham and N spam (N messages if -n used)
-#
-# simple target options (implies -o and no ham/spam classification)
-# --dir         subsequent targets are directories
-# --file        subsequent targets are files in RFC 822 format
-# --mbox        subsequent targets are mbox files
-#
-#
-# Just left over functions we should remove at some point:
-# --bayes       report score from Bayesian classifier
-#
-# non-option arguments are used as target names (mail files and folders),
-# the target format is: <class>:<format>:<location>
-# <class>       is "spam" or "ham"
-# <format>      is "dir", "file", or "mbox"
-# <location>    is a file or directory name.  globbing of ~ and * is supported
+sub usage {
+  die <<ENDOFUSAGE;
+usage: mass-check [options] target ...
+ 
+  -c=file       set configuration/rules directory
+  -p=dir        set user-prefs directory
+  -f=file       read list of targets from <file>
+  -j=jobs       specify the number of processes to run simultaneously
+  --net         turn on network checks!
+  --mid         report Message-ID from each message
+  --debug       report debugging information
+  --progress    show progress updates during check
+  --rewrite=OUT save rewritten message to OUT (default is /tmp/out)
+  --showdots    print a dot for each scanned message
+  --rules=RE    Only test rules matching the given regexp RE
+  --restart=N   restart all of the children after processing N messages
+  --deencap=RE  Extract SpamAssassin-encapsulated spam mails only if they
+                were encapsulated by servers matching the regexp RE
+                (default = extract all SpamAssassin-encapsulated mails)
+ 
+  log options
+  -o            write all logs to stdout
+  --loghits     log the text hit for patterns (useful for debugging)
+  --loguris	log the URIs found
+  --hamlog=log  use <log> as ham log ('ham.log' is default)
+  --spamlog=log use <log> as spam log ('spam.log' is default)
+ 
+  message selection options
+  -n            no date sorting or spam/ham interleaving
+  --after=N     only test mails received after time_t N (negative values
+                are an offset from current time, e.g. -86400 = last day)
+                or after date as parsed by Time::ParseDate (e.g. '-6 months')
+  --before=N    same as --after, except received times are before time_t N
+  --all         don't skip big messages
+  --head=N      only check first N ham and N spam (N messages if -n used)
+  --tail=N      only check last N ham and N spam (N messages if -n used)
+ 
+  simple target options (implies -o and no ham/spam classification)
+  --dir         subsequent targets are directories
+  --file        subsequent targets are files in RFC 822 format
+  --mbox        subsequent targets are mbox files
+  --mbx         subsequent targets are mbx files
+ 
+  Just left over functions we should remove at some point:
+  --bayes       report score from Bayesian classifier
+ 
+  non-option arguments are used as target names (mail files and folders),
+  the target format is: <class>:<format>:<location>
+  <class>       is "spam" or "ham"
+  <format>      is "dir", "file", "mbx", or "mbox"
+  <location>    is a file or directory name.  globbing of ~ and * is supported
+
+ENDOFUSAGE
+}
 
 ###########################################################################
 
-use vars qw($opt_c $opt_f $opt_j $opt_n $opt_o $opt_all $opt_bayes
+use vars qw($opt_c $opt_p $opt_f $opt_j $opt_n $opt_o $opt_all $opt_bayes
 	    $opt_debug $opt_format $opt_hamlog $opt_head $opt_loghits
 	    $opt_mid $opt_mh $opt_ms $opt_net $opt_nosort $opt_progress
 	    $opt_showdots $opt_spamlog $opt_tail $opt_rules $opt_restart
-	    $opt_after $opt_rewrite);
+	    $opt_loguris $opt_after $opt_before $opt_rewrite $opt_deencap);
 
 use FindBin;
 use lib "$FindBin::Bin/../lib";
 eval "use bytes";
 use Mail::SpamAssassin::ArchiveIterator;
 use Mail::SpamAssassin;
-use Mail::SpamAssassin::NoMailAudit;
 use Getopt::Long;
 use POSIX qw(strftime);
 use constant HAS_TIME_PARSEDATE => eval { require Time::ParseDate; };
+use Config;
 
 # default settings
 $opt_c = "$FindBin::Bin/../rules";
+$opt_p = "$FindBin::Bin/spamassassin";
 $opt_j = 1;
 $opt_net = 0;
 $opt_hamlog = "ham.log";
 $opt_spamlog = "spam.log";
 
-GetOptions("c=s", "f=s", "j=i", "n", "o", "all", "bayes", "debug",
+GetOptions("c=s", "p=s", "f=s", "j=i", "n", "o", "all", "bayes", "debug",
 	   "hamlog=s", "head=i", "loghits", "mh", "mid", "ms", "net",
 	   "progress", "rewrite:s", "showdots", "spamlog=s", "tail=i",
-	   "rules=s", "restart=i", "after=s",
+	   "rules=s", "restart=i", "after=s", "before=s", "loguris", "deencap=s",
 	   "dir" => sub { $opt_format = "dir"; },
 	   "file" => sub { $opt_format = "file"; },
 	   "mbox" => sub { $opt_format = "mbox"; },
-	   '<>' => \&target);
+	   "mbx" => sub { $opt_format = "mbx"; },
+	   '<>' => \&target) or usage();
 
 if ($opt_f) {
-  open (F, $opt_f) || die $!;
-  push (@targets, map { chomp; $_ } <F>);
-  close (F);
+  open(F, $opt_f) || die $!;
+  push(@targets, map { chomp; $_ } <F>);
+  close(F);
 }
 
-if ($opt_ms) {
-  find_missed($opt_spamlog);
-}
-elsif ($opt_mh) {
-  find_missed($opt_hamlog);
-}
+if (scalar @targets == 0) { usage(); }
+
+#if ($opt_ms) {
+#find_missed($opt_spamlog);
+#}
+#elsif ($opt_mh) {
+#find_missed($opt_hamlog);
+#}
 
 $spamtest = new Mail::SpamAssassin ({
   'debug'              			=> $opt_debug,
   'rules_filename'     			=> $opt_c,
-  'userprefs_filename' 			=> "$FindBin::Bin/spamassassin/user_prefs",
-  'site_rules_filename'			=> "$FindBin::Bin/spamassassin/local.cf",
-  'userstate_dir'     			=> "$FindBin::Bin/spamassassin",
+  'userprefs_filename' 			=> "$opt_p/user_prefs",
+  'site_rules_filename'			=> "$opt_p/local.cf",
+  'userstate_dir'     			=> "$opt_p",
   'save_pattern_hits'  			=> $opt_loghits,
   'dont_copy_prefs'   			=> 1,
   'local_tests_only'   			=> $opt_net ? 0 : 1,
@@ -116,15 +145,15 @@ my $who   = `id -un 2>/dev/null`;   chomp $who;
 my $where = `uname -n 2>/dev/null`; chomp $where;
 my $when  = `date -u`;              chomp $when;
 my $revision = "unknown";
-if (open(TESTING, "$opt_c/70_cvs_rules_under_test.cf")) {
+if (open(TESTING, "$opt_c/70_testing.cf")) {
   chomp($revision = <TESTING>);
-  $revision =~ s/.*Revision:\s*(\S+).*/$1/;
+  $revision =~ s/.*\$Rev:\s*(\S+).*/$1/;
   close(TESTING);
 }
 my $log_header = "# mass-check results from $who\@$where, on $when\n" .
 		 "# M:SA version ".$spamtest->Version()."\n" .
-		 '# CVS tag: $Name:  $' . "\n" .
-		 "# CVS revision: $revision\n";
+		 "# SVN revision: $revision\n" .
+		 "# Perl version: $] on $Config{archname}\n";
 my $host = $ENV{'HOSTNAME'} || $ENV{'HOST'} || `hostname` || 'localhost';
 chomp $host;
 
@@ -132,30 +161,25 @@ my $updates = 10;
 my $total_count = 0;
 my $spam_count = 0;
 my $ham_count = 0;
+my $init_results = 0;
 
-if ($opt_o) {
-  autoflush STDOUT 1;
-  print STDOUT $log_header;
-}
-else {
-  open(HAM, "> $opt_hamlog");
-  open(SPAM, "> $opt_spamlog");
-  autoflush HAM 1;
-  autoflush SPAM 1;
-  print HAM $log_header;
-  print SPAM $log_header;
+# Deal with --before and --after
+foreach my $time ($opt_before, $opt_after) {
+  if ($time && $time =~ /^-\d+$/) {
+    $time = time + $time;
+  }
+  elsif ($time && $time !~ /^-?\d+$/) {
+    if (HAS_TIME_PARSEDATE) {
+      $time = Time::ParseDate::parsedate($time, GMT => 1, PREFER_PAST => 1);
+    }
+    else { 
+      die "You need Time::ParseDate if you use either the --before or --after option.";
+    }
+  }
 }
 
-if ($opt_after && $opt_after =~ /^-\d+$/) {
-  $opt_after = time + $opt_after;
-}
-elsif ($opt_after && $opt_after !~ /^-?\d+$/) {
-  if (HAS_TIME_PARSEDATE) {
-    $opt_after = Time::ParseDate::parsedate($opt_after, GMT => 1, PREFER_PAST => 1);
-  }
-  else { 
-    die;
-  }
+if ($opt_before && $opt_after && $opt_after >= $opt_before) {
+  die "--before ($opt_before) <= --after ($opt_after) -- conflict!";
 }
 
 my $iter = new Mail::SpamAssassin::ArchiveIterator({
@@ -165,6 +189,7 @@ my $iter = new Mail::SpamAssassin::ArchiveIterator({
 	'opt_head' => $opt_head,
 	'opt_tail' => $opt_tail,
 	'opt_after' => $opt_after,
+	'opt_before' => $opt_before,
 	'opt_restart' => $opt_restart,
 });
 
@@ -182,18 +207,37 @@ exit;
 sub target  {
   my ($target) = @_;
   if (!defined($opt_format)) {
-    push (@targets, $target);
+    push(@targets, $target);
   }
   else {
     $opt_o = 1;
-    push (@targets, "spam:$opt_format:$target");
+    push(@targets, "spam:$opt_format:$target");
   }
 }
 
 ###########################################################################
 
+sub init_results {
+  if ($opt_o) {
+    autoflush STDOUT 1;
+    print STDOUT $log_header;
+  }
+  else {
+    open(HAM, "> $opt_hamlog") || die "open of $opt_hamlog failed: $!";
+    open(SPAM, "> $opt_spamlog") || die "open of $opt_spamlog failed: $!";
+    autoflush HAM 1;
+    autoflush SPAM 1;
+    print HAM $log_header;
+    print SPAM $log_header;
+  }
+  $init_results = 1;
+}
+
 sub result {
   my ($class, $result, $time) = @_;
+
+  # don't open results files until we get here to avoid overwriting files
+  &init_results if !$init_results;
 
   if ($class eq "s") {
     if ($opt_o) { print STDOUT $result; } else { print SPAM $result; }
@@ -213,31 +257,44 @@ sub result {
 }
 
 sub wanted {
-  my ($id, $time, $dataref) = @_;
-  my ($out, $after, $before);
+  my (undef, $id, $time, $dataref) = @_;
+  my $out;
 
-  my $ma = Mail::SpamAssassin::NoMailAudit->new('data' => $dataref);
-  $ma->{noexit} = 1;
+  my $ma = $spamtest->parse($dataref, 1);
 
   # remove SpamAssassin markup, if present and the mail was spam
-  $_ = $ma->get ("X-Spam-Status");
-  if (defined($_) && /^Yes, hits=/) {
-    my $newtext = $spamtest->remove_spamassassin_markup($ma);
-    my @newtext = split (/^/m, $newtext);
-    $dataref = \@newtext;
-    $ma = Mail::SpamAssassin::NoMailAudit->new ('data' => $dataref);
+  my $stat = $ma->get_header("X-Spam-Status");
+  if ($stat && $stat =~ /^Yes,/) {
+    if (!$opt_deencap || message_should_be_deencapped($ma)) {
+      my $new_ma = $spamtest->parse($spamtest->remove_spamassassin_markup($ma), 1);
+      $ma->finish();
+      $ma = $new_ma;
+    }
   }
 
-  $before = time;
-  my $status = $spamtest->check($ma);
-  $after = time;
+
+  # log-uris support
+  my $status;
+  my @uris;
+  my $before;
+  my $after;
+  if ($opt_loguris) {
+    my $pms = Mail::SpamAssassin::PerMsgStatus->new($spamtest, $ma);
+    @uris = $pms->get_uri_list();
+    $pms->finish();
+
+  } else {
+    $before = time;
+    $status = $spamtest->check($ma);
+    $after = time;
+  }
 
   my @extra;
   if (defined($time)) {
-    push(@extra, "time=$time");
+    push(@extra, "time=".$time);
   }
-  if (defined $status->{bayes_score}) {
-    push(@extra, "bayes=" . $status->{bayes_score});
+  if ($status && defined $status->{bayes_score}) {
+    push(@extra, "bayes=".$status->{bayes_score});
   }
   if ($opt_mid) {
     my $mid = $ma->get_header("Message-Id");
@@ -256,21 +313,32 @@ sub wanted {
   }
   push(@extra, "scantime=" . ($after - $before));
 
-  my $yorn = $status->is_spam() ? 'Y' : '.';
-  my $hits = $status->get_hits();
-  my $tests = join(",", sort(grep(length,$status->get_names_of_tests_hit(),$status->get_names_of_subtests_hit())));
-  my $extra = join(",", @extra);
+  my $yorn;
+  my $score;
+  my $tests;
+  my $extra;
+
+  if ($opt_loguris) {
+    $yorn = '.';
+    $score = 0;
+    $tests = join(" ", sort @uris);
+    $extra = '';
+  } else {
+    $yorn = $status->is_spam() ? 'Y' : '.';
+    $score = $status->get_score();
+    $tests = join(",", sort(grep(length,$status->get_names_of_tests_hit(),$status->get_names_of_subtests_hit())));
+    $extra = join(",", @extra);
+  }
 
   if (defined $opt_rewrite) {
-    $status->rewrite_mail();
     open(REWRITE, "> " . ($opt_rewrite ? $opt_rewrite : "/tmp/out"));
-    print REWRITE $status->get_full_message_as_text();
+    print REWRITE $status->rewrite_mail();
     close(REWRITE);
   }
 
   $id =~ s/\s/_/g;
 
-  $out .= sprintf("%s %2d %s %s %s\n", $yorn, $hits, $id, $tests, $extra);
+  $out .= sprintf("%s %2d %s %s %s\n", $yorn, $score, $id, $tests, $extra);
 
   if ($tests =~ /MICROSOFT_EXECUTABLE|MIME_SUSPECT_NAME/) {
     $out .= logkilled($ma, $id, "possible virus");
@@ -291,7 +359,8 @@ sub wanted {
     }
   }
 
-  $status->finish();
+  if (defined $status) { $status->finish(); }
+  $ma->finish();
   undef $ma;		# clean 'em up
   undef $status;
 
@@ -300,6 +369,38 @@ sub wanted {
   }
 
   return $out;
+}
+
+# ick.  We have to go grovelling through the body parts to see if a message
+# is a report_safe-marked-up message, because a local scanner will overwrite
+# any remote scanner's X-Spam-Checker-Version header.
+#
+sub message_should_be_deencapped {
+  my ($ma) = @_;
+
+  # not sure why this is undefined, but it is sometimes
+  if (defined $ma->{body_parts} && scalar @{$ma->{body_parts}} > 0) {
+    my $firstpart = $ma->{body_parts}->[0];
+    if (!$firstpart->{headers}->{'content-type'}
+        || $firstpart->{headers}->{'content-type'} ne 'text/plain')
+    {
+      return 0;     # not a 'report_safe' encapsulation
+    }
+
+    if (scalar @{$firstpart->{raw}} < 3) { return 0; } # too short to be a report
+
+    # grab first 2 lines
+    my $text = $firstpart->{raw}->[0] . $firstpart->{raw}->[1];
+    $text =~ s/\s+/ /gs;
+    if ($text =~ /^Spam detection software, running on the system \"(\S+)\"/) {
+      my $hname = $1;
+      if ($hname =~ /$opt_deencap/io) {
+        return 1;
+      }
+    }
+  }
+
+  return 0;     # a different host marked it up.  pass it through!
 }
 
 sub logkilled {
@@ -335,55 +436,3 @@ sub progress {
 
 ###########################################################################
 
-sub find_missed {
-  my $file = shift;
-
-  my $threshold = 5;
-
-  my $shouldbespam = 1;
-  if ($file =~ /ham/) { $shouldbespam = 0; }
-
-  my $scores = readscores();
-
-  open (IN, "<$file");
-  while (<IN>) {
-    next if /^#/;
-    /^.\s+\d+\s+(\S+)\s*/ or next;
-    my $id = $1;
-    my $score = 0.0;
-
-    $_ = $'; s/bayes=\S+//; s/,,+/,/g; s/^\s+//; s/\s+$//;
-    foreach my $tst (split (/,/, $_)) {
-      next if ($tst eq '');
-      if (!defined $scores->{$tst}) {
-	warn "unknown test in $file, ignored: $tst\n";
-	next;
-      }
-      $score += $scores->{$tst};
-    }
-
-    if ($shouldbespam && $score < $threshold) {
-      found_missed($score, $id, $_);
-    }
-    elsif (!$shouldbespam && $score > $threshold) {
-      found_missed($score, $id, $_);
-    }
-  }
-  close IN;
-}
-
-sub readscores {
-  warn "Reading scores from \"$opt_c\"...\n";
-  system("./parse-rules-for-masses -d \"$opt_c\"") and die;
-  use vars qw(%scores);
-  require "./tmp/rules.pl";
-  return \%scores;
-}
-
-sub found_missed {
-  my $score = shift;
-  my $id = shift;
-  my $tests = shift;
-
-  print "$score $id $tests\n";
-}

@@ -4,19 +4,27 @@
 # the next update. Use @@LOCAL_RULES_DIR@@/local.cf instead.
 # See 'perldoc Mail::SpamAssassin::Conf' for details.
 #
-# This program is free software; you can redistribute it and/or modify
-# it under the terms of either the Artistic License or the GNU General
-# Public License as published by the Free Software Foundation; either
-# version 1 of the License, or (at your option) any later version.
-#
-# See the file "License" in the top level of the SpamAssassin source
-# distribution for more details.
-#
 # Add meta tests which cover *both* headers and body here.
 #
 # Note: body tests are run with long lines, so be sure to limit the
 # size of searches; use /.{0,30}/ instead of /.*/ to avoid huge
 # search times.
+#
+# <@LICENSE>
+# Copyright 2004 Apache Software Foundation
+# 
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+# 
+#     http://www.apache.org/licenses/LICENSE-2.0
+# 
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# </@LICENSE>
 #
 ###########################################################################
 
@@ -26,7 +34,6 @@ require_version @@VERSION@@
 
 body __ISO_2022_JP_DELIM	/\e\$B/
 
-body __THREE_DOLLARS		/\${3,}/
 header __MANY_EXCLS             Subject =~ /![^!]+!/
 header __PLING_PLING            Subject =~ /!!!/
 
@@ -34,8 +41,6 @@ body __UPPERCASE_25_50          eval:check_for_uppercase('25', '50')
 body __UPPERCASE_50_75          eval:check_for_uppercase('50', '75')
 body __UPPERCASE_75_100         eval:check_for_uppercase('75', '100')
 
-meta CASHCASHCASH		(!__ISO_2022_JP_DELIM && __THREE_DOLLARS)
-describe CASHCASHCASH		Contains at least 3 dollar signs in a row
 meta MANY_EXCLAMATIONS          (!__ISO_2022_JP_DELIM && __MANY_EXCLS)
 describe MANY_EXCLAMATIONS      Subject has many exclamations
 meta UPPERCASE_25_50            (!__ISO_2022_JP_DELIM && __UPPERCASE_25_50)
@@ -106,19 +111,10 @@ body __NIGERIAN_BODY_41		/(?:government|bank) of nigeria/i
 body __NIGERIAN_BODY_42		/nigerian? (?:national|government)/i
 body __NIGERIAN_BODY_43         /\blate .{0,15}(?:father|wife|husband|general|president|daughter|son|minister).{0,20}(?:wealthy|treasure|deposit|money|left|property|known|\$|US)/i
 body __NIGERIAN_BODY_44         /\b(?:of|the) late president\b/i
-body __NIGERIAN_BODY_45         /\bsum of ?(?:million|US|\$)|(?:deposit|left|huge|discovered|abandoned).{0,15} sum of/i
+body __NIGERIAN_BODY_45         /\bsum of ?(?:million|US|\$)|\b(?:deposit|left|huge|discovered|abandoned).{0,15} sum of/i
 body __NIGERIAN_BODY_46         /\bgive\s+you .{0,15}(?:fund|money|total|sum|contact|percent)\b/i
 
 ##############################################################################
-
-header __IDENT_NOBODY		Received =~ /ident[:=]nobody\b/i
-header __REGSITE_COM		Received =~ /\.registeredsite\.com\s/
-header __X_BEENTHERE		exists:X-BeenThere
-header __IDENT_NOBODY_LOCALHOST Received =~ /\bident[:=]nobody\@localhost\b/i
-body   __FORGOTTEN_PASSWORD     /[fF]org[oe]t.{0,25}[pP]assword/
-header __KNOWN_MAILING_LIST     eval:detect_mailing_list()
-meta IDENT_NOBODY		(__IDENT_NOBODY && !__IDENT_NOBODY_LOCALHOST && !__REGSITE_COM && !((__FORGOTTEN_PASSWORD + __X_BEENTHERE + __KNOWN_MAILING_LIST) > 1))
-describe IDENT_NOBODY		Received lines include an 'ident:nobody' string
 
 header __SANE_MSGID		MESSAGEID =~ /^<[^<>\\ \t\n\r\x0b\x80-\xff]+\@[^<>\\ \t\n\r\x0b\x80-\xff]+>\s*$/m
 header __HAS_MSGID		MESSAGEID =~ /\S/
@@ -131,8 +127,7 @@ header __MOZILLA_MSGID		MESSAGEID =~ /^<[A-F\d]{8}\.[A-F1-9][A-F\d]{0,7}\@\S+>$/
 meta FORGED_MUA_MOZILLA		(__MOZILLA_MUA && !__UNUSABLE_MSGID && !__MOZILLA_MSGID)
 describe FORGED_MUA_MOZILLA	Forged mail pretending to be from Mozilla
 
-header __NMS_CGI_NOT_BUGGY      X-Mailer =~ /^NMS FormMail\.pl.*v\d/
-body __BUGGY_CGI		/Below is the result of your feedback form/
-meta BUGGY_CGI			__BUGGY_CGI && !__NMS_CGI_NOT_BUGGY
-describe BUGGY_CGI		Broken CGI script message
-
+header __PC_RND_HEADER		ALL =~ /%RA?ND(?:OM)?_[A-Z]/i
+body __PC_RND_BODY		/%RA?ND(?:OM)?_[A-Z]/i
+rawbody __PC_RND_RAWBODY	/%RA?ND(?:OM)?_[A-Z]/i
+meta PERCENT_RANDOM	(__PC_RND_HEADER || __PC_RND_BODY || __PC_RND_RAWBODY)

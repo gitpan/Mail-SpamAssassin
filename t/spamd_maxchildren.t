@@ -2,13 +2,15 @@
 
 use lib '.'; use lib 't';
 use SATest; sa_t_init("spamd_maxchildren");
-use Test; BEGIN { plan tests => 22 };
+use Test; BEGIN { plan tests => ($SKIP_SPAMD_TESTS ? 0 : 22) };
+
+exit if $SKIP_SPAMD_TESTS;
 
 # ---------------------------------------------------------------------------
 
 %patterns = (
 
-q{ X-Spam-Status: Yes, hits=}, 'status',
+q{ X-Spam-Status: Yes, score=}, 'status',
 q{ X-Spam-Flag: YES}, 'flag',
 q{ X-Spam-Level: **********}, 'stars',
 q{ FROM_ENDS_IN_NUMS}, 'endsinnums',

@@ -1,6 +1,5 @@
 # common functionality for tests.
 # imported into main for ease of use.
-
 package main;
 
 use Cwd;
@@ -8,6 +7,20 @@ use Config;
 use File::Path;
 use File::Copy;
 use File::Basename;
+
+
+BEGIN {
+  # No spamd test in Windows unless env override says user figured out a way
+  # If you want to know why these are vars and no constants, read this thread:
+  #   <http://www.mail-archive.com/dev%40perl.apache.org/msg05466.html>
+  #  -- mss, 2004-01-13
+  our $RUNNING_ON_WINDOWS = ($^O =~ /^(mswin|dos|os2)/oi);
+  our $SKIP_SPAMD_TESTS = $RUNNING_ON_WINDOWS; 
+  our $NO_SPAMC_EXE;
+  our $SKIP_SPAMC_TESTS;
+  our $SSL_AVAILABLE;
+
+}
 
 # Set up for testing. Exports (as global vars):
 # out: $home: $HOME env variable
@@ -17,7 +30,6 @@ use File::Basename;
 sub sa_t_init {
   my $tname = shift;
 
-  my $perl_path;
   if ($config{PERL_PATH}) {
     $perl_path = $config{PERL_PATH};
   }
@@ -29,27 +41,36 @@ sub sa_t_init {
     $perl_path =~ s|/[^/]*$|/$^X|;
   }
 
-  $perl_path .= " -T" if !defined($ENV{'TEST_PERL_TAINT'}) or $ENV{'TEST_PERL_TAINT'} ne 'no';
-  $perl_path .= " -w" if !defined($ENV{'TEST_PERL_WARN'})  or $ENV{'TEST_PERL_WARN'}  ne 'no';
+  $perl_cmd  = $perl_path;
+  $perl_cmd .= " -T" if !defined($ENV{'TEST_PERL_TAINT'}) or $ENV{'TEST_PERL_TAINT'} ne 'no';
+  $perl_cmd .= " -w" if !defined($ENV{'TEST_PERL_WARN'})  or $ENV{'TEST_PERL_WARN'}  ne 'no';
 
   $scr = $ENV{'SCRIPT'};
-  $scr ||= "$perl_path ../spamassassin";
+  $scr ||= "$perl_cmd ../spamassassin";
 
-  $spamd = $ENV{'SPAMD_SCRIPT'};
-  $spamd ||= "$perl_path ../spamd/spamd -x";
+  $spamd = "$perl_cmd ../spamd/spamd";
 
   $spamc = $ENV{'SPAMC_SCRIPT'};
-  $spamc ||= "../spamd/spamc";
+  $spamc ||= "../spamc/spamc";
 
+  $salearn = $ENV{'SALEARN_SCRIPT'};
+  $salearn ||= "$perl_cmd ../sa-learn";
+
+  $spamdhost = $ENV{'SPAMD_HOST'};
+  $spamdhost ||= "localhost";
   $spamdport = $ENV{'SPAMD_PORT'};
   $spamdport ||= 48373;		# whatever
   $spamd_cf_args = "-C log/test_rules_copy";
   $spamd_localrules_args = " --siteconfigpath log/localrules.tmp";
   $scr_localrules_args =   " --siteconfigpath log/localrules.tmp";
+  $salearn_localrules_args =   " --siteconfigpath log/localrules.tmp";
 
   $scr_cf_args = "-C log/test_rules_copy";
   $scr_pref_args = "-p log/test_default.cf";
+  $salearn_cf_args = "-C log/test_rules_copy";
+  $salearn_pref_args = "-p log/test_default.cf";
   $scr_test_args = "";
+  $salearn_test_args = "";
   $set_test_prefs = 0;
   $default_cf_lines = "
     bayes_path ./log/user_state/bayes
@@ -57,19 +78,38 @@ sub sa_t_init {
   ";
 
   (-f "t/test_dir") && chdir("t");        # run from ..
-  rmtree ("log");
+
+  $NO_SPAMC_EXE = ($RUNNING_ON_WINDOWS &&
+                   !$ENV{'SPAMC_SCRIPT'} &&
+                   !(-e "../spamc/spamc.exe"));
+  $SKIP_SPAMC_TESTS = ($NO_SPAMC_EXE ||
+                       ($RUNNING_ON_WINDOWS && !$ENV{'SPAMD_HOST'})); 
+  $SSL_AVAILABLE = ((!$SKIP_SPAMC_TESTS) &&  # no SSL test if no spamc
+                    (!$SKIP_SPAMD_TESTS) &&  # or if no local spamd
+                    (`$spamc -V` =~ /with SSL support/) &&
+                    (`$spamd --version` =~ /with SSL support/));
+  # do not remove prior test results!
+  # rmtree ("log");
+
   mkdir ("log", 0755);
+
+  rmtree ("log/user_state");
+  rmtree ("log/outputdir.tmp");
+  rmtree ("log/test_rules_copy");
   mkdir ("log/test_rules_copy", 0755);
   for $file (<../rules/*.cf>) {
     $base = basename $file;
     copy ($file, "log/test_rules_copy/$base")
-		or warn "cannot copy $file to log/test_rules_copy/$base";
+      or warn "cannot copy $file to log/test_rules_copy/$base";
   }
 
+  rmtree ("log/localrules.tmp");
   mkdir ("log/localrules.tmp", 0755);
+  copy ("../rules/init.pre", "log/localrules.tmp/init.pre")
+    or die "init.pre copy failed";
 
   copy ("../rules/user_prefs.template", "log/test_rules_copy/99_test_default.cf")
-	or die "user prefs copy failed";
+    or die "user prefs copy failed";
 
   open (PREFS, ">>log/test_rules_copy/99_test_default.cf");
   print PREFS $default_cf_lines;
@@ -151,27 +191,64 @@ sub sarun {
   system ("$scrargs > log/$testname.${Test::ntest}");
   $sa_exitcode = ($?>>8);
   if ($sa_exitcode != 0) { return undef; }
-  &checkfile ("$testname.${Test::ntest}", $read_sub);
+  &checkfile ("$testname.${Test::ntest}", $read_sub) if (defined $read_sub);
+  1;
+}
+
+# Run salearn. Calls back with the output.
+# in $args: arguments to run with
+# in $read_sub: callback for the output (should read from <IN>).
+# This is called with no args.
+#
+# out: $salearn_exitcode global: exitcode from sitescooper
+# ret: undef if sitescooper fails, 1 for exit 0
+#
+sub salearnrun {
+  my $args = shift;
+  my $read_sub = shift;
+
+  rmtree ("log/outputdir.tmp"); # some tests use this
+  mkdir ("log/outputdir.tmp", 0755);
+
+  %found = ();
+  %found_anti = ();
+
+  if (defined $ENV{'SA_ARGS'}) {
+    $args = $ENV{'SA_ARGS'} . " ". $args;
+  }
+  $args = "$salearn_cf_args $salearn_localrules_args $salearn_pref_args $salearn_test_args $args";
+
+  # added fix for Windows tests from Rudif
+  my $salearnargs = "$salearn $args";
+  $salearnargs =~ s!/!\\!g if ($^O =~ /^MS(DOS|Win)/i);
+  print ("\t$salearnargs\n");
+  system ("$salearnargs > log/$testname.${Test::ntest}");
+  $salearn_exitcode = ($?>>8);
+  if ($salearn_exitcode != 0) { return undef; }
+  &checkfile ("$testname.${Test::ntest}", $read_sub) if (defined $read_sub);
   1;
 }
 
 sub scrun {
-  $spamd_never_started = 1;
-  spamcrun (@_);
+  spamcrun (@_, 0);
+}
+sub scrunwithstderr {
+  spamcrun (@_, 1);
 }
 
 sub spamcrun {
   my $args = shift;
   my $read_sub = shift;
+  my $capture_stderr = shift;
 
   if (defined $ENV{'SC_ARGS'}) {
     $args = $ENV{'SC_ARGS'} . " ". $args;
   }
 
   my $spamcargs;
-  if($args !~ /\b(?:-p\s*[0-9]+|-o|-U)\b/)
+  if($args !~ /\b(?:-p\s*[0-9]+|-U)\b/)
   {
-    $spamcargs = "$spamc -p $spamdport $args";
+    $spamcargs = "$spamc -d $spamdhost -p $spamdport $args";
   }
   else
   {
@@ -180,14 +257,20 @@ sub spamcrun {
   $spamcargs =~ s!/!\\!g if ($^O =~ /^MS(DOS|Win)/i);
 
   print ("\t$spamcargs\n");
-  system ("$spamcargs > log/$testname.out");
+  if ($capture_stderr) {
+    system ("$spamcargs > log/$testname.out 2>&1");
+  } else {
+    system ("$spamcargs > log/$testname.out");
+  }
 
   $sa_exitcode = ($?>>8);
   if ($sa_exitcode != 0) { stop_spamd(); return undef; }
 
   %found = ();
   %found_anti = ();
-  &checkfile ("$testname.out", $read_sub);
+  &checkfile ("$testname.out", $read_sub) if (defined $read_sub);
+
+  ($sa_exitcode == 0);
 }
 
 sub spamcrun_background {
@@ -228,7 +311,10 @@ sub sdrun {
 }
 
 sub start_spamd {
-  my $sdargs = shift;
+
+  return if $SKIP_SPAMD_TESTS;
+
+  my $spamd_extra_args = shift;
 
   return if (defined($spamd_pid) && $spamd_pid > 0);
 
@@ -236,29 +322,59 @@ sub start_spamd {
   mkdir ("log/outputdir.tmp", 0755);
 
   if (defined $ENV{'SD_ARGS'}) {
-    $sdargs = $ENV{'SD_ARGS'} . " ". $sdargs;
+    $spamd_extra_args = $ENV{'SD_ARGS'} . " ". $spamd_extra_args;
   }
 
-  my $spamdargs;
-  if($sdargs !~ /(?:-C\s*[^-]\S+)/) {
-    $sdargs = "$spamd_cf_args $spamd_localrules_args $sdargs";
+  my @spamd_args = (
+      $spamd,
+      qq{-D},
+      qq{-x}
+    );
+
+  if (!$spamd_inhibit_log_to_err) {
+    push (@spamd_args, 
+      qq{-s}, qq{stderr},
+    );
   }
-  if($sdargs !~ /(?:-p\s*[0-9]+|-o|--socketpath)/)
-  {
-    $spamdargs = "$spamd -D -p $spamdport $sdargs";
+
+  if ($spamd_extra_args !~ /(?:-C\s*[^-]\S+)/) {
+    push(@spamd_args, 
+      $spamd_cf_args,
+      $spamd_localrules_args,
+    );
   }
-  else
-  {
-    $spamdargs = "$spamd -D $sdargs";
+  if ($spamd_extra_args !~ /(?:-p\s*[0-9]+|-o|--socketpath)/) {
+    push(@spamd_args,
+      qq{-p}, $spamdport,
+    );
   }
-  $spamdargs =~ s!/!\\!g if ($^O =~ /^MS(DOS|Win)/i);
 
   if ($set_test_prefs) {
     warn "oops! SATest.pm: a test prefs file was created, but spamd isn't reading it\n";
   }
 
-  print ("\t$spamdargs > log/$testname.spamd 2>&1 &\n");
-  system ("$spamdargs > log/$testname.spamd 2>&1 &");
+  my $spamd_stdout = "log/$testname-spamd.out";
+  my $spamd_stderr = "log/$testname-spamd.err";
+  my $spamd_stdlog = "log/$testname-spamd.log";
+  my $spamd_forker = $ENV{'SPAMD_FORKER'}   ?
+                       $ENV{'SPAMD_FORKER'} :
+                     $RUNNING_ON_WINDOWS    ?
+                       "start $perl_path"   :
+                       $perl_path;
+  my $spamd_cmd    = join(' ',
+                       $spamd_forker,
+                       qq{SATest.pl},
+                       qq{-Mredirect},
+                       qq{-o${spamd_stdout}},
+                       qq{-O${spamd_stderr}},
+                       qq{--},
+                       @spamd_args,
+                       $spamd_extra_args,
+                       qq{&},
+                    );
+  unlink ($spamd_stdout, $spamd_stderr, $spamd_stdlog);
+  print ("\t${spamd_cmd}\n");
+  system ($spamd_cmd);
 
   # now find the PID
   $spamd_pid = 0;
@@ -269,9 +385,10 @@ sub start_spamd {
   while ($spamd_pid <= 0) {
     my $spamdlog = '';
 
-    if (open (IN, "<log/$testname.spamd")) {
+    if (open (IN, "<${spamd_stderr}")) {
       while (<IN>) {
-	/Address already in use/ and $retries = 0;
+        # Yes, DO retry on this error. I'm getting test failures otherwise
+        # /Address already in use/ and $retries = 0;
 	/server pid: (\d+)/ and $spamd_pid = $1;
 	$spamdlog .= $_;
       }
@@ -291,8 +408,7 @@ sub start_spamd {
 }
 
 sub stop_spamd {
-  return 0 if defined($spamd_never_started);
-  return 0 if defined($spamd_already_killed);
+  return 0 if ( defined($spamd_already_killed) || $SKIP_SPAMD_TESTS);
 
   $spamd_pid ||= 0;
   if ( $spamd_pid <= 1) {
@@ -304,17 +420,43 @@ sub stop_spamd {
 
     # wait for it to exit, before returning.
     for my $waitfor (0 .. 5) {
-      if (kill (0, $spamd_pid) == 0) { last; }
+      my $killstat;
+      if (($killstat = kill (0, $spamd_pid)) == 0) { last; }
       print ("Waiting for spamd at pid $spamd_pid to exit...\n");
       sleep 1;
     }
 
     $spamd_pid = 0;
-    undef $spamd_never_started;
     $spamd_already_killed = 1;
     return $killed;
   }
 }
+
+sub create_saobj {
+  my ($args) = shift; # lets you override/add arguments
+
+  # YUCK, these file/dir names should be some sort of variable, at
+  # least we keep their definition in the same file for the moment.
+  my %setup_args = ( rules_filename => 'log/test_rules_copy',
+		     site_rules_filename => 'log/localrules.tmp',
+		     userprefs_filename => 'log/test_default.cf',
+		     userstate_dir => 'log/user_state',
+		     local_tests_only => 1,
+		   );
+
+  # override default args
+  foreach my $arg (keys %$args) {
+    $setup_args{$arg} = $args->{$arg};
+  }
+
+  # We'll assume that the test has setup INC correctly
+  require Mail::SpamAssassin;
+
+  my $sa = Mail::SpamAssassin->new(\%setup_args);
+
+  return $sa;
+}
+  
 
 # ---------------------------------------------------------------------------
 

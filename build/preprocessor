@@ -1,4 +1,20 @@
-#!/usr/bin/perl -w
+#!/usr/bin/perl
+# <@LICENSE>
+# Copyright 2004 Apache Software Foundation
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# </@LICENSE>
+#
 # This script isn't supposed to be run by hand, it's used by `make` as a pre-
 # processor. It currently accepts these options on the command line:
 #
@@ -27,17 +43,13 @@
 #                        by double at-signs, eg. @@VERSION@@. The values are
 #                        taken from the environment and can be overwritten with
 #                        the -D switch. Empty/undefined variables are removed.
-#   bytes                comments out each "use bytes" from the code if the 
-#                        code is built with Perl < 5.6.1. Ths pragma is used to 
-#                        force byte semantics rather than character semantics 
-#                        to work around Unicode bugs in Perl 5.8.0.
-#                        Uses PERL_VERSION (Watch out: You have to define old
-#                        Perls via eg. PERL_VERSION=5.5.30 (5.005_03))
 #   sharpbang            Does some sharpbang (#!) replacement. Uses PERL_BIN and
 #                        PERL_WARN.
 
 
 use strict;
+use warnings;
+
 use Config;
 use File::Spec;
 
@@ -51,6 +63,8 @@ my $indir;
 my $outdir;
 my $mode;
 
+
+# Each environment variable counts as an own defined var for us.
 foreach (keys %ENV) {
   $defines{$_} = $ENV{$_};
 }
@@ -69,22 +83,19 @@ foreach (@ARGV) {
 
 # On Windows, we get -m without an arg.  avoid problems with that
 # by just ignoring that switch.
-if (defined($mode) && $mode eq '0') { undef $mode; }
+$mode = undef unless $mode;
 
-my $l = 1;
-my $fname;
 if (defined ($indir) && defined ($outdir) && scalar @infiles > 0) {
+  my $fname;
   while ($fname = shift @infiles) {
     my $in = File::Spec->catfile ($indir, $fname);
     my $out = File::Spec->catfile ($outdir, $fname);
     do_file ($in, $out);
   }
 }
-
 elsif (defined ($infile) && defined($outfile)) {
   do_file ($infile, $outfile);
 }
-
 else {
   # just do STDIN/STDOUT . Not recommended for portability as
   # it requires "<" and ">" for Makefile to do its work.
@@ -110,11 +121,14 @@ sub read_defs {
 
 sub do_file {
   my ($in, $out) = @_;
-  open (STDIN, "<$in") or die "Cannot open $in: $!";
-  open (OUT, ">$out") or die "Cannot open $out: $!";
-  select OUT;
-  do_stdin();
-  close STDIN; close OUT;
+ 
+  open (FOOIN,  "<$in")  or die "Cannot open $in: $!";
+  open (FOOOUT, ">$out") or die "Cannot open $out: $!";
+  
+  do_it();
+  
+  close (FOOIN);
+  close (FOOOUT);
 
   if (defined $mode) {
     chmod (oct $mode, $out) or die "Cannot chmod $mode $out: $!";
@@ -122,6 +136,17 @@ sub do_file {
 }
 
 sub do_stdin {
+  open (FOOIN,  "<&STDIN")  or die "Cannot dup stdin: $!";
+  open (FOOOUT, ">&STDOUT") or die "Cannot dup stdout: $!";
+
+  do_it();
+
+  close (FOOIN);
+  close (FOOOUT);
+}
+
+
+sub do_it {
   # The perlpath can be overwritten via -DPERL_BIN=<perlpath>
   my $perl   = $Config{'perlpath'};
   if($defines{'PERL_BIN'} && ($defines{PERL_BIN} ne 'this')) {
@@ -139,7 +164,7 @@ sub do_stdin {
   }
 
   # Taint mode is enabled per default except on 5.005
-  my $perl_taint = (($] < 5.006) ? '' : ' -T');
+  my $perl_taint = ' -T';
   # The taint mode can be disabled with -DPERL_TAINT=<yes|no>
   if ($defines{'PERL_TAINT'} and $defines{'PERL_TAINT'} eq 'no') {
     $perl_taint = '';
@@ -152,7 +177,8 @@ sub do_stdin {
     $perl_version = sprintf("%i.%03i%03i", $v[0] || 0, $v[1] || 0, $v[2] || 0);
   }
 
-  while (<STDIN>) {
+  my $l = 1;
+  while (<FOOIN>) {
     $_ = pack("C0A*", $_);	# turn off UTF8-ness
 
     # Conditional compiling
@@ -166,14 +192,9 @@ sub do_stdin {
     # Variable replacement
     if ($modules{'vars'}) {
       # Replace all @@VARS@@
-      s/\@\@([A-Z][A-Z0-9_]*)\@\@/$defines{$1}/g;
-    }
-
-    # Comment out use bytes for old Perls
-    if ($modules{'bytes'} && ($perl_version < 5.006)) {
-      if(/^[^#]*\buse\s+bytes\b/) {
-        s/^(\s*)/$1#/;
-        s/$/\t##REMOVED_ON_BUILD##/;
+      while (/\@\@([A-Z][A-Z0-9_]*)\@\@/) {
+        my $d = $defines{$1} || '';
+        s/\@\@$1\@\@/$d/g;
       }
     }
 
@@ -182,7 +203,8 @@ sub do_stdin {
       s/^#!.*perl.*$/#!${perl}${perl_taint}${perl_warn}/;
     }
 
-    print;
+    print FOOOUT $_;
     $l++;
   }
 }
+

@@ -2,8 +2,10 @@
 
 use lib '.'; use lib 't';
 use SATest; sa_t_init("spamc_B");
-use Test; BEGIN { plan tests => 8 };
 
+use Test; plan tests => ($SKIP_SPAMC_TESTS ? 0 : 8);
+
+exit if $SKIP_SPAMC_TESTS;
 # ---------------------------------------------------------------------------
 
 %patterns = (
