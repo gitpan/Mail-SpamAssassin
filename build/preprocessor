@@ -3,7 +3,10 @@
 # processor. It currently accepts these options on the command line:
 #
 #   -M<module>            Enables <module>
-#   -D<variable>=<value>  Defines the <variable> to be <value>
+#   -D<variable>=<value>  Defines the <variable> to be <value>; if the value
+#                         doesn't contain an equal sign, it is interpreted
+#                         as a file and all of its lines containing equal
+#                         signs are taken as <variable>=<value> pairs
 #
 # and some more to help with non-UNIX platforms, where command-line input
 # and output redirection are not always available:
@@ -14,6 +17,8 @@
 #   -I<dir>               Read from input directory <dir>
 #   -O<dir>               Write to output directory <dir>
 #   <filename> ...        Process named files from -I<dir> to -O<dir>
+#
+#   -m<perm>              Use chmod permissions <perm> for files
 #
 # Those modules are currently implemented:
 #   conditional          Comments out every line containing the string
@@ -32,6 +37,7 @@
 #                        PERL_WARN.
 
 
+use strict;
 use Config;
 use File::Spec;
 
@@ -39,8 +45,11 @@ my %modules = ();
 my %defines = ();
 
 my @infiles = ();
+my $infile;
+my $outfile;
 my $indir;
 my $outdir;
+my $mode;
 
 foreach (keys %ENV) {
   $defines{$_} = $ENV{$_};
@@ -49,12 +58,18 @@ foreach (keys %ENV) {
 foreach (@ARGV) {
   if    (/^-M([a-z]+)$/)       { $modules{$1} = 1; }
   elsif (/^-D([A-Z_]+)=(.*)$/) { $defines{$1} = $2; }
+  elsif (/^-D([^=]+)$/)        { read_defs($1); } 
   elsif (/^-i(.+)$/)           { $infile = $1; }
   elsif (/^-o(.+)$/)           { $outfile = $1; }
   elsif (/^-I(.+)$/)           { $indir = $1; }
+  elsif (/^-m(.*)$/)           { $mode = '0'.$1; }
   elsif (/^-O(.+)$/)           { $outdir = $1; }
   elsif (/^(.+)$/)             { push (@infiles, $1); }
 }
+
+# On Windows, we get -m without an arg.  avoid problems with that
+# by just ignoring that switch.
+if (defined($mode) && $mode eq '0') { undef $mode; }
 
 my $l = 1;
 my $fname;
@@ -77,12 +92,33 @@ else {
   do_stdin();
 }
 
+
+sub read_defs {
+  my ($in) = @_;
+  open (DEFS, "<$in") or die "Connot open $in: $!";
+  foreach (<DEFS>) {
+    $_ =~ s/^\s+|\s+$//g;
+    next if /^#/;
+    next unless /=/;
+    my ($var, $val) = split(/\s*=\s*/, $_, 2);
+    $var =~ tr/A-Z_//cd;
+    $defines{$var} = $val;
+  }
+  close (DEFS);
+}
+
+
 sub do_file {
   my ($in, $out) = @_;
   open (STDIN, "<$in") or die "Cannot open $in: $!";
-  open (OUT, ">$out") or die "Cannot open $out: $!"; select OUT;
+  open (OUT, ">$out") or die "Cannot open $out: $!";
+  select OUT;
   do_stdin();
   close STDIN; close OUT;
+
+  if (defined $mode) {
+    chmod (oct $mode, $out) or die "Cannot chmod $mode $out: $!";
+  }
 }
 
 sub do_stdin {
@@ -95,19 +131,18 @@ sub do_stdin {
     }
   }
 
-  # If we're using a CVS build, add the -w switch to turn on warnings
-  my $perl_warn = -f 'CVS/Repository' ? ' -w' : '';
-  # The warnings can be overwritten via -DPERL_WARN=<1|0>
-  if ($defines{'PERL_WARN'} && ($defines{'PERL_WARN'} ne 'auto')) {
-    if ($defines{'PERL_WARN'} eq 'yes') {
-      $perl_warn = ' -w';
-    }
-    elsif ($defines{'PERL_WARN'} eq 'no') {
-      $perl_warn = '';
-    }
-    else {
-      warn("Unknown value '$defines{'PERL_WARN'}' for PERL_WARN; assuming 'auto'");
-    }
+  # Warnings are enabled per default
+  my $perl_warn = ' -w';
+  # The warnings can be overwritten via -DPERL_WARN=<yes|no>
+  if ($defines{'PERL_WARN'} and $defines{'PERL_WARN'} eq 'no') {
+    $perl_warn = '';
+  }
+
+  # Taint mode is enabled per default except on 5.005
+  my $perl_taint = (($] < 5.006) ? '' : ' -T');
+  # The taint mode can be disabled with -DPERL_TAINT=<yes|no>
+  if ($defines{'PERL_TAINT'} and $defines{'PERL_TAINT'} eq 'no') {
+    $perl_taint = '';
   }
 
   # Save the Perl Version
@@ -122,10 +157,9 @@ sub do_stdin {
 
     # Conditional compiling
     if ($modules{'conditional'}) {
-      # Comment out lines carrying the REMOVE_ON_BUILD or (deprecated) REMOVEFORINST tag
+      # DELETE lines carrying the REMOVE_ON_BUILD or (deprecated) REMOVEFORINST tag
       if(/\bREMOVE(?:FORINST|_ON_BUILD)\b/) {
-        s/^(\s*)/$1#/;
-        s/(?:##)?REMOVE(?:FORINST|_ON_BUILD)(?:##)?/##REMOVED_ON_BUILD##/;
+        next;
       }
     }
 
@@ -145,7 +179,7 @@ sub do_stdin {
 
     # Sharpbang (#!) replacement (see also ExtUtils::MY->fixin)
     if ($modules{'sharpbang'} && ($l == 1)) {
-      s/^#!.*perl.*$/#!${perl}${perl_warn}/;
+      s/^#!.*perl.*$/#!${perl}${perl_taint}${perl_warn}/;
     }
 
     print;

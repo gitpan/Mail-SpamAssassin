@@ -28,17 +28,24 @@ sub sa_t_init {
     $perl_path = $Config{perlpath};
     $perl_path =~ s|/[^/]*$|/$^X|;
   }
+
+  $perl_path .= " -T" if !defined($ENV{'TEST_PERL_TAINT'}) or $ENV{'TEST_PERL_TAINT'} ne 'no';
+  $perl_path .= " -w" if !defined($ENV{'TEST_PERL_WARN'})  or $ENV{'TEST_PERL_WARN'}  ne 'no';
+
   $scr = $ENV{'SCRIPT'};
-  $scr ||= "$perl_path -T -w ../spamassassin";
+  $scr ||= "$perl_path ../spamassassin";
 
   $spamd = $ENV{'SPAMD_SCRIPT'};
-  $spamd ||= "$perl_path -T -w ../spamd/spamd -x";
+  $spamd ||= "$perl_path ../spamd/spamd -x";
 
   $spamc = $ENV{'SPAMC_SCRIPT'};
   $spamc ||= "../spamd/spamc";
 
-  $spamdport = 48373;		# whatever
+  $spamdport = $ENV{'SPAMD_PORT'};
+  $spamdport ||= 48373;		# whatever
   $spamd_cf_args = "-C log/test_rules_copy";
+  $spamd_localrules_args = " --siteconfigpath log/localrules.tmp";
+  $scr_localrules_args =   " --siteconfigpath log/localrules.tmp";
 
   $scr_cf_args = "-C log/test_rules_copy";
   $scr_pref_args = "-p log/test_default.cf";
@@ -58,6 +65,8 @@ sub sa_t_init {
     copy ($file, "log/test_rules_copy/$base")
 		or warn "cannot copy $file to log/test_rules_copy/$base";
   }
+
+  mkdir ("log/localrules.tmp", 0755);
 
   copy ("../rules/user_prefs.template", "log/test_rules_copy/99_test_default.cf")
 	or die "user prefs copy failed";
@@ -87,6 +96,15 @@ sub tstfile {
   my $file = shift;
   open (OUT, ">log/mail.txt") or die;
   print OUT $file; close OUT;
+}
+
+sub tstlocalrules {
+  my $lines = shift;
+
+  $set_local_rules = 1;
+
+  open (OUT, ">log/localrules.tmp/00test.cf") or die;
+  print OUT $lines; close OUT;
 }
 
 sub tstprefs {
@@ -124,7 +142,7 @@ sub sarun {
   if (defined $ENV{'SA_ARGS'}) {
     $args = $ENV{'SA_ARGS'} . " ". $args;
   }
-  $args = "$scr_cf_args $scr_pref_args $scr_test_args $args";
+  $args = "$scr_cf_args $scr_localrules_args $scr_pref_args $scr_test_args $args";
 
   # added fix for Windows tests from Rudif
   my $scrargs = "$scr $args";
@@ -151,7 +169,7 @@ sub spamcrun {
   }
 
   my $spamcargs;
-  if($args !~ /(?:-p\s*[0-9]+|-o)/)
+  if($args !~ /\b(?:-p\s*[0-9]+|-o|-U)\b/)
   {
     $spamcargs = "$spamc -p $spamdport $args";
   }
@@ -181,7 +199,7 @@ sub spamcrun_background {
   }
 
   my $spamcargs;
-  if($args !~ /(?:-p\s*[0-9]+|-o)/)
+  if($args !~ /\b(?:-p\s*[0-9]+|-o|-U)\b/)
   {
     $spamcargs = "$spamc -p $spamdport $args";
   }
@@ -223,9 +241,9 @@ sub start_spamd {
 
   my $spamdargs;
   if($sdargs !~ /(?:-C\s*[^-]\S+)/) {
-    $sdargs = $spamd_cf_args . " ". $sdargs;
+    $sdargs = "$spamd_cf_args $spamd_localrules_args $sdargs";
   }
-  if($sdargs !~ /(?:-p\s*[0-9]+|-o)/)
+  if($sdargs !~ /(?:-p\s*[0-9]+|-o|--socketpath)/)
   {
     $spamdargs = "$spamd -D -p $spamdport $sdargs";
   }
@@ -325,7 +343,20 @@ sub pattern_to_re {
 
 sub patterns_run_cb {
   local ($_);
-  $_ = join ('', <IN>);
+  my $string = shift;
+
+  if (defined $string) {
+    $_ = $string;
+  } else {
+    $_ = join ('', <IN>);
+  }
+
+  # create default names == the pattern itself, if not specified
+  foreach my $pat (keys %patterns) {
+    if ($patterns{$pat} eq '') {
+      $patterns{$pat} = $pat;
+    }
+  }
 
   foreach my $pat (sort keys %patterns) {
     my $safe = pattern_to_re ($pat);

@@ -26,8 +26,12 @@ require Exporter;
 @EXPORT = qw(local_tz);
 
 use Mail::SpamAssassin;
+
+use Config;
 use File::Spec;
 use Time::Local;
+use Sys::Hostname (); # don't import hostname() into this namespace!
+
 
 use constant RUNNING_ON_WINDOWS => ($^O =~ /^(?:mswin|dos|os2)/oi);
 
@@ -43,7 +47,7 @@ use constant RUNNING_ON_WINDOWS => ($^O =~ /^(?:mswin|dos|os2)/oi);
 
     clean_path_in_taint_mode();
     if ( !$displayed_path++ ) {
-      dbg("Current PATH is: ".join(":",File::Spec->path()));
+      dbg("Current PATH is: ".join($Config{'path_sep'},File::Spec->path()));
     }
     foreach my $path (File::Spec->path()) {
       my $fname = File::Spec->catfile ($path, $filename);
@@ -75,17 +79,63 @@ use constant RUNNING_ON_WINDOWS => ($^O =~ /^(?:mswin|dos|os2)/oi);
     dbg("Running in taint mode, removing unsafe env vars, and resetting PATH");
 
     delete @ENV{qw(IFS CDPATH ENV BASH_ENV)};
-    $ENV{'PATH'} = '/bin:/usr/bin:/usr/local/bin';
+
+    # Go through and clean the PATH out
+    my @path = ();
+    foreach my $dir (File::Spec->path()) {
+      next unless $dir;
+
+      $dir =~ /^(.+)$/; # untaint, then clean ( 'foo/./bar' -> 'foo/bar', etc. )
+      $dir = File::Spec->canonpath($1);
+
+      if (!File::Spec->file_name_is_absolute($dir)) {
+	dbg("PATH included '$dir', which is not absolute, dropping.");
+	next;
+      }
+      elsif (!stat($dir)) {
+	dbg("PATH included '$dir', which doesn't exist, dropping.");
+	next;
+      }
+      elsif (!-d _) {
+	dbg("PATH included '$dir', which isn't a directory, dropping.");
+	next;
+      }
+
+      dbg("PATH included '$dir', keeping.");
+      push(@path, $dir);
+    }
+
+    $ENV{'PATH'} = join($Config{'path_sep'}, @path);
+    dbg("Final PATH set to: ".$ENV{'PATH'});
   }
 }
 
-# taint mode: are we running in taint mode? 1 for yes, undef for no.
+# taint mode: are we running in taint mode? 1 for yes, 0 for no.
 sub am_running_in_taint_mode {
-  if (defined $AM_TAINTED) { return $AM_TAINTED; }
-  
-  my $blank = substr ($ENV{PATH}, 0, 0);
-  $AM_TAINTED = not eval { eval "1 || $blank" || 1 };
-  dbg ("running in taint mode? ".($AM_TAINTED?"yes":"no"));
+  return $AM_TAINTED if defined $AM_TAINTED;
+
+  if ($] >= 5.008) {
+    # perl 5.8 and above, ${^TAINT} is a syntax violation in 5.005
+    $AM_TAINTED = eval q(no warnings q(syntax); ${^TAINT});
+  }
+  else {
+    # older versions
+    my $blank;
+    for my $d ((File::Spec->curdir, File::Spec->rootdir, File::Spec->tmpdir)) {
+      opendir(TAINT, $d) || next;
+      $blank = readdir(TAINT);
+      closedir(TAINT);
+      last;
+    }
+    if (!(defined $blank && $blank)) {
+      # these are sometimes untainted, so this is less preferable than readdir
+      $blank = join('', values %ENV, $0, @ARGV);
+    }
+    $blank = substr($blank, 0, 0);
+    # seriously mind-bending perl
+    $AM_TAINTED = not eval { eval "1 || $blank" || 1 };
+  }
+  dbg ("running in taint mode? ". ($AM_TAINTED ? "yes" : "no"));
   return $AM_TAINTED;
 }
 
@@ -122,6 +172,48 @@ sub untaint_file_path {
     warn "security: cannot untaint path: \"$path\"\n";
     return $path;
   }
+}
+
+# This sub takes a scalar or a reference to an array, hash, scalar or another
+# reference and recursively untaints all its values (and keys if it's a
+# reference to a hash). It should be used with caution as blindly untainting
+# values subverts the purpose of working in taint mode. It will return the
+# untainted value if requested but to avoid unnecessary copying, the return
+# value should be ignored when working on lists.
+# Bad:
+#  %ENV = untaint_var(\%ENV);
+# Better:
+#  untaint_var(\%ENV);
+#
+sub untaint_var {
+  local ($_) = @_;
+  return undef unless defined;
+
+  unless (ref) {
+    /^(.*)$/s;
+    return $1;
+  }
+  elsif (ref eq 'ARRAY') {
+    @{$_} = map { $_ = untaint_var($_) } @{$_};
+    return @{$_} if wantarray;
+  }
+  elsif (ref eq 'HASH') {
+    while (my ($k, $v) = each %{$_}) {
+      if (!defined $v && $_ == \%ENV) {
+	delete ${$_}{$k};
+	next;
+      }
+      ${$_}{untaint_var($k)} = untaint_var($v);
+    }
+    return %{$_} if wantarray;
+  }
+  elsif (ref eq 'SCALAR' or ref eq 'REF') {
+    ${$_} = untaint_var(${$_});
+  }
+  else {
+    warn "Can't untaint a " . ref($_) . "!\n";
+  }
+  return $_;
 }
 
 ###########################################################################
@@ -166,6 +258,10 @@ my %TZ = (
 	'AWST' => '+0800',
 	);
 
+# month mappings
+my %MONTH = (jan => 1, feb => 2, mar => 3, apr => 4, may => 5, jun => 6,
+	     jul => 7, aug => 8, sep => 9, oct => 10, nov => 11, dec => 12);
+
 sub local_tz {
   # standard method for determining local timezone
   my $time = time;
@@ -185,11 +281,11 @@ sub parse_rfc822_date {
 
   # now match it in parts.  Date part first:
   if (s/ (\d+) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) (\d{4}) / /i) {
-    $dd = $1; $mon = $2; $yyyy = $3;
+    $dd = $1; $mon = lc($2); $yyyy = $3;
   } elsif (s/ (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) +(\d+) \d+:\d+:\d+ (\d{4}) / /i) {
-    $dd = $2; $mon = $1; $yyyy = $3;
+    $dd = $2; $mon = lc($1); $yyyy = $3;
   } elsif (s/ (\d+) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) (\d{2,3}) / /i) {
-    $dd = $1; $mon = $2; $yyyy = $3;
+    $dd = $1; $mon = lc($2); $yyyy = $3;
   } else {
     dbg ("time cannot be parsed: $date");
     return undef;
@@ -222,12 +318,9 @@ sub parse_rfc822_date {
   # all other timezones are considered equivalent to "-0000"
   $tzoff ||= '-0000';
 
-  if (!defined $mmm && defined $mon) {
-    my @months = qw(jan feb mar apr may jun jul aug sep oct nov dec);
-    $mon = lc($mon);
-    my $i; for ($i = 0; $i < 12; $i++) {
-      if ($mon eq $months[$i]) { $mmm = $i+1; last; }
-    }
+  # months
+  if (exists $MONTH{$mon}) {
+    $mmm = $MONTH{$mon};
   }
 
   $hh ||= 0; $mm ||= 0; $ss ||= 0; $dd ||= 0; $mmm ||= 0; $yyyy ||= 0;
@@ -253,6 +346,18 @@ sub parse_rfc822_date {
   }
 
   return $time;
+}
+
+sub time_to_rfc822_date {
+  my($time) = @_;
+
+  my @days = qw/Sun Mon Tue Wed Thu Fri Sat/;
+  my @months = qw/Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec/;
+  my @localtime = localtime($time || time);
+  $localtime[5]+=1900;
+
+  sprintf("%s, %02d %s %4d %02d:%02d:%02d %s", $days[$localtime[6]], $localtime[3],
+    $months[$localtime[4]], @localtime[5,2,1,0], local_tz());
 }
 
 ###########################################################################
@@ -290,6 +395,71 @@ sub fake_getpwuid {
     '',			# expire
   );
 }
+
+###########################################################################
+
+# Given a string, extract an IPv4 address from it.  Required, since
+# we currently have no way to portably unmarshal an IPv4 address from
+# an IPv6 one without kludging elsewhere.
+#
+sub extract_ipv4_addr_from_string {
+  my ($str) = @_;
+
+  return unless defined($str);
+
+  if ($str =~ /\b(
+			(?:1\d\d|2[0-4]\d|25[0-5]|\d\d|\d)\.
+			(?:1\d\d|2[0-4]\d|25[0-5]|\d\d|\d)\.
+			(?:1\d\d|2[0-4]\d|25[0-5]|\d\d|\d)\.
+			(?:1\d\d|2[0-4]\d|25[0-5]|\d\d|\d)
+		      )\b/ix)
+  {
+    if (defined $1) { return $1; }
+  }
+
+  # ignore native IPv6 addresses; currently we have no way to deal with
+  # these if we could extract them, as the DNSBLs don't provide a way
+  # to query them!  TODO, eventually, once IPv6 spam starts to appear ;)
+  return;
+}
+
+###########################################################################
+{
+  my($hostname, $fq_hostname);
+
+# get the current host's unqalified domain name (better: return whatever
+# Sys::Hostname thinks out hostname is, might also be a full qualified one)
+  sub hostname {
+    return $hostname if defined($hostname);
+
+    # Sys::Hostname isn't taint safe and might fall back to `hostname`. So we've
+    # got to clean PATH before we may call it.
+    clean_path_in_taint_mode();
+    $hostname = Sys::Hostname::hostname();
+
+    return $hostname;
+  }
+
+# get the current host's fully-qualified domain name, if possible.  If
+# not possible, return the unqualified hostname.
+  sub fq_hostname {
+    return $fq_hostname if defined($fq_hostname);
+
+    $fq_hostname = hostname();
+    if ($fq_hostname !~ /\./) { # hostname doesn't contain a dot, so it can't be a FQDN
+      my @names = grep(/^\Q${fq_hostname}.\E/o,                         # grep only FQDNs
+                    map { split } (gethostbyname($fq_hostname))[0 .. 1] # from all aliases
+                  );
+      $fq_hostname = $names[0] if (@names); # take the first FQDN, if any 
+    }
+
+    return $fq_hostname;
+  }
+}
+
+###########################################################################
+
+sub my_inet_aton { unpack("N", pack("C4", split(/\./, $_[0]))) }
 
 ###########################################################################
 

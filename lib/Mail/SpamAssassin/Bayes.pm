@@ -33,13 +33,12 @@ use bytes;
 use Mail::SpamAssassin;
 use Mail::SpamAssassin::BayesStore;
 use Mail::SpamAssassin::PerMsgStatus;
+use Mail::SpamAssassin::SHA1 qw(sha1);
 
 use vars qw{
   @ISA
   $IGNORED_HDRS
   $MARK_PRESENCE_ONLY_HDRS
-  $MIN_SPAM_CORPUS_SIZE_FOR_BAYES
-  $MIN_HAM_CORPUS_SIZE_FOR_BAYES
   %HEADER_NAME_COMPRESSION
   $OPPORTUNISTIC_LOCK_VALID
 };
@@ -85,7 +84,7 @@ $IGNORED_HDRS = qr{(?: (?:X-)?Sender    # misc noise
   # these
   |X-MailScanner(?:-SpamCheck)?
   |X-Spam(?:-(?:Status|Level|Flag|Report|Hits|Score|Checker-Version))?
-  |X-Antispam |X-RBL-Warning
+  |X-Antispam |X-RBL-Warning |X-Mailscanner
   |X-MDaemon-Deliver-To |X-Virus-Scanned
   |X-Mass-Check-Id
   |X-Pyzor |X-DCC-\S{2,25}-Metrics
@@ -93,7 +92,7 @@ $IGNORED_HDRS = qr{(?: (?:X-)?Sender    # misc noise
   |X-AP-Spam-(?:Score|Status) |X-RIPE-Spam-Status
   |X-SpamCop-[^:]+
   |X-SMTPD |(?:X-)?Spam-Apparently-To
-  |SPAM
+  |SPAM |X-Perlmx-Spam
 
   # some noisy Outlook headers that add no good clues:
   |Content-Class |Thread-(?:Index|Topic)
@@ -116,14 +115,23 @@ $IGNORED_HDRS = qr{(?: (?:X-)?Sender    # misc noise
 # Note only the presence of these headers, in order to reduce the
 # hapaxen they generate.
 $MARK_PRESENCE_ONLY_HDRS = qr{(?: X-Face
-  |X-(?:Gnu[Pp][Gg]|[GP]PG)(?:-Key)?-Fingerprint
-)}x;
+  |X-(?:Gnu-?PG|PGP|GPG)(?:-Key)?-Fingerprint
+)}ix;
 
 # tweaks tested as of Nov 18 2002 by jm: see SpamAssassin-devel list archives
 # for results.  The winners are now the default settings.
 use constant IGNORE_TITLE_CASE => 1;
 use constant TOKENIZE_LONG_8BIT_SEQS_AS_TUPLES => 1;
 use constant TOKENIZE_LONG_TOKENS_AS_SKIPS => 1;
+
+# tweaks of May 12 2003, see SpamAssassin-devel archives again.
+use constant PRE_CHEW_ADDR_HEADERS => 1;
+use constant NO_NUMERIC_IN_HEADERS => 0;
+use constant IGNORE_MSGID_TOKENS => 0;
+use constant CHEW_BODY_URIS => 1;
+use constant CHEW_BODY_MAILADDRS => 1;
+use constant HDRS_TOKENIZE_LONG_TOKENS_AS_SKIPS => 1;
+use constant BODY_TOKENIZE_LONG_TOKENS_AS_SKIPS => 1;
 
 # We store header-mined tokens in the db with a "HHeaderName:val" format.
 # some headers may contain lots of gibberish tokens, so allow a little basic
@@ -149,11 +157,6 @@ use constant TOKENIZE_LONG_TOKENS_AS_SKIPS => 1;
   'Content-Type'	=> '*c',
 );
 
-# How big should the corpora be before we allow scoring using Bayesian tests?
-# Do not use constants here. Also these may be better as conf items. TODO
-$MIN_SPAM_CORPUS_SIZE_FOR_BAYES = 200;
-$MIN_HAM_CORPUS_SIZE_FOR_BAYES = 200;
-
 # How many seconds should the opportunistic_expire lock be valid?
 $OPPORTUNISTIC_LOCK_VALID = 300;
 
@@ -172,7 +175,7 @@ use constant GARY_ROBINSON_X_CONSTANT => 0.600;
 # the use of "s") of an original assumed expectation ... relative to how
 # strongly we want to consider our actual collected data."  Low 's' means
 # trust collected data more strongly.
-use constant CHI_ROBINSON_S_CONSTANT  => 0.373;
+use constant CHI_ROBINSON_S_CONSTANT  => 0.100;
 use constant GARY_ROBINSON_S_CONSTANT => 0.160;
 
 # Should we ignore tokens with probs very close to the middle ground (.5)?
@@ -184,15 +187,13 @@ use constant GARY_ROBINSON_MIN_PROB_STRENGTH => 0.430;
 # calculation?
 use constant N_SIGNIFICANT_TOKENS => 150;
 
+# How many significant tokens are required for a classifier score to
+# be considered usable?
+use constant REQUIRE_SIGNIFICANT_TOKENS_TO_SCORE => -1;
+
 # How long a token should we hold onto?  (note: German speakers typically
 # will require a longer token than English ones.)
 use constant MAX_TOKEN_LENGTH => 15;
-
-# lower and upper bounds for probabilities; we lock probs into these
-# so one high-strength token can't overwhelm a set of slightly lower-strength
-# tokens.
-use constant PROB_BOUND_LOWER => 0.001;
-use constant PROB_BOUND_UPPER => 0.999;
 
 ###########################################################################
 
@@ -202,8 +203,9 @@ sub new {
   my ($main) = @_;
   my $self = {
     'main'              => $main,
-    'log_raw_counts'	=> 0,
     'conf'		=> $main->{conf},
+    'log_raw_counts'	=> 0,
+    'tz'		=> Mail::SpamAssassin::Util::local_tz(),
 
     # Off. See comment above cached_probs_get().
     #'cached_probs'	=> { },
@@ -222,7 +224,11 @@ sub new {
 
 sub finish {
   my $self = shift;
-  if (!$self->{main}->{conf}->{use_bayes}) { return; }
+  if (!$self->{conf}->{use_bayes}) { return; }
+
+  # if we're untying too much, uncomment this...
+  # use Carp qw(cluck); cluck "stack trace at untie";
+
   $self->{store}->untie_db();
 }
 
@@ -246,15 +252,14 @@ sub sanity_check_is_untied {
 # BayesStore::read_db_configs().
 sub read_db_configs {
   my ($self) = @_;
-  my $conf = $self->{main}->{conf};
 
   # use of hapaxes.  Set on bayes object, since it controls prob
   # computation.
-  $self->{use_hapaxes} = $conf->{bayes_use_hapaxes};
+  $self->{use_hapaxes} = $self->{conf}->{bayes_use_hapaxes};
 
   # Use chi-squared combining instead of Gary-combining (Robinson/Graham-style
   # naive-Bayesian)?
-  $self->{use_chi_sq_combining} = $conf->{bayes_use_chi2_combining};
+  $self->{use_chi_sq_combining} = $self->{conf}->{bayes_use_chi2_combining};
 
   # Use the appropriate set of constants; the different systems have different
   # optimum settings for these.  (TODO: should these be exposed through Conf?)
@@ -299,6 +304,11 @@ sub tokenize_line {
   my $isbody = $_[3];
   local ($_) = $_[1];
 
+  my $in_headers = ($tokprefix ne '');
+
+  my($bv) = ($self->{store}->get_magic_tokens())[6];
+  my $magic_re = $self->{store}->get_magic_re($bv);
+
   # include quotes, .'s and -'s for URIs, and [$,]'s for Nigerian-scam strings,
   # and ISO-8859-15 alphas.  Do not split on @'s; better results keeping it.
   # Some useful tokens: "$31,000,000" "www.clock-speed.net" "f*ck" "Hits!"
@@ -324,7 +334,7 @@ sub tokenize_line {
     $token =~ s/^[-'"\.,]+//;        # trim non-alphanum chars at start or end
     $token =~ s/[-'"\.,]+$//;        # so we don't get loads of '"foo' tokens
 
-    next if ( $token =~ /^\*\*[A-Z]+$/ ); # skip false magic tokens
+    next if ( $token =~ /$magic_re/ ); # skip false magic tokens
 
     # *do* keep 3-byte tokens; there's some solid signs in there
     my $len = length($token);
@@ -345,7 +355,25 @@ sub tokenize_line {
 		people|place|first|because|
 		And|give|year|information|can)$/x);
 
-    if ($len > MAX_TOKEN_LENGTH) {
+    # are we in the body?  If so, apply some body-specific breakouts
+    if (!$in_headers) {
+      if (CHEW_BODY_MAILADDRS && $token =~ /\S\@\S/i) {
+	my @toks = $self->tokenize_mail_addrs ($token);
+	push (@{$self->{tokens}}, @toks);
+	$wc += scalar @toks;
+      }
+      elsif (CHEW_BODY_URIS && $token =~ /\S\.[a-z]/i) {
+	my $bit = $token; while ($bit =~ s/^[^\.]+\.(.+)$/$1/gs) {
+	  push (@{$self->{tokens}}, "UD:".$1); $wc++;	# UD = URL domain
+	}
+      }
+    }
+
+    # note: do not trim down overlong tokens if they contain '*'.  This is
+    # used as part of split tokens such as "HTo:D*net" indicating that 
+    # the domain ".net" appeared in the To header.
+    #
+    if ($len > MAX_TOKEN_LENGTH && $token !~ /\*/) {
       if (TOKENIZE_LONG_8BIT_SEQS_AS_TUPLES && $token =~ /[\xa0-\xff]{2}/) {
 	# Matt sez: "Could be asian? Autrijus suggested doing character ngrams,
 	# but I'm doing tuples to keep the dbs small(er)."  Sounds like a plan
@@ -356,7 +384,10 @@ sub tokenize_line {
 	next;
       }
 
-      if (TOKENIZE_LONG_TOKENS_AS_SKIPS) {
+    if (($in_headers && HDRS_TOKENIZE_LONG_TOKENS_AS_SKIPS)
+		|| (!$in_headers && BODY_TOKENIZE_LONG_TOKENS_AS_SKIPS))
+    {
+	# if (TOKENIZE_LONG_TOKENS_AS_SKIPS) {
 	# Spambayes trick via Matt: Just retain 7 chars.  Do not retain
 	# the length, it does not help; see my mail to -devel of Nov 20 2002.
 	# "sk:" stands for "skip".
@@ -371,7 +402,8 @@ sub tokenize_line {
     # patterns instead of text copies.
 
     # replace digits with 'N'...
-    if ($token =~ /\d/) {
+    if ($token =~ /\d/ && (!$in_headers || !NO_NUMERIC_IN_HEADERS))
+    {
       $token =~ s/\d/N/gs;
 
       # stop-list for numeric tokens.  These are squarely in the gray
@@ -397,6 +429,14 @@ sub tokenize_headers {
   my ($self, $msg) = @_;
 
   my $hdrs = $msg->get_all_headers();
+
+  # jm: do not learn additional metadata (X-Languages, X-Relays-Untrusted)
+  # until we can generate that while running sa-learn. TODO
+  #
+  # if ($msg->can ("get_all_metadata")) {
+  # $hdrs .= $msg->get_all_metadata();
+  # }
+
   my %parsed = ();
 
   # we don't care about whitespace; so fix continuation lines to make the next
@@ -410,6 +450,8 @@ sub tokenize_headers {
   $hdrs =~ s/^From \S+[^\n]+$//gim;
 
   $hdrs =~ s/^${IGNORED_HDRS}: [^\n]*$//gim;
+
+  if (IGNORE_MSGID_TOKENS) { $hdrs =~ s/^Message-I[dD]: [^\n]*$//gim;}
 
   # and re-add the last 2 received lines: usually a good source of
   # spamware tokens and HELO names.
@@ -429,6 +471,11 @@ sub tokenize_headers {
     # special tokenization for some headers:
     if ($hdr =~ /^(?:|X-|Resent-)Message-I[dD]$/) {
       $val = $self->pre_chew_message_id ($val);
+    }
+    elsif (PRE_CHEW_ADDR_HEADERS && $hdr =~ /^(?:|X-|Resent-)
+	(?:Return-Path|From|To|Cc|Reply-To|Errors-To|Mail-Followup-To|Sender)$/ix)
+    {
+      $val = $self->pre_chew_addr_header ($val);
     }
     elsif ($hdr eq 'Received') {
       $val = $self->pre_chew_received ($val);
@@ -539,23 +586,50 @@ sub pre_chew_received {
   $val;
 }
 
+sub pre_chew_addr_header {
+  my ($self, $val) = @_;
+  local ($_);
+
+  my @addrs = $self->{main}->find_all_addrs_in_line ($val);
+  my @toks = ();
+  foreach (@addrs) {
+    push (@toks, $self->tokenize_mail_addrs ($_));
+  }
+  return join (' ', @toks);
+}
+
+sub tokenize_mail_addrs {
+  my ($self, $addr) = @_;
+
+  ($addr =~ /(.+)\@(.+)$/) or return ();
+  my @toks = ();
+  push(@toks, "U*".$1, "D*".$2);
+  $_ = $2; while (s/^[^\.]+\.(.+)$/$1/gs) { push(@toks, "D*".$1); }
+  return @toks;
+}
+
 ###########################################################################
 
 sub learn {
-  my ($self, $isspam, $msg) = @_;
+  my ($self, $isspam, $msg, $id) = @_;
 
-  if (!$self->{main}->{conf}->{use_bayes}) { return; }
+  if (!$self->{conf}->{use_bayes}) { return; }
   if (!defined $msg) { return; }
   my $body = $self->get_body_from_msg ($msg);
   my $ret;
 
-  # we still tie for writing here, since we write to the seen db
-  # synchronously
   eval {
     local $SIG{'__DIE__'};	# do not run user die() traps in here
 
-    if ($self->{store}->tie_db_writable()) {
-      $ret = $self->learn_trapped ($isspam, $msg, $body);
+    my $ok;
+    if ($self->{main}->{learn_to_journal}) {
+      $ok = $self->{store}->tie_db_readonly();
+    } else {
+      $ok = $self->{store}->tie_db_writable();
+    }
+
+    if ($ok) {
+      $ret = $self->learn_trapped ($isspam, $msg, $body, $id);
 
       if (!$self->{main}->{learn_caller_will_untie}) {
         $self->{store}->untie_db();
@@ -574,9 +648,9 @@ sub learn {
 
 # this function is trapped by the wrapper above
 sub learn_trapped {
-  my ($self, $isspam, $msg, $body) = @_;
+  my ($self, $isspam, $msg, $body, $msgid) = @_;
 
-  my $msgid = $self->get_msgid ($msg);
+  $msgid ||= $self->get_msgid ($msg);
   my $seen = $self->{store}->seen_get ($msgid);
   if (defined ($seen)) {
     if (($seen eq 's' && $isspam) || ($seen eq 'h' && !$isspam)) {
@@ -586,7 +660,15 @@ sub learn_trapped {
       warn ("db_seen corrupt: value='$seen' for $msgid. ignored");
     } else {
       dbg ("$msgid: already learnt as opposite, forgetting first");
+
+      # kluge so that forget() won't untie the db on us ...
+      my $orig = $self->{main}->{learn_caller_will_untie};
+      $self->{main}->{learn_caller_will_untie} = 1;
+
       $self->forget ($msg);
+
+      # reset the value post-forget() ...
+      $self->{main}->{learn_caller_will_untie} = $orig;
     }
   }
 
@@ -599,26 +681,31 @@ sub learn_trapped {
   my ($wc, @tokens) = $self->tokenize ($msg, $body);
   my %seen = ();
 
+  my $msgatime = $self->receive_date(scalar $msg->get_all_headers());
+
   for (@tokens) {
     if ($seen{$_}) { next; } else { $seen{$_} = 1; }
 
     if ($isspam) {
-      $self->{store}->tok_count_change (1, 0, $_);
+      $self->{store}->tok_count_change (1, 0, $_, $msgatime);
     } else {
-      $self->{store}->tok_count_change (0, 1, $_);
+      $self->{store}->tok_count_change (0, 1, $_, $msgatime);
     }
   }
 
   $self->{store}->seen_put ($msgid, ($isspam ? 's' : 'h'));
+  $self->{store}->add_touches_to_journal();
+
+  dbg("bayes: Learned '$msgid'");
   1;
 }
 
 ###########################################################################
 
 sub forget {
-  my ($self, $msg) = @_;
+  my ($self, $msg, $id) = @_;
 
-  if (!$self->{main}->{conf}->{use_bayes}) { return; }
+  if (!$self->{conf}->{use_bayes}) { return; }
   if (!defined $msg) { return; }
   my $body = $self->get_body_from_msg ($msg);
   my $ret;
@@ -628,8 +715,15 @@ sub forget {
   eval {
     local $SIG{'__DIE__'};	# do not run user die() traps in here
 
-    if ($self->{store}->tie_db_writable()) {
-      $ret = $self->forget_trapped ($msg, $body);
+    my $ok;
+    if ($self->{main}->{learn_to_journal}) {
+      $ok = $self->{store}->tie_db_readonly();
+    } else {
+      $ok = $self->{store}->tie_db_writable();
+    }
+
+    if ($ok) {
+      $ret = $self->forget_trapped ($msg, $body, $id);
 
       if (!$self->{main}->{learn_caller_will_untie}) {
         $self->{store}->untie_db();
@@ -648,9 +742,9 @@ sub forget {
 
 # this function is trapped by the wrapper above
 sub forget_trapped {
-  my ($self, $msg, $body) = @_;
+  my ($self, $msg, $body, $msgid) = @_;
 
-  my $msgid = $self->get_msgid ($msg);
+  $msgid ||= $self->get_msgid ($msg);
   my $seen = $self->{store}->seen_get ($msgid);
   my $isspam;
   if (defined ($seen)) {
@@ -686,6 +780,7 @@ sub forget_trapped {
   }
 
   $self->{store}->seen_delete ($msgid);
+  $self->{store}->add_touches_to_journal();
   1;
 }
 
@@ -695,13 +790,36 @@ sub get_msgid {
   my ($self, $msg) = @_;
 
   my $msgid = $msg->get_header("Message-Id");
-  if (!defined $msgid) { $msgid = time.".$$\@sa_generated"; }
+  if (!defined $msgid || $msgid eq '' || $msgid =~ /^\s*<\s*>.*$/) { # generate a best effort unique id
+    # Use sha1(Date:, last received: and top N bytes of body)
+    # where N is MIN(1024 bytes, 1/2 of body length)
+    #
+    my $date = $msg->get_header("Date");
+    $date = "None" if (!defined $date || $date eq ''); # No Date?
+
+    my @rcvd = $msg->get_header("Received");
+    my $rcvd = $rcvd[$#rcvd];
+    $rcvd = "None" if (!defined $rcvd || $rcvd eq ''); # No Received?
+
+    my $body = $msg->get_pristine_body();
+    if (length($body) > 64) { # Small Body?
+      my $keep = ( length $body > 2048 ? 1024 : int(length($body) / 2) );
+      substr($body, $keep) = '';
+    }
+
+    $msgid = sha1($date."\000".$rcvd."\000".$body).'@sa_generated';
+  }
 
   # remove \r and < and > prefix/suffixes
   chomp $msgid;
   $msgid =~ s/^<//; $msgid =~ s/>.*$//g;
 
   $msgid;
+}
+
+sub add_uris_for_permsgstatus {
+  my ($self, $permsgstatus) = @_;
+  return $permsgstatus->get_uri_list();
 }
 
 sub get_body_from_msg {
@@ -714,12 +832,14 @@ sub get_body_from_msg {
   }
   my $permsgstatus =
         Mail::SpamAssassin::PerMsgStatus->new($self->{main}, $msg);
+
   my $body = $permsgstatus->get_decoded_stripped_body_text_array();
+  push (@{$body}, $self->add_uris_for_permsgstatus($permsgstatus));
   $permsgstatus->finish();
 
   if (!defined $body) {
     # why?!
-    warn "failed to get body for ".$self->{msg}->get_header("Message-Id")."\n";
+    warn "failed to get body for ".$self->get_msgid($self->{msg})."\n";
     return [ ];
   }
 
@@ -729,10 +849,14 @@ sub get_body_from_msg {
 ###########################################################################
 
 sub sync {
-  my ($self, $opts) = @_;
-  if (!$self->{main}->{conf}->{use_bayes}) { return 0; }
-  $self->{store}->sync_journal($opts);
-  $self->{store}->expire_old_tokens($opts);
+  my ($self, $sync, $expire, $opts) = @_;
+  if (!$self->{conf}->{use_bayes}) { return 0; }
+
+  dbg("Syncing Bayes journal and expiring old tokens...");
+  $self->{store}->sync_journal($opts) if ( $sync );
+  $self->{store}->expire_old_tokens($opts) if ( $expire );
+  dbg("Syncing complete.");
+
   return 0;
 }
 
@@ -761,6 +885,8 @@ sub compute_prob_for_token {
   #$prob = $self->cached_probs_get ($ns, $nn, $s, $n);
   #if (defined $prob) { return $prob; }
   #}
+
+  return 0.5 if ( $ns == 0 || $nn == 0 );
 
   my $ratios = ($s / $ns);
   my $ration = ($n / $nn);
@@ -832,18 +958,18 @@ sub check_for_cached_probs_invalidated {
 sub is_scan_available {
   my $self = shift;
 
-  return 0 unless $self->{main}->{conf}->{use_bayes};
+  return 0 unless $self->{conf}->{use_bayes};
   return 0 unless $self->{store}->tie_db_readonly();
 
   my ($ns, $nn) = $self->{store}->nspam_nham_get();
 
-  if ($ns < $MIN_SPAM_CORPUS_SIZE_FOR_BAYES) {
-    dbg("debug: Only $ns spam(s) in Bayes DB < $MIN_SPAM_CORPUS_SIZE_FOR_BAYES");
+  if ($ns < $self->{conf}->{bayes_min_spam_num}) {
+    dbg("bayes: Not available for scanning, only $ns spam(s) in Bayes DB < ".$self->{conf}->{bayes_min_spam_num});
     $self->{store}->untie_db();
     return 0;
   }
-  if ($nn < $MIN_HAM_CORPUS_SIZE_FOR_BAYES) {
-    dbg("debug: Only $nn ham(s) in Bayes DB < $MIN_HAM_CORPUS_SIZE_FOR_BAYES");
+  if ($nn < $self->{conf}->{bayes_min_ham_num}) {
+    dbg("bayes: Not available for scanning, only $nn ham(s) in Bayes DB < ".$self->{conf}->{bayes_min_ham_num});
     $self->{store}->untie_db();
     return 0;
   }
@@ -855,7 +981,7 @@ sub is_scan_available {
 # Finally, the scoring function for testing mail.
 
 sub scan {
-  my ($self, $msg, $body) = @_;
+  my ($self, $permsgstatus, $msg, $body) = @_;
 
   if ( !$self->is_scan_available() ) {
     goto skip;
@@ -869,9 +995,18 @@ sub scan {
 
   dbg ("bayes corpus size: nspam = $ns, nham = $nn");
 
+  push (@{$body}, $self->add_uris_for_permsgstatus ($permsgstatus));
   my ($wc, @tokens) = $self->tokenize ($msg, $body);
+
+  if ($wc <= 0) {
+    dbg ("cannot use bayes on this message; no tokens found");
+    goto skip;
+  }
+
   my %seen = ();
   my $pw;
+
+  my $msgatime = $self->receive_date(scalar $msg->get_all_headers());
 
   # Off. See comment above cached_probs_get().
   #if (CACHE_S_N_TO_PROBS_MAPPING) {
@@ -883,6 +1018,7 @@ sub scan {
       ();		# exit map()
     } else {
       $seen{$_} = 1;
+      # warn "JMD bayes token found: '$_'\n";
       $pw = $self->compute_prob_for_token ($_, $ns, $nn);
       if (!defined $pw) {
 	();		# exit map()
@@ -891,11 +1027,6 @@ sub scan {
       }
     }
   } @tokens;
-
-  if ($wc <= 0) {
-    dbg ("cannot use bayes on this message; no tokens found");
-    goto skip;
-  }
 
   # now take the $count most significant tokens and calculate probs using
   # Robinson's formula.
@@ -909,27 +1040,23 @@ sub scan {
     if ($count-- < 0) { last; }
     my $pw = $pw{$_};
     next if (abs($pw - 0.5) < $self->{robinson_min_prob_strength});
-
-    # enforce (max PROB_BOUND_LOWER (min PROB_BOUND_UPPER (score))) as per
-    # Graham; it allows a majority of spam clues to override 1 or 2
-    # very-strong nonspam clues.  Moved here from above to save some CPU.
-    #
-    if ($pw < PROB_BOUND_LOWER) {
-      $pw = PROB_BOUND_LOWER;
-    } elsif ($pw > PROB_BOUND_UPPER) {
-      $pw = PROB_BOUND_UPPER;
-    }
-
     push (@sorted, $pw);
 
     # update the atime on this token, it proved useful
-    $self->{store}->tok_touch ($_);
+    $self->{store}->tok_touch ($_, $msgatime);
 
     dbg ("bayes token '$_' => $pw");
   }
 
   if ($#sorted < 0) {
     dbg ("cannot use bayes on this message; db not initialised yet");
+    goto skip;
+  }
+
+  if (REQUIRE_SIGNIFICANT_TOKENS_TO_SCORE > 0 && 
+	$#sorted <= REQUIRE_SIGNIFICANT_TOKENS_TO_SCORE)
+  {
+    dbg ("cannot use bayes on this message; not enough usable tokens found");
     goto skip;
   }
 
@@ -948,9 +1075,8 @@ sub scan {
   }
 
   $self->{store}->add_touches_to_journal();
-  $self->{store}->scan_count_increment();
 
-  $self->opportunistic_expire();
+  $self->opportunistic_calls();
   $self->{store}->untie_db();
   return $score;
 
@@ -960,7 +1086,7 @@ skip:
   return 0.5;           # nice and neutral
 }
 
-sub opportunistic_expire {
+sub opportunistic_calls {
   my($self) = @_;
 
   # Is an expire or journal sync running?
@@ -969,7 +1095,14 @@ sub opportunistic_expire {
 
   # handle expiry and journal syncing
   if ($self->{store}->expiry_due()) {
-    $self->sync();
+    $self->{store}->set_running_expire_tok();
+    $self->sync(1,1);
+    # don't need to unlock since the expire will have done that. ;)
+  }
+  elsif ( $self->{store}->journal_sync_due() ) {
+    $self->{store}->set_running_expire_tok();
+    $self->sync(1,0);
+    $self->{store}->remove_running_expire_tok();
   }
 }
 
@@ -1044,8 +1177,8 @@ sub chi_squared_probs_combine  {
 
   use constant LN2 => log(2);
 
-  $S = log($S) + $Sexp + LN2;
-  $H = log($H) + $Hexp + LN2;
+  $S = log($S) + $Sexp * LN2;
+  $H = log($H) + $Hexp * LN2;
 
   my $result;
   if ($num_clues) {
@@ -1060,5 +1193,118 @@ sub chi_squared_probs_combine  {
 }
 
 ###########################################################################
+
+sub dump_bayes_db {
+  my($self, $magic, $toks, $regex) = @_;
+
+  return 0 unless $self->{conf}->{use_bayes};
+  return 0 unless $self->{store}->tie_db_readonly();
+
+  my($sb,$ns,$nh,$nt,$le,$oa,$bv,$js,$ad,$er,$na) = $self->{store}->get_magic_tokens();
+  $sb = $self->{store}->scan_count_get() if ( $bv < 1 ); # we want current scan count, not scan base count
+
+  my $template = '%3.3f %10d %10d %10d  %s'."\n";
+
+  if ( $magic ) {
+    printf ($template, 0.0, 0, $bv, 0, 'non-token data: bayes db version');
+    printf ($template, 0.0, 0, $ns, 0, 'non-token data: nspam');
+    printf ($template, 0.0, 0, $nh, 0, 'non-token data: nham');
+    printf ($template, 0.0, 0, $nt, 0, 'non-token data: ntokens');
+    printf ($template, 0.0, 0, $oa, 0, 'non-token data: oldest atime');
+    printf ($template, 0.0, 0, $na, 0, 'non-token data: newest atime') if ( $bv >= 2 );
+    printf ($template, 0.0, 0, $sb, 0, 'non-token data: current scan-count') if ( $bv < 2 );
+    printf ($template, 0.0, 0, $js, 0, 'non-token data: last journal sync atime') if ( $bv >= 2 );
+    printf ($template, 0.0, 0, $le, 0, 'non-token data: last expiry atime');
+    if ( $bv >= 2 ) {
+      printf ($template, 0.0, 0, $ad, 0, 'non-token data: last expire atime delta');
+      printf ($template, 0.0, 0, $er, 0, 'non-token data: last expire reduction count');
+    }
+  }
+
+  if ( $toks ) {
+    my $magic_re = $self->{store}->get_magic_re($bv);
+
+    foreach my $tok (keys %{$self->{store}->{db_toks}}) {
+      next if ($tok =~ /$magic_re/); # skip magic tokens
+      next if (defined $regex && ($tok !~ /$regex/o));
+
+      my $prob = $self->compute_prob_for_token($tok, $ns, $nh);
+      $prob ||= 0.5;
+
+      my ($ts, $th, $atime) = $self->{store}->tok_get ($tok);
+      printf $template,$prob,$ts,$th,$atime,$tok;
+    }
+  }
+
+  if (!$self->{main}->{learn_caller_will_untie}) {
+    $self->{store}->untie_db();
+  }
+}
+
+# Stolen from Archive Iteraator ...  Should probably end up in M::SA::Util
+# Modified to call first_date via $self->first_date()
+sub receive_date {
+  my ($self, $header) = @_;
+
+  $header ||= '';
+  $header =~ s/\n[ \t]+/ /gs;	# fix continuation lines
+
+  my @rcvd = ($header =~ /^Received:(.*)/img);
+  my @local;
+  my $time;
+
+  if (@rcvd) {
+    if ($rcvd[0] =~ /qmail \d+ invoked by uid \d+/ ||
+	$rcvd[0] =~ /\bfrom (?:localhost\s|(?:\S+ ){1,2}\S*\b127\.0\.0\.1\b)/)
+    {
+      push @local, (shift @rcvd);
+    }
+    if (@rcvd && ($rcvd[0] =~ m/\bby localhost with \w+ \(fetchmail-[\d.]+/)) {
+      push @local, (shift @rcvd);
+    }
+    elsif (@local) {
+      unshift @rcvd, (shift @local);
+    }
+  }
+
+  if (@rcvd) {
+    $time = $self->first_date(shift @rcvd);
+    return $time if defined($time);
+  }
+  if (@local) {
+    $time = $self->first_date(@local);
+    return $time if defined($time);
+  }
+  if ($header =~ /^(?:From|X-From-Line:)\s+(.+)$/im) {
+    my $string = $1;
+    $string .= " ".$self->{tz} unless $string =~ /(?:[-+]\d{4}|\b[A-Z]{2,4}\b)/;
+    $time = $self->first_date($string);
+    return $time if defined($time);
+  }
+  if (@rcvd) {
+    $time = $self->first_date(@rcvd);
+    return $time if defined($time);
+  }
+  if ($header =~ /^Resent-Date:\s*(.+)$/im) {
+    $time = $self->first_date($1);
+    return $time if defined($time);
+  }
+  if ($header =~ /^Date:\s*(.+)$/im) {
+    $time = $self->first_date($1);
+    return $time if defined($time);
+  }
+
+  return time;
+}
+
+sub first_date {
+  my ($self, @strings) = @_;
+
+  foreach my $string (@strings) {
+    my $time = Mail::SpamAssassin::Util::parse_rfc822_date($string);
+    return $time if defined($time) && $time;
+  }
+  return undef;
+}
 
 1;

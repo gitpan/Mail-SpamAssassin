@@ -4,6 +4,7 @@ package Mail::SpamAssassin::Dns;
 package Mail::SpamAssassin::PerMsgStatus;
 
 use Mail::SpamAssassin::Conf;
+use Mail::SpamAssassin::PerMsgStatus;
 use File::Spec;
 use IO::Socket;
 use IPC::Open2;
@@ -43,36 +44,53 @@ use vars qw{
 # from them; however we do not, so we should ignore them.
 # cf. <http://www.iana.org/assignments/ipv4-address-space>,
 #     <http://duxcw.com/faq/network/privip.htm>,
-#     <http://duxcw.com/faq/network/autoip.htm>
+#     <http://duxcw.com/faq/network/autoip.htm>,
+#     <ftp://ftp.rfc-editor.org/in-notes/rfc3330.txt>
 #
 # Last update
+#   2003-04-15 Updated - bug 1784
+#   2003-04-07 Justin Mason - removed some now-assigned nets
 #   2002-08-24 Malte S. Stretz - added 172.16/12, 169.254/16
 #   2002-08-23 Justin Mason - added 192.168/16
 #   2002-08-12 Matt Kettler - mail to SpamAssassin-devel
 #              msgid:<5.1.0.14.0.20020812211512.00a33cc0@192.168.50.2>
 #
 $IP_IN_RESERVED_RANGE = qr{^(?:
-  192\.168|                        # 192.168/16:              Private Use
-  10|                              # 10/8:                    Private Use
-  172\.(?:1[6-9]|2[0-9]|3[01])|    # 172.16-172.31/16:        Private Use
-  169\.254|                        # 169.254/16:              Private Use (APIPA)
-  127|                             # 127/8:                   Private Use (localhost)
+  10|                              # 10.0.0.0/8:          Private-Use Networks (see RFC3330) 
+  127|                             # 127/8:               Loopback (see RFC3330) 
+  128\.0|                          # 128.0/16:            Reserved (subject to allocation) (see RFC3330) 
+  169\.254|                        # 169.254/16:          Link Local (APIPA) (see RFC3330) 
+  172\.(?:1[6-9]|2[0-9]|3[01])|    # 172.16-172.31/16:    Private-Use Networks (see RFC3330) 
+  191\.255|                        # 191.255/16:          Reserved (subject to allocation) (see RFC3330) 
+  192\.0\.0|                       # 192.0.0/24:          Reserved (subject to allocation) (see RFC3330) 
+  192\.0\.2|                       # 192.0.2/24:          Test-Net (see RFC3330) 
+  192\.88\.99|                     # 192.88.99/24:        6to4 Relay Anycast (see RFC3330) 
+  192\.168|                        # 192.168.0.0/16:      Private-Use Networks (see RFC3330) 
+  198\.1[89]|                      # 198.18.0.0/15:       Device Benchmark Testing (see RFC3330) 
+  223\.255\.255|                   # 223.255.255.0/24:    Reserved (subject to allocation) (see RFC3330) 
+  [01257]|                         # 0/8:                 "This" Network (see RFC3330) 
+                                   # 1-2/8, 5/8, 7/8:     IANA Reserved 
 
-  [01257]|                         # 000-002/8, 005/8, 007/8: Reserved
-  2[37]|                           # 023/8, 027/8:            Reserved
-  3[179]|                          # 031/8, 037/8, 039/8:     Reserved
-  4[12]|                           # 041/8, 042/8:            Reserved
-  5[89]|                           # 058/8, 059/8:            Reserved
-  60|                              # 060/8:                   Reserved
-  7[0-9]|                          # 070-079/8:               Reserved
-  8[2-9]|                          # 082
-  9[0-9]|                          #  -
-  1[01][0-9]|                      #  -
-  12[0-6]|                         # 126/8:                   Reserved
-  197|                             # 197/8:                   Reserved
-  22[23]|                          # 222/8, 223/8:            Reserved
-  24[0-9]|                         # 240-
-  25[0-5]|                         # 255/8:                   Reserved
+  2[37]|                           # 23/8, 27/8:          IANA Reserved 
+  3[1679]|                         # 31/8, 36/8, 37/8:    IANA Reserved 
+                                   # 39/8:                Reserved (subject to allocation) (see RFC3330) 
+  4[12]|                           # 41/8, 42/8:          IANA Reserved   
+  5[89]|                           # 58/8, 59/8:          IANA Reserved   
+  7[0-9]|                          # 70-79/8:             IANA Reserved    
+  8[3-9]|                          # 83-89/8:             IANA Reserved   
+  9[0-9]|                          # 90-99/8:             IANA Reserved   
+  1[01][0-9]|                      # 100-119/8:           IANA Reserved   
+  12[0-6]|                         # 120-126/8:           IANA Reserved   
+  17[3-9]|                         # 173-179/8:           IANA Reserved   
+  18[0-7]|                         # 180-187/8:           IANA Reserved   
+  189|                             # 189/8:               IANA Reserved   
+  19[07]|                          # 190/8, 197/8:        IANA Reserved   
+  223|                             # 223/8:               IANA Reserved   
+  22[4-9]|                         # 224-229/8:           Multicast (see RFC3330)  
+  23[0-9]|                         # 230-239/8:           Multicast (see RFC3330)  
+  24[0-9]|                         # 240-249/8:           Reserved for Future Use (see RFC3330) 
+  25[0-5]                          # 250-255/8:           Reserved for Future Use (see RFC3330) 
+
 )\.}x;
 
 $IS_DNS_AVAILABLE = undef;
@@ -102,224 +120,222 @@ BEGIN {
     require Razor2::Client::Agent;
   };
   eval {
-    require Razor::Client;
+    require MIME::Base64;
   };
   eval {
-    require MIME::Base64;
+	require IO::Socket::UNIX;
   };
 };
 
 ###########################################################################
 
+# DNS query array constants
+use constant BGSOCK => 0;
+use constant RULES => 1;
+use constant SETS => 2;
+
+# TODO: $server is currently unused
 sub do_rbl_lookup {
-  my ($self, $set, $dom, $ip, $found, $dialupreturn, $needresult) = @_;
-  my $socket;
-  my @addr=();
-  my $maxwait=$self->{conf}->{rbl_timeout};
-  return $found if $found;
+  my ($self, $rule, $set, $type, $server, $host, $subtest) = @_;
 
-  my $gotdialup=0;
-  my $domainonly;
-  ($domainonly = $dom) =~ s/^\d+\.\d+\.\d+\.\d+.//;
-  $domainonly =~ s/\.?$/./;
-
-  if (defined $self->{dnscache}->{rbl}->{$dom}->{result}) {
-    dbg("Found $dom in our DNS cache. Yeah!", "rbl", -1);
-    @addr = @{$self->{dnscache}->{rbl}->{$dom}->{result}};
-  } elsif (not defined $self->{dnscache}->{rbl}->{$dom}->{socket}) {
-    dbg("Launching DNS query for $dom in the background", "rbl", -1);
-    $self->{dnscache}->{rbl}->{$dom}->{socket}=$self->{res}->bgsend($dom);
-    $self->{dnscache}->{rbl}->{$dom}->{time}=time;
-    return 0;
-  } elsif (not $needresult) {
-    dbg("Second batch query for $dom, ignoring since we have one pending", "rbl", -1);
-    return 0;
-  } else {
-    timelog("RBL -> Waiting for result on $dom", "rbl", 1);
-    $socket=\$self->{dnscache}->{rbl}->{$dom}->{socket};
-    
-    while (not $self->{res}->bgisready($$socket)) {
-      last if (time - $self->{dnscache}->{rbl}->{$dom}->{time} > $maxwait);
-      sleep 1;
-    }
-
-    if (not $self->{res}->bgisready($$socket)) {
-      timelog("RBL -> Timeout on $dom", "rbl", 2);
-      dbg("Query for $dom timed out after $maxwait seconds", "rbl", -1);
-      undef($$socket);
-      return 0;
-    } else {
-      my $packet = $self->{res}->bgread($$socket);
-      undef($$socket);
-      foreach $_ ($packet->answer) {
-	dbg("Query for $dom yielded: ".$_->rdatastr, "rbl", -2);
-	if ($_->type eq "A") {
-	  push(@addr, $_->rdatastr);
-	}
-      }
-      $self->{dnscache}->{rbl}->{$dom}->{result} = \@addr;
-    }
+  # only make a specific query once
+  if (!defined $self->{dnscache}->{$type}->{$host}->[BGSOCK]) {
+    dbg("rbl: launching DNS $type query for $host in background", "rbl", -1);
+    $self->{rbl_launch} = time;
+    $self->{dnscache}->{$type}->{$host}->[BGSOCK] =
+	$self->{res}->bgsend($host, $type);
   }
 
-  if (@addr) {
-    foreach my $addr (@addr) {
+  # always add set
+  push @{$self->{dnscache}->{$type}->{$host}->[SETS]}, $set;
 
-      # 127.0.0.2 is the traditional boolean indicator, don't log it
-      # 127.0.0.3 now also means "is a dialup IP" (only if set is dialup
-      # -- Marc)
-      if ($addr ne '127.0.0.2' and 
-	      not ($addr eq '127.0.0.3' and $set =~ /^dialup/)) {
-	$self->test_log ("RBL check: found ".$dom.", type: ".$addr);
-      } else {
-	$self->test_log ("RBL check: found ".$dom);
-      }
-      dbg("RBL check: found $dom, type: $addr", "rbl", -2);
-
-      $self->{$set}->{rbl_IN_As_found} .= $addr.' ';
-      $self->{$set}->{rbl_matches_found} .= $ip.' ';
-
-      # If $dialupreturn is a reference to a hash, we were told to ignore
-      # dialup IPs, let's see if we have a match
-      if ($dialupreturn) {
-	my $toign;
-	dbg("Checking dialup_codes for $addr as a DUL code for $domainonly", "rbl", -2);
-
-	foreach $toign (keys %{$dialupreturn}) {
-	  dbg("Comparing against $toign/".$dialupreturn->{$toign}, "rbl", -3);
-	  $toign =~ s/\.?$/./;
-	  if ($domainonly eq $toign and $addr eq $dialupreturn->{$toign}) {
-	    dbg("Got $addr in $toign for $ip, good, we'll take it", "rbl", "-3");
-	    $gotdialup=1;  
-	    last;
-	  }
-	}
-
-	if (not $gotdialup) {
-	  dbg("Ignoring return $addr for $ip, not known as dialup for $domainonly in dialup_code variable", "rbl", -2);
-	  next;
-	}
-      }
-
-      timelog("RBL -> match on $dom", "rbl", 2);
-      return 1;
-    }
+  # sometimes match or always match
+  if (defined $subtest) {
+    $self->{dnspost}->{$set}->{$subtest} = $rule;
   }
-  timelog("RBL -> No match on $dom", "rbl", 2);
-  return 0;
+  else {
+    push @{$self->{dnscache}->{$type}->{$host}->[RULES]}, $rule;
+  }
+}
+
+# TODO: these are constant so they should only be added once at startup
+sub register_rbl_subtest {
+  my ($self, $rule, $set, $subtest) = @_;
+  $self->{dnspost}->{$set}->{$subtest} = $rule;
 }
 
 ###########################################################################
 
-sub is_razor1_available {
-  my ($self) = @_;
+sub dnsbl_hit {
+  my ($self, $rule, $question, $answer) = @_;
 
-  if ($self->{main}->{local_tests_only}) {
-    dbg ("local tests only, ignoring Razor1", "razor", -1);
-    return 0;
+  my $log = "";
+  if (substr($rule, 0, 2) ne "__") {
+    if ($answer->type eq 'TXT') {
+      $log = $answer->rdatastr;
+      $log =~ s/^"(.*)"$/$1/;
+      $log =~ s/(http:\/\/\S+)/<$1>/g;
+    }
+    elsif ($question->string =~ m/^(\d+)\.(\d+)\.(\d+)\.(\d+)\.(\S+\w)/) {
+      $log = "$4.$3.$2.$1 listed in $5";
+    }
   }
-  if (!$self->{conf}->{use_razor1}) { return 0; }
+  $self->{dnsresult}->{$rule}->{$log} = 1;
+}
 
-  eval { require Razor::Client; };
-  
-  if ($@) {
-    dbg ("Razor1 is not available", "razor", -1);
-    return 0;
-  }
-  else {
-    dbg ("Razor1 is available", "razor", -1);
-    return 1;
+sub dnsbl_uri {
+  my ($self, $question, $answer) = @_;
+
+  my $qname = $question->qname;
+  my $rdatastr = $answer->rdatastr;
+
+  if (defined $qname && defined $rdatastr) {
+    my $qclass = $question->qclass;
+    my $qtype = $question->qtype;
+    my @vals;
+    push(@vals, "class=$qclass") if $qclass ne "IN";
+    push(@vals, "type=$qtype") if $qtype ne "A";
+    my $uri = "dns:$qname" . (@vals ? "?" . join(";", @vals) : "");
+    push @{ $self->{dnsuri}->{$uri} }, $rdatastr;
   }
 }
 
-sub razor1_lookup {
-  my ($self, $fulltext) = @_;
-  my $timeout=$self->{conf}->{razor_timeout};
+sub process_dnsbl_result {
+  my ($self, $query) = @_;
 
-  if ($self->{main}->{local_tests_only}) {
-    dbg ("local tests only, ignoring Razor1", "razor", -1);
-    return 0;
-  }
-  if (!$self->{conf}->{use_razor1}) { return 0; }
+  my $packet = $self->{res}->bgread($query->[BGSOCK]);
+  undef $query->[BGSOCK];
 
-  timelog("Razor1 -> Starting razor test ($timeout secs max)", "razor", 1);
-  
-  my $response = undef;
+  return if !defined $packet;
 
-  # razor also debugs to stdout. argh. fix it to stderr...
-  if ($Mail::SpamAssassin::DEBUG->{enabled}) {
-    open (OLDOUT, ">&STDOUT");
-    open (STDOUT, ">&STDERR");
-  }
-
-  $self->enter_helper_run_mode();
-
-  {
-    eval {
-      require Razor::Client;
-      require Razor::Agent;
-      local ($^W) = 0;		# argh, warnings in Razor
-  
-      local $SIG{ALRM} = sub { die "alarm\n" };
-      alarm $timeout;
-  
-      my $config = $self->{conf}->{razor_config};
-      $config ||= $self->{main}->sed_path ("~/razor.conf");
-      my %options = (
-        'debug'	=> ($Mail::SpamAssassin::DEBUG->{enabled} and $Mail::SpamAssassin::DEBUG->{razor} < -2)
-      );
-
-      my $rc = Razor::Client->new ($config, %options);
-  
-      if ($rc) {
-        my $ver = $Razor::Client::VERSION;
-        my @msg = split (/^/m, $$fulltext);
-
-        if ($ver >= 1.12) {
-          my $respary = $rc->check ('spam' => \@msg);
-          # response can be "0" or "1". there can be many responses.
-          # so if we get 5 responses, and one of them's 1, we
-          # wind up with "00010", which +0 below turns to 10, ie. != 0.
-          for my $resp (@$respary) { $response .= $resp; }
-  
-        }
-        else {
-            $response = $rc->check (\@msg);
-        }
-      }
-      else {
-          warn "Problem while trying to load Razor1: $! $Razor::Client::errstr";
-      }
-      
-      alarm 0;
-    };
-  
-    alarm 0;    # just in case
-
-    if ($@) {
-      $response = undef;
-      if ($@ =~ /alarm/) {
-        dbg ("razor check timed out after $timeout secs.", "razor", -1);
-        timelog("Razor1 -> interrupted after $timeout secs", "razor", 2);
-      } else {
-        warn ("razor check skipped: $! $@");
+  my $question = ($packet->question)[0];
+  foreach my $answer ($packet->answer) {
+    # track all responses
+    $self->dnsbl_uri($question, $answer);
+    # TODO: there are some CNAME returns that might be useful
+    next if ($answer->type ne 'A' && $answer->type ne 'TXT');
+    # skip any A record that isn't on 127/8
+    next if ($answer->type eq 'A' && $answer->rdatastr !~ /^127\./);
+    for my $rule (@{$query->[RULES]}) {
+      $self->dnsbl_hit($rule, $question, $answer);
+    }
+    for my $set (@{$query->[SETS]}) {
+      if ($self->{dnspost}->{$set}) {
+	$self->process_dnsbl_set($set, $question, $answer);
       }
     }
   }
+}
 
-  $self->leave_helper_run_mode();
+sub process_dnsbl_set {
+  my ($self, $set, $question, $answer) = @_;
 
-  # razor also debugs to stdout. argh. fix it to stderr...
-  if ($Mail::SpamAssassin::DEBUG->{enabled}) {
-    open (STDOUT, ">&OLDOUT");
-    close OLDOUT;
+  my $rdatastr = $answer->rdatastr;
+  while (my ($subtest, $rule) = each %{ $self->{dnspost}->{$set} }) {
+    next if defined $self->{tests_already_hit}->{$rule};
+
+    # exact substr (usually IP address)
+    if ($subtest eq $rdatastr) {
+      $self->dnsbl_hit($rule, $question, $answer);
+    }
+    # senderbase
+    elsif ($set =~ /^senderbase/) {
+      $rdatastr =~ s/^"?\d+-//;
+      $rdatastr =~ s/"$//;
+      my %sb = ($rdatastr =~ m/(?:^|\|)(\d+)=([^|]+)/g);
+      while ($subtest =~ m/\bS(\d+)\b/g) {
+	$subtest =~ s/\bS(\d+)\b/\$sb{$1}/;
+      }
+      #print STDERR "$subtest\n";
+      #print STDERR "$rdatastr\n";
+      $self->got_hit($rule, "SenderBase: ") if eval "$subtest";
+    }
+    # bitmask
+    elsif ($subtest =~ /^\d+$/) {
+      if ($rdatastr =~ m/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/ &&
+	  Mail::SpamAssassin::Util::my_inet_aton($rdatastr) & $subtest)
+      {
+	$self->dnsbl_hit($rule, $question, $answer);
+      }
+    }
+    # regular expression
+    elsif ($rdatastr =~ /\Q$subtest\E/) {
+      $self->dnsbl_hit($rule, $question, $answer);
+    }
   }
+}
 
-  if ((defined $response) && ($response+0)) {
-      timelog("Razor1 -> Finished razor test: confirmed spam", "razor", 2);
-      return 1;
+sub harvest_dnsbl_queries {
+  my ($self) = @_;
+
+  return if !defined $self->{rbl_launch};
+
+  my $timeout = $self->{conf}->{rbl_timeout} + $self->{rbl_launch};
+  my @waiting = (values %{ $self->{dnscache}->{A} },
+		 values %{ $self->{dnscache}->{TXT} });
+  my @left;
+  my $total;
+
+  @waiting = grep { defined $_->[BGSOCK] } @waiting;
+  $total = scalar @waiting;
+
+  while (@waiting) {
+    @left = ();
+    for my $query (@waiting) {
+      if ($self->{res}->bgisready($query->[BGSOCK])) {
+	$self->process_dnsbl_result($query);
+      }
+      else {
+	push(@left, $query);
+      }
+    }
+    last unless @left;
+    last if time >= $timeout;
+    @waiting = @left;
+    # dynamic timeout
+    my $dynamic = (int($self->{conf}->{rbl_timeout}
+		       * (1 - (($total - @left) / $total) ** 2) + 0.5)
+		   + $self->{rbl_launch});
+    $timeout = $dynamic if ($dynamic < $timeout);
+    sleep 1;
   }
-  timelog("Razor1 -> Finished razor test: not known spam", "razor", 2);
-  return 0;
+  dbg("RBL: success for " . ($total - @left) . " of $total queries", "rbl", 0);
+  # timeouts
+  for my $query (@left) {
+    my $sets = join(",", @{$query->[SETS]});
+    my $delay = time - $self->{rbl_launch};
+    dbg("RBL: timeout for $sets after $delay seconds", "rbl", 0);
+    undef $query->[BGSOCK];
+  }
+  # register hits
+  while (my ($rule, $logs) = each %{ $self->{dnsresult} }) {
+    for my $log (keys %{$logs}) {
+      $self->test_log($log) if $log;
+    }
+    if (!defined $self->{tests_already_hit}->{$rule}) {
+      $self->got_hit($rule, "RBL: ");
+    }
+  }
+  # DNS URIs
+  while (my ($dnsuri, $answers) = each %{ $self->{dnsuri} }) {
+    # when parsing, look for elements of \".*?\" or \S+ with ", " as separator
+    $self->{tag_data}->{RBL} .= "<$dnsuri>" .
+	" [" . join(", ", @{ $answers }) . "]\n";
+  }
+  chomp $self->{tag_data}->{RBL} if defined $self->{tag_data}->{RBL};
+}
+
+###########################################################################
+
+sub rbl_finish {
+  my ($self) = @_;
+
+  delete $self->{rbl_launch};
+  delete $self->{dnscache};
+  # TODO: do not remove this since it can be retained!
+  delete $self->{dnspost};
+  delete $self->{dnsresult};
+  delete $self->{dnsuri};
 }
 
 ###########################################################################
@@ -333,15 +349,14 @@ sub is_razor2_available {
   }
   if (!$self->{conf}->{use_razor2}) { return 0; }
 
-  # Use Razor2 if it's available, Razor1 otherwise
-  eval { require Razor2::Client::Agent; };
-  if ($@) {
-    dbg("Razor2 is not available", "razor", -1);
-    return 0;
-  }
-  else {
+  # Use Razor2 if it's available
+  if (eval { require Razor2::Client::Agent; }) {
     dbg("Razor2 is available", "razor", -1);
     return 1;
+  }
+  else {
+    dbg("Razor2 is not available", "razor", -1);
+    return 0;
   }
 }
 
@@ -354,14 +369,8 @@ sub razor2_lookup {
   return $self->{razor2_result} if ( defined $self->{razor2_result} );
   $self->{razor2_result} = 0;
 
-  if ($self->{main}->{local_tests_only}) {
-    dbg ("local tests only, ignoring Razor2", "razor", -1);
-    return 0;
-  }
-  if (!$self->{conf}->{use_razor2}) { return 0; }
+  # this test covers all aspects of availability
   if (!$self->is_razor2_available()) { return 0; }
-
-  timelog("Razor2 -> Starting razor test ($timeout secs max)", "razor", 1);
   
   # razor also debugs to stdout. argh. fix it to stderr...
   if ($Mail::SpamAssassin::DEBUG->{enabled}) {
@@ -379,9 +388,8 @@ sub razor2_lookup {
       local $SIG{ALRM} = sub { die "alarm\n" };
       alarm $timeout;
 
-      my $rc =
-        Razor2::Client::Agent->new('razor-check')
-        ;                 # everything's in the module!
+      # everything's in the module!
+      my $rc = Razor2::Client::Agent->new('razor-check');
 
       if ($rc) {
         my %opt = (
@@ -491,6 +499,9 @@ sub razor2_lookup {
         }
       }
 
+  # work around serious brain damage in Razor2 (constant seed)
+  srand;
+
   $self->leave_helper_run_mode();
 
   # razor also debugs to stdout. argh. fix it to stderr...
@@ -502,14 +513,39 @@ sub razor2_lookup {
   dbg("Razor2 results: spam? ".$self->{razor2_result}."  highest cf score: ".$self->{razor2_cf_score});
 
   if ($self->{razor2_result} > 0) {
-      timelog("Razor2 -> Finished razor test: confirmed spam", "razor", 2);
       return 1;
   }
-  timelog("Razor2 -> Finished razor test: not known spam", "razor", 2);
   return 0;
 }
 
 ###########################################################################
+
+sub is_dccifd_available {
+  my ($self) = @_;
+
+  if ($self->{main}->{local_tests_only}) {
+    dbg ("local tests only, ignoring DCCifd");
+    return 0;
+  }
+
+  my $dcchome = $self->{conf}->{dcc_home}        || '';
+  my $dccifd  = $self->{conf}->{dcc_dccifd_path} || '';
+
+  if (!$dccifd && ($dcchome && -S "$dcchome/dccifd")) {
+    $dccifd   = "$dcchome/dccifd";
+  }
+
+  unless ($dccifd && -S $dccifd && -w _ && -r _ ) {
+    dbg ("DCCifd is not available: no r/w dccifd socket found.");
+    return 0;
+  }
+
+  # Remember any found dccifd socket
+  $self->{conf}->{dcc_dccifd_path} = $dccifd;
+
+  dbg ("DCCifd is available: ".$self->{conf}->{dcc_dccifd_path});
+  return 1;
+}
 
 sub is_dcc_available {
   my ($self) = @_;
@@ -520,26 +556,149 @@ sub is_dcc_available {
   }
   if (!$self->{conf}->{use_dcc}) { return 0; }
 
+  my $dcchome = $self->{conf}->{dcc_home} || '';
   my $dccproc = $self->{conf}->{dcc_path} || '';
-  unless ($dccproc) {
-    $dccproc = Mail::SpamAssassin::Util::find_executable_in_env_path('dccproc');
-    if ($dccproc) { $self->{conf}->{dcc_path} = $dccproc; }
+
+  if (!$dccproc && ($dcchome && -x "$dcchome/bin/dccproc")) {
+    $dccproc  = "$dcchome/bin/dccproc";
   }
+  unless ($dccproc) {
+    $dccproc  = Mail::SpamAssassin::Util::find_executable_in_env_path('dccproc');
+  }
+
   unless ($dccproc && -x $dccproc) {
-    dbg ("DCC is not available: dccproc not found");
+    dbg ("DCC is not available: no executable dccproc found.");
     return 0;
   }
 
+  # Remember any found dccproc
+  $self->{conf}->{dcc_path} = $dccproc;
+
   dbg ("DCC is available: ".$self->{conf}->{dcc_path});
   return 1;
+}
+
+sub dccifd_lookup {
+  my ($self, $fulltext) = @_;
+  my $response = "";
+  my %count;
+  my $left;
+  my $right;
+  my $timeout=$self->{conf}->{dcc_timeout};
+  my $sockpath;
+
+  $count{body} = 0;
+  $count{fuz1} = 0;
+  $count{fuz2} = 0;
+
+  if ($self->{main}->{local_tests_only}) {
+    dbg ("local tests only, ignoring DCCifd");
+    return 0;
+  }
+
+  if ( ! $self->{conf}->{dcc_home} ) {
+	dbg ("dcc_home not defined, should not get here");
+    return 0;
+  }
+
+  $sockpath = $self->{conf}->{dcc_dccifd_path};
+  if ( ! -S $sockpath || ! -w _ || ! -r _ ) {
+	dbg ("dccifd not a socket, should not get here");
+    return 0;
+  }
+
+  $self->enter_helper_run_mode();
+
+  eval {
+    local $SIG{ALRM} = sub { die "alarm\n" };
+
+    alarm($timeout);
+
+    my $sock = IO::Socket::UNIX->new(Type => SOCK_STREAM,
+      Peer => $sockpath) || dbg("failed to open socket") && die;
+
+    # send the options and other parameters to the daemon
+    $sock->print("header\n") || dbg("failed write") && die; # options
+    $sock->print("0.0.0.0\n") || dbg("failed write") && die; #client
+    $sock->print("\n") || dbg("failed write") && die; #HELO value
+    $sock->print("\n") || dbg("failed write") && die; #sender
+    $sock->print("unknown\r\n") || dbg("failed write") && die; # recipients
+    $sock->print("\n") || dbg("failed write") && die; # recipients
+
+    $sock->print($$fulltext);
+
+    $sock->shutdown(1) || dbg("failed socket shutdown: $!") && die;
+	
+    $sock->getline() || dbg("failed read status") && die;
+    $sock->getline() || dbg("failed read multistatus") && die;
+
+    my @null = $sock->getlines();
+    if ( $#null == -1 ) {
+      dbg("failed read header");
+      die;
+    }
+
+    # The first line will be the header we want to look at
+    chomp($response = shift @null);
+    # but newer versions of DCC fold the header if it's too long...
+    while ( my $v = shift @null ) {
+      last unless ( $v =~ s/^\s+/ / );  # if this line wasn't folded, stop.
+      chomp $v;
+      $response .= $v;
+    }
+
+    dbg("DCCifd: got response: $response");
+  };
+  alarm(0); # if we die'd above, need to reset here
+
+  $self->leave_helper_run_mode();
+
+  if ($@) {
+    $response = undef;
+    if ($@ =~ /alarm/) {
+      dbg ("DCCifd check timed out after $timeout secs.");
+      return 0;
+    } else {
+      warn ("DCCifd -> check skipped: $! $@");
+      return 0;
+    }
+  }
+
+  if (!defined $response || $response !~ /^X-DCC/) {
+    dbg ("DCCifd -> check failed - no X-DCC returned: $response");
+    return 0;
+  }
+
+  if ($response =~ /^X-DCC-(.*)-Metrics: (.*)$/) {
+    $self->{tag_data}->{DCCB} = $1;
+    $self->{tag_data}->{DCCR} = $2;
+  }
+ 
+  $response =~ s/many/999999/ig;
+  $response =~ s/ok\d?/0/ig;
+
+  if ($response =~ /Body=(\d+)/) {
+    $count{body} = $1+0;
+  }
+  if ($response =~ /Fuz1=(\d+)/) {
+    $count{fuz1} = $1+0;
+  }
+  if ($response =~ /Fuz2=(\d+)/) {
+    $count{fuz2} = $1+0;
+  }
+
+  if ($count{body} >= $self->{conf}->{dcc_body_max} || $count{fuz1} >= $self->{conf}->{dcc_fuz1_max} || $count{fuz2} >= $self->{conf}->{dcc_fuz2_max}) {
+    dbg ("DCCifd: Listed! BODY: $count{body} of $self->{conf}->{dcc_body_max} FUZ1: $count{fuz1} of $self->{conf}->{dcc_fuz1_max} FUZ2: $count{fuz2} of $self->{conf}->{dcc_fuz2_max}");
+    return 1;
+  }
+  
+  return 0;
 }
 
 sub dcc_lookup {
   my ($self, $fulltext) = @_;
   my $response = undef;
   my %count;
-  my $left;
-  my $right;
   my $timeout=$self->{conf}->{dcc_timeout};
 
   $count{body} = 0;
@@ -552,7 +711,6 @@ sub dcc_lookup {
   }
   if (!$self->{conf}->{use_dcc}) { return 0; }
 
-  timelog("DCC -> Starting check ($timeout secs max)", "dcc", 1);
   $self->enter_helper_run_mode();
 
   # use a temp file here -- open2() is unreliable, buffering-wise,
@@ -575,17 +733,31 @@ sub dcc_lookup {
 
     dbg("DCC command: ".join(' ', $path, "-H", $opts, "< '$tmpf'", "2>&1"),'dcc',-1);
     my $pid = open(DCC, join(' ', $path, "-H", $opts, "< '$tmpf'", "2>&1", '|')) || die "$!\n";
-    chomp($response = <DCC>);
+    my @null = <DCC>;
     close DCC;
 
-    unless (defined($response)) { # yes, this is possible
-      die ("no response\n");
+    if ( $#null == -1 ) {
+      dbg("failed read header");
+      die;
+    }
+
+    # The first line will be the header we want to look at
+    chomp($response = shift @null);
+    # but newer versions of DCC fold the header if it's too long...
+    while ( my $v = shift @null ) {
+      last unless ( $v =~ s/^\s+/ / );  # if this line wasn't folded, stop.
+      chomp $v;
+      $response .= $v;
+    }
+
+    unless (defined($response)) {
+      die ("no response\n");	# yes, this is possible
     }
 
     dbg("DCC: got response: $response");
 
     alarm(0);
-    waitpid ($pid, 0);
+    $self->cleanup_kids($pid);
   };
 
   alarm 0;
@@ -594,29 +766,24 @@ sub dcc_lookup {
   if ($@) {
     if ($@ =~ /^__alarm__$/) {
       dbg ("DCC -> check timed out after $timeout secs.");
-      timelog("DCC interrupted after $timeout secs", "dcc", 2);
-   } elsif ($@ =~ /^__brokenpipe__$/) {
+    } elsif ($@ =~ /^__brokenpipe__$/) {
       dbg ("DCC -> check failed: Broken pipe.");
-      timelog("DCC check failed, broken pipe", "dcc", 2);
+    } elsif ($@ eq "no response\n") {
+      dbg ("DCC -> check failed: no response");
     } else {
       warn ("DCC -> check failed: $@\n");
-      timelog("DCC check failed", "dcc", 2);
     }
     return 0;
   }
 
   if (!defined($response) || $response !~ /^X-DCC/) {
     dbg ("DCC -> check failed: no X-DCC returned (did you create a map file?): $response");
-    timelog("DCC check failed", "dcc", 2);
     return 0;
   }
 
-  if ($self->{conf}->{dcc_add_header}) {
-    if ($response =~ /^(X-DCC.*): (.*)$/) {
-      $left  = $1;
-      $right = $2;
-      $self->{headers_to_add}->{$left} = $right;
-    }
+  if ($response =~ /^X-DCC-(.*)-Metrics: (.*)$/) {
+    $self->{tag_data}->{DCCB} = $1;
+    $self->{tag_data}->{DCCR} = $2;
   }
  
   $response =~ s/many/999999/ig;
@@ -634,11 +801,9 @@ sub dcc_lookup {
 
   if ($count{body} >= $self->{conf}->{dcc_body_max} || $count{fuz1} >= $self->{conf}->{dcc_fuz1_max} || $count{fuz2} >= $self->{conf}->{dcc_fuz2_max}) {
     dbg ("DCC: Listed! BODY: $count{body} of $self->{conf}->{dcc_body_max} FUZ1: $count{fuz1} of $self->{conf}->{dcc_fuz1_max} FUZ2: $count{fuz2} of $self->{conf}->{dcc_fuz2_max}");
-    timelog("DCC -> got hit", "dcc", 2);
     return 1;
   }
   
-  timelog("DCC -> check had no match", "dcc", 2);
   return 0;
 }
 
@@ -681,7 +846,6 @@ sub pyzor_lookup {
   }
   if (!$self->{conf}->{use_pyzor}) { return 0; }
 
-  timelog("Pyzor -> Starting check ($timeout secs max)", "pyzor", 1);
   $self->enter_helper_run_mode();
 
   # use a temp file here -- open2() is unreliable, buffering-wise,
@@ -704,17 +868,19 @@ sub pyzor_lookup {
  
     dbg("Pyzor command: ".join(' ', $path, $opts, "check", "< '$tmpf'", "2>&1"),'pyzor',-1);
     my $pid = open(PYZOR, join(' ', $path, $opts, "check", "< '$tmpf'", "2>&1", '|')) || die "$!\n";
-    chomp($response = <PYZOR>);
+    $response = <PYZOR>;
     close PYZOR;
 
-    unless (defined($response)) { # this is possible for DCC, let's be on the safe side
-      die ("no response\n");
+    unless (defined($response)) {
+      die ("no response\n");	# yes, this is possible
     }
+
+    chomp $response;
 
     dbg("Pyzor: got response: $response");
 
     alarm(0);
-    waitpid ($pid, 0);
+    $self->cleanup_kids($pid);
   };
 
   alarm 0;
@@ -723,13 +889,12 @@ sub pyzor_lookup {
   if ($@) {
     if ($@ =~ /^__alarm__$/) {
       dbg ("Pyzor -> check timed out after $timeout secs.");
-      timelog("Pyzor interrupted after $timeout secs", "pyzor", 2);
     } elsif ($@ =~ /^__brokenpipe__$/) {
       dbg ("Pyzor -> check failed: Broken pipe.");
-      timelog("Pyzor check failed, broken pipe", "pyzor", 2);
+    } elsif ($@ eq "no response\n") {
+      dbg ("Pyzor -> check failed: no response");
     } else {
       warn ("Pyzor -> check failed: $@\n");
-      timelog("Pyzor check failed", "pyzor", 2);
     }
     return 0;
   }
@@ -747,21 +912,17 @@ sub pyzor_lookup {
   }
 
   # moved this around a bit; no point in testing RE twice (jm)
-  if ($self->{conf}->{pyzor_add_header}) {
-    if ($pyzor_whitelisted) {
-      $self->{headers_to_add}->{'X-Pyzor'} = "Whitelisted.";
-    } else {
-      $self->{headers_to_add}->{'X-Pyzor'} = "Reported $pyzor_count times.";
-    }
+  if ($pyzor_whitelisted) {
+    $self->{tag_data}->{PYZOR} = "Whitelisted.";
+  } else {
+    $self->{tag_data}->{PYZOR} = "Reported $pyzor_count times.";
   }
 
   if ($pyzor_count >= $self->{conf}->{pyzor_max}) {
     dbg ("Pyzor: Listed! $pyzor_count of $self->{conf}->{pyzor_max} and whitelist is $pyzor_whitelisted");
-    timelog("Pyzor -> got hit", "pyzor", 2);
     return 1;
   }
-  
-  timelog("Pyzor -> no match", "pyzor", 2);
+
   return 0;
 }
 
@@ -779,7 +940,9 @@ sub load_resolver {
     $self->{res} = Net::DNS::Resolver->new;
     if (defined $self->{res}) {
       $self->{no_resolver} = 0;
-      $self->{res}->retry(1); # If it fails, it fails
+      $self->{res}->retry(1);		# If it fails, it fails
+      $self->{res}->dnsrch(0);		# ignore domain search-list
+      $self->{res}->defnames(0);	# don't append stuff to end of query
     }
     1;
   };   #  or warn "eval failed: $@ $!\n";
@@ -820,6 +983,11 @@ sub lookup_ptr {
     return undef;
   }
 
+  if ($dom =~ /^${IP_IN_RESERVED_RANGE}/) {
+    dbg ("IP is reserved, not looking up PTR");
+    return undef;
+  }
+
   dbg ("looking up PTR record for '$dom'");
   my $name = '';
 
@@ -857,13 +1025,17 @@ sub is_dns_available {
     dbg ("dns_available set to no in config file, skipping test", "dnsavailable", -1);
     return $IS_DNS_AVAILABLE;
   }
+
+  # Even if "dns_available" is explicitly set to "yes", we want to ignore
+  # DNS if we're only supposed to be looking at local tests.
+  goto done if ($self->{main}->{local_tests_only});
+
   if ($dnsopt eq "yes") {
     $IS_DNS_AVAILABLE = 1;
     dbg ("dns_available set to yes in config file, skipping test", "dnsavailable", -1);
     return $IS_DNS_AVAILABLE;
   }
   
-  goto done if ($self->{main}->{local_tests_only});
   goto done unless $self->load_resolver();
 
   if ($dnsopt =~ /test:\s+(.+)$/) {
@@ -911,7 +1083,14 @@ sub enter_helper_run_mode {
 
   dbg ("entering helper-app run mode");
   $self->{old_slash} = $/;              # Razor pollutes this
-  %{$self->{old_env}} = %ENV;
+  %{$self->{old_env}} = ();
+  if ( defined %ENV ) {
+    # undefined values in %ENV can result due to autovivification elsewhere,
+    # this prevents later possible warnings when we restore %ENV
+    while (my ($key, $value) = each %ENV) {
+      $self->{old_env}->{$key} = $value if defined $value;
+    }
+  }
 
   Mail::SpamAssassin::Util::clean_path_in_taint_mode();
 
@@ -933,11 +1112,14 @@ sub leave_helper_run_mode {
 
   dbg ("leaving helper-app run mode");
   $/ = $self->{old_slash};
-  if ( defined $self->{old_env} ) {
-    %ENV = %{$self->{old_env}};
-  }
-  else {
-    undef %ENV;
+  %ENV = %{$self->{old_env}};
+}
+
+sub cleanup_kids {
+  my ($self, $pid) = @_;
+
+  if ($SIG{CHLD} && $SIG{CHLD} ne 'IGNORE') {	# running from spamd
+    waitpid ($pid, 0);
   }
 }
 

@@ -35,18 +35,18 @@ use strict;
 use bytes;
 use Carp;
 
-use Text::Wrap qw();
-use POSIX qw(strftime);
-use Sys::Hostname;
+use Text::Wrap ();
 
 use Mail::SpamAssassin::EvalTests;
 use Mail::SpamAssassin::AutoWhitelist;
 use Mail::SpamAssassin::HTML;
+use Mail::SpamAssassin::Conf;
+use Mail::SpamAssassin::Received;
 use Mail::SpamAssassin::Util;
 
-use constant HAS_MIME_BASE64 => eval { require MIME::Base64; };
+use constant HAS_MIME_BASE64 =>		eval { require MIME::Base64; };
 
-use constant MAX_BODY_LINE_LENGTH => 2048;
+use constant MAX_BODY_LINE_LENGTH =>	2048;
 
 use vars qw{
   @ISA $base64alphabet
@@ -70,17 +70,15 @@ sub new {
     'subtest_names_hit' => [ ],
     'tests_already_hit' => { },
     'hdr_cache'         => { },
-    'headers_to_add'	=> { },
     'rule_errors'       => 0,
     'disable_auto_learning' => 0,
     'auto_learn_status' => undef,
+    'conf'		=> $main->{conf},
   };
 
   if (defined $opts && $opts->{disable_auto_learning}) {
     $self->{disable_auto_learning} = 1;
   }
-
-  $self->{conf} = $self->{main}->{conf};
 
   # used with "mass-check --loghits"
   if ($self->{main}->{save_pattern_hits}) {
@@ -117,25 +115,30 @@ sub check {
   # to see if we should go from {0,1} to {2,3}.  We of course don't need
   # to do this switch if we're already using bayes ... ;)
   my $set = $self->{conf}->get_score_set();
-  if ( $set < 2 && $self->{main}->{bayes_scanner}->is_scan_available() ) {
+  if ( ($set & 2) == 0 && $self->{main}->{bayes_scanner}->is_scan_available() ) {
+    dbg("debug: Scoreset $set but Bayes is available, switching scoresets");
     $self->{conf}->set_score_set ($set|2);
   }
 
+  # pre-chew Received headers
+  $self->parse_received_headers();
+
+  # and identify the language (if we're going to do that), before we
+  # run any Bayes tests, so they can use that as a token
   {
-    # If you run timelog from within specified rules, prefix the message with
-    # "Rulename -> " so that it's easy to pick out details from the overview
-    # -- Marc
-    timelog("Launching RBL queries in the background", "rblbg", 1);
+    my $decoded = $self->get_decoded_stripped_body_text_array();
+    $self->_check_language ($decoded);
+    undef $decoded;		# this is cached anyway for the main set
+  }
+
+  {
     # Here, we launch all the DNS RBL queries and let them run while we
-    # inspect the message -- Marc
-    $self->do_rbl_eval_tests(0);
-    timelog("Finished launching RBL queries in the background", "rblbg", 22);
+    # inspect the message
+    $self->run_rbl_eval_tests ($self->{conf}->{rbl_evals});
 
-    timelog("Starting head tests", "headtest", 1);
+    # do head tests
     $self->do_head_tests();
-    timelog("Finished head tests", "headtest", 2);
 
-    timelog("Starting body tests", "bodytest", 1);
     # do body tests with decoded portions
     {
       my $decoded = $self->get_decoded_stripped_body_text_array();
@@ -144,9 +147,7 @@ sub check {
       $self->do_body_eval_tests($decoded);
       undef $decoded;
     }
-    timelog("Finished body tests", "bodytest", 2);
 
-    timelog("Starting raw body tests", "rawbodytest", 1);
     # do rawbody tests with raw text portions
     {
       my $bodytext = $self->get_decoded_body_text_array();
@@ -156,9 +157,7 @@ sub check {
       $self->do_body_uri_tests($bodytext);
       undef $bodytext;
     }
-    timelog("Finished raw body tests", "rawbodytest", 2);
 
-    timelog("Starting full message tests", "fullmsgtest", 1);
     # and do full tests: first with entire, full, undecoded message
     # still skip application/image attachments though
     {
@@ -168,18 +167,14 @@ sub check {
       $self->do_full_eval_tests(\$fulltext);
       undef $fulltext;
     }
-    timelog("Finished full message tests", "fullmsgtest", 2);
 
-    timelog("Starting head eval tests", "headevaltest", 1);
     $self->do_head_eval_tests();
-    timelog("Finished head eval tests", "headevaltest", 2);
 
-    timelog("Starting RBL tests (will wait up to $self->{conf}->{rbl_timeout} secs before giving up)", "rblblock", 1);
-    # This time we want to harvest the DNS results -- Marc
-    $self->do_rbl_eval_tests(1);
-    # And now we can compute rules that depend on those results
-    $self->do_rbl_res_eval_tests();
-    timelog("Finished all RBL tests", "rblblock", 2);
+    # harvest the DNS results
+    $self->harvest_dnsbl_queries();
+
+    # finish the DNS results
+    $self->rbl_finish();
 
     # Do meta rules second-to-last
     $self->do_meta_tests();
@@ -207,32 +202,19 @@ sub check {
                         " tests=".$self->get_names_of_tests_hit());
   $self->{is_spam} = $self->is_spam();
 
-  if ($self->{conf}->{use_terse_report}) {
-    $_ = $self->{conf}->{terse_report_template};
-  } else {
-    $_ = $self->{conf}->{report_template};
-  }
-  $_ ||= '(no report template found)';
+  my $report;
+  $report = $self->{conf}->{report_template};
+  $report ||= '(no report template found)';
 
-  # avoid "0.199999999999 hits" ;)
-  my $hit = sprintf ("%1.2f", $self->{hits});
-  s/_HITS_/$hit/gs;
-
-  my $preview = $self->get_content_preview();
-
-  my $ver = Mail::SpamAssassin::Version();
-  s/_REQD_/$self->{conf}->{required_hits}/gs;
-  s/_SUMMARY_/$self->{test_logs}/gs;
-  s/_PREVIEW_/$preview/gs;
-  s/_VER_/$ver/gs;
-  s/_HOME_/$Mail::SpamAssassin::HOME_URL/gs;
+  $report = $self->_replace_tags($report);
 
   # now that we've finished checking the mail, clear out this cache
   # to avoid unforeseen side-effects.
   $self->{hdr_cache} = { };
 
-  s/\n*$/\n\n/s;
-  $self->{report} = $_;
+  $report =~ s/\n*$/\n\n/s;
+  $self->{report} = $report;
+
 }
 
 ###########################################################################
@@ -250,27 +232,16 @@ so that future similar mails will be caught.
 sub learn {
   my ($self) = @_;
 
-  if (!$self->{conf}->{auto_learn}) { return; }
+  if (!$self->{conf}->{bayes_auto_learn}) { return; }
   if (!$self->{conf}->{use_bayes}) { return; }
   if ($self->{disable_auto_learning}) { return; }
 
-  # require that hits be *both* above/below the auto_learn_threshold
-  # *and* above/below the required_hits threshold plus/minus a "safety"
-  # zone.
-  my $auto_learn_safety = 4;
-
   # Figure out min/max for autolearning.
   # Default to specified auto_learn_threshold settings
-  my $min = $self->{conf}->{auto_learn_threshold_nonspam};
-  my $max = $self->{conf}->{auto_learn_threshold_spam};
+  my $min = $self->{conf}->{bayes_auto_learn_threshold_nonspam};
+  my $max = $self->{conf}->{bayes_auto_learn_threshold_spam};
 
-  # Now see if the safety settings are lower/higher and change if necessary.
-  my $tmp = $self->{conf}->{required_hits} - $auto_learn_safety;
-  $min = $tmp if ( $tmp < $min );
-  $tmp = $self->{conf}->{required_hits} + $auto_learn_safety;
-  $max = $tmp if ( $tmp > $max );
-
-  dbg ("auto-learn? safety=$auto_learn_safety, ham=$min, spam=$max, ".
+  dbg ("auto-learn? ham=$min, spam=$max, ".
 		"body-hits=".$self->{body_only_hits}.", ".
 		"head-hits=".$self->{head_only_hits});
 
@@ -280,13 +251,14 @@ sub learn {
   # autolearn on and it gets really wierd.  - tvd
   my $hits = 0;
   my $orig_scoreset = $self->{conf}->get_score_set();
-  if ( $orig_scoreset < 2 ) { # we don't need to recompute
+  if ( ($orig_scoreset & 2) == 0 ) { # we don't need to recompute
     dbg ("auto-learn: currently using scoreset $orig_scoreset.  no need to recompute.");
     $hits = $self->{hits};
   }
   else {
-    dbg ("auto-learn: currently using scoreset $orig_scoreset.  recomputing score based on scoreset ".($orig_scoreset%2).".");
-    $self->{conf}->set_score_set($orig_scoreset % 2); # reduce to autolearning scores
+    my $new_scoreset = $orig_scoreset & ~2;
+    dbg ("auto-learn: currently using scoreset $orig_scoreset.  recomputing score based on scoreset $new_scoreset.");
+    $self->{conf}->set_score_set($new_scoreset); # reduce to autolearning scores
     foreach my $test ( @{$self->{test_names_hit}} ) {
       # ignore tests with 0 score in this scoreset or if the test is a learning or userconf test
       next if ( $self->{conf}->{scores}->{$test} == 0 );
@@ -304,7 +276,7 @@ sub learn {
   } elsif ($hits >= $max) {
     $isspam = 1;
   } else {
-    dbg ("auto-learn? no: inside auto-learn thresholds or safety zone around required_hits");
+    dbg ("auto-learn? no: inside auto-learn thresholds");
     return;
   }
 
@@ -326,8 +298,7 @@ sub learn {
 
   dbg ("auto-learn? yes, ".($isspam?"spam ($hits > $max)":"ham ($hits < $min)"));
   eval {
-    my $learnstatus = $self->{main}->learn ($self->{msg},
-			  $self->get("Message-Id"), $isspam, 0);
+    my $learnstatus = $self->{main}->learn ($self->{msg}, undef, $isspam, 0);
     $learnstatus->finish();
     if ( $learnstatus->did_learn() ) {
       $self->{auto_learn_status} = $isspam;
@@ -364,7 +335,7 @@ sub is_spam {
 
 =item $list = $status->get_names_of_tests_hit ()
 
-After a mail message has been checked, this method can be called.  It will
+After a mail message has been checked, this method can be called. It will
 return a comma-separated string, listing all the symbolic test names
 of the tests which were trigged by the mail.
 
@@ -580,18 +551,18 @@ sub rewrite_as_spam {
   my $original = $self->{msg}->get_pristine();
 
   # This is the new message.
-  # jm: add a SpamAssassin Received header to note markup time etc.
-  # emulates the fetchmail style.
-  my $newmsg = "Received: from localhost [127.0.0.1] by " . hostname . "\n" .
-	"\twith SpamAssassin (" . Mail::SpamAssassin::Version() . " " .
-	    $Mail::SpamAssassin::SUB_VERSION . ");\n" .
-	"\t" . strftime("%a, %d %b %Y %H:%M:%S ", localtime) .
-	    Mail::SpamAssassin::Util::local_tz() . "\n";
+  my $newmsg = '';
 
   # remove first line if it is "From "
   if ($original =~ s/^(From (.*?)\n)//s) {
     # jm: surely do not add it again? we wind up with a bad header
     #$newmsg .= $1;
+  }
+
+  # the report charset
+  my $report_charset = "";
+  if ($self->{conf}->{report_charset}) {
+    $report_charset = "; charset=" . $self->{conf}->{report_charset};
   }
 
   # the SpamAssassin report
@@ -621,25 +592,40 @@ sub rewrite_as_spam {
   $newmsg .= "Subject: $subject" if $subject;
   $newmsg .= "Date: $date" if $date;
   $newmsg .= "Message-Id: $msgid" if $msgid;
-  $newmsg .= "X-Spam-Flag: YES\n";
-  $newmsg .= "X-Spam-Status: " . $self->_build_status_line() . "\n";
-  if ($self->{main}->{conf}->{spam_level_stars} == 1) {
-    my $length = int($self->{hits});
-    if ( $length > 100 ) { $length = 100; }
 
-    $newmsg .= "X-Spam-Level: " .
-      $self->{main}->{conf}->{spam_level_char} x $length . "\n";
+  foreach my $header (keys %{$self->{conf}->{headers_spam}} ) {
+    my $data = $self->{conf}->{headers_spam}->{$header};
+    my $line = $self->_process_header($header,$data) || "";
+    $newmsg .= "X-Spam-$header: $line\n" # add even if empty
   }
-  $newmsg .= "X-Spam-Checker-Version: SpamAssassin " .
-    Mail::SpamAssassin::Version() . " (" .
-    $Mail::SpamAssassin::SUB_VERSION . ")\n";
 
-  # now add any test-specific markup headers (X-Pyzor etc.)
-  foreach my $hdr (keys %{$self->{headers_to_add}}) {
-    my $text = $self->{headers_to_add}->{$hdr};
-    chomp $text;		# just in case
-    $newmsg .= "$hdr: $text\n";
+  if (defined $self->{conf}->{report_safe_copy_headers}) {
+    my %already_added = map { $_ => 1 } qw/from to cc subject date message-id/;
+
+    foreach my $hdr ( @{$self->{conf}->{report_safe_copy_headers}} ) {
+      next if ( exists $already_added{lc $hdr} );
+      my @hdrtext = $self->{msg}->get_pristine_header($hdr);
+      $already_added{lc $hdr}++;
+      foreach ( @hdrtext ) {
+	if ( lc $hdr eq "received" ) { # add Received at the top ...
+          $newmsg = "$hdr: $_$newmsg";
+	}
+	else { # if not Received, add at the bottom ...
+          $newmsg .= "$hdr: $_";
+	}
+      }
+    }
   }
+
+  # jm: add a SpamAssassin Received header to note markup time etc.
+  # emulates the fetchmail style.
+  # tvd: do this after report_safe_copy_headers so Received will be done correctly
+  $newmsg = "Received: from localhost [127.0.0.1] by " .
+	    Mail::SpamAssassin::Util::fq_hostname() . "\n" .
+	"\twith SpamAssassin (" . Mail::SpamAssassin::Version() . " " .
+	    $Mail::SpamAssassin::SUB_VERSION . ");\n" .
+	"\t" . Mail::SpamAssassin::Util::time_to_rfc822_date() . "\n" .
+	    $newmsg;
 
   # MIME boundary
   my $boundary = "----------=_" . sprintf("%08X.%08X",time,int(rand(2 ** 32)));
@@ -654,7 +640,7 @@ sub rewrite_as_spam {
   my $ct = $self->{msg}->get_header("Content-Type");
   if (defined $ct && $ct ne '' && $ct !~ m{text/plain}i) {
     $disposition = "attachment";
-    $report .= $self->{conf}->{unsafe_report_template};
+    $report .= $self->_replace_tags($self->{conf}->{unsafe_report_template});
     # if we wanted to defang the attachment, this would be the place
   }
   else {
@@ -677,7 +663,7 @@ Content-Type: multipart/mixed; boundary="$boundary"
 This is a multi-part message in MIME format.
 
 --$boundary
-Content-Type: text/plain
+Content-Type: text/plain$report_charset
 Content-Disposition: inline
 Content-Transfer-Encoding: 8bit
 
@@ -703,32 +689,7 @@ EOM
 sub rewrite_headers {
   my ($self) = @_;
 
-  # add headers?  always for spam, only if requested for nonspam
-  if ( $self->{is_spam} || $self->{main}->{conf}->{always_add_headers} == 1) {
-    $self->{msg}->put_header ("X-Spam-Status", $self->_build_status_line());
-    if($self->{main}->{conf}->{spam_level_stars} == 1) {
-      my $length = int($self->{hits});
-      if ( $length > 100 ) { $length = 100; }
-      $self->{msg}->put_header("X-Spam-Level", $self->{main}->{conf}->{spam_level_char} x $length);
-    }
-  }
-
-  # always add version (bug 1342)
-  $self->{msg}->put_header ("X-Spam-Checker-Version",
-			    "SpamAssassin " . Mail::SpamAssassin::Version() .
-			    " ($Mail::SpamAssassin::SUB_VERSION)");
-
-  # add version & report headers if spam, or if always_report is on
-  if ($self->{is_spam} || $self->{main}->{conf}->{always_add_report}) {
-    my $report = $self->{report};
-    $report =~ s/^\s*\n//gm;	# Empty lines not allowed in header.
-    $report =~ s/^\s*/  /gm;	# Ensure each line begins with whitespace.
-    $self->{msg}->put_header ("X-Spam-Report", $report);
-  }
-
-  # add spam headers if spam
-  if ($self->{is_spam}) {
-    $self->{msg}->put_header ("X-Spam-Flag", 'YES');
+  if($self->{is_spam}) {
 
     if ($self->{conf}->{rewrite_subject}) {
       my $subject = $self->{msg}->get_header("Subject") || '';
@@ -739,55 +700,140 @@ sub rewrite_headers {
       $subject =~ s/\n*$/\n/s;
       $self->{msg}->replace_header("Subject", $subject);
     }
-  }
 
-  # now add any test-specific markup headers (X-Pyzor etc.)
-  foreach my $hdr (keys %{$self->{headers_to_add}}) {
-    my $text = $self->{headers_to_add}->{$hdr};
-    chomp $text;		# just in case
-    $self->{msg}->put_header ($hdr, $text);
-  }
+    foreach my $header (keys %{$self->{conf}->{headers_spam}} ) {
+      my $data = $self->{conf}->{headers_spam}->{$header};
+      my $line = $self->_process_header($header,$data) || "";
+      $self->{msg}->put_header ("X-Spam-$header", $line);
+    }
 
+
+  } else {
+
+    foreach my $header (keys %{$self->{conf}->{headers_ham}} ) {
+      my $data = $self->{conf}->{headers_ham}->{$header};
+      my $line = $self->_process_header($header,$data) || "";
+      $self->{msg}->put_header ("X-Spam-$header", $line);
+    }
+
+
+  }
   $self->{msg}->get_mail_object;
 }
 
-sub _build_status_line {
-  my ($self) = @_;
-  my $line;
 
-  $line  = ($self->is_spam() ? "Yes, " : "No, ");
-  $line .= sprintf("hits=%2.1f required=%2.1f\n",
-             $self->{hits}, $self->{conf}->{required_hits});
+sub _process_header {
 
-  if($_ = $self->get_names_of_tests_hit()) {
-    if ( $self->{conf}->{fold_headers} ) { # Fold the headers!
-      $Text::Wrap::columns   = 74;
-      $Text::Wrap::huge      = 'overflow';
-      $Text::Wrap::break     = '(?<=,)';
-      $line .= Text::Wrap::wrap("\ttests=", "\t      ", $_) . "\n";
-    }
-    else {
-      $line .= "\ttests=$_";
+  my ($self, $hdr_name, $hdr_data) = @_;
+
+  $hdr_data = $self->_replace_tags($hdr_data);
+  $hdr_data =~ s/(?:\r?\n)+$//; # make sure there are no trailing newlines ...
+
+  if ($self->{conf}->{fold_headers} ) {
+    if ($hdr_data =~ /\n/) {
+      $hdr_data =~ s/\s*\n\s*/\n\t/g;
+      return $hdr_data;
+    } else {
+      my $hdr = "X-Spam-$hdr_name!!$hdr_data";
+      # use '!!' instead of ': ' so it doesn't wrap on the space
+      $Text::Wrap::columns = 79;
+      $Text::Wrap::huge = 'wrap';
+      $Text::Wrap::break = '(?<=[\s,])';
+      $hdr = Text::Wrap::wrap('',"\t",$hdr);
+      return (split (/!!/, $hdr, 2))[1]; # just return the data part
     }
   } else {
-    $line .= "\ttests=none\n";
+    $hdr_data =~ s/\n/ /g; # Can't have newlines in headers, unless folded
+    return $hdr_data;
   }
+}
 
-  $line .= "\t";
-  if ( defined $self->{auto_learn_status} ) {
-    $line .= "autolearn=";
-    $line .= $self->{auto_learn_status} ? "spam" : "ham";
-    $line .= " ";
+sub _replace_tags {
+  my $self = shift;
+  my $text = shift;
+
+  $text =~ s/_(\w+?)(?:\((.*?)\)|)_/${\($self->_get_tag($1,$2 || ""))}/g;
+  return $text;
+}
+
+sub _get_tag {
+  my $self = shift;
+  my $tag = shift;
+  my %tags;
+
+  # tag data also comes from $self->{tag_data}->{TAG}
+
+  %tags = ( YESNOCAPS => sub { $self->{is_spam} ? "YES" : "NO"; },
+
+	    YESNO => sub { $self->{is_spam} ? "Yes" : "No"; },
+
+	    HITS => sub { sprintf ("%2.1f", $self->{hits}); },
+
+	    REQD => sub { sprintf ("%2.1f", $self->{conf}->{required_hits}); },
+
+	    VERSION => sub { return Mail::SpamAssassin::Version()},
+
+	    SUBVERSION => sub { $Mail::SpamAssassin::SUB_VERSION },
+
+	    HOSTNAME => sub { Mail::SpamAssassin::Util::fq_hostname(); },
+
+	    CONTACTADDRESS => sub { $self->{conf}->{report_contact}; },
+
+	    BAYES => sub {
+	      exists($self->{bayes_score}) ?
+			sprintf("%3.4f", $self->{bayes_score}) : "0.5"
+	    },
+
+	    DATE => sub {
+	      Mail::SpamAssassin::Util::time_to_rfc822_date();
+	    },
+
+	    STARS => sub {
+	      my $arg = (shift || "*");
+	      my $length = int($self->{hits});
+	      $length = 50 if $length > 50;
+	      return $arg x $length;
+	    },
+
+	    AUTOLEARN => sub {
+	      return "no" if !defined $self->{auto_learn_status};
+	      return "spam" if $self->{auto_learn_status};
+	      return "ham";
+	    },
+
+	    TESTS => sub {
+	      my $arg = (shift || ',');
+	      return (join($arg, sort(@{$self->{test_names_hit}})) || "none");
+	    },
+
+	    TESTSSCORES => sub {
+	      my $arg = (shift || ",");
+	      my $line = '';
+	      foreach my $test (sort @{$self->{test_names_hit}}) {
+		if (!$line) {
+		  $line .= $test . "=" . $self->{conf}->{scores}->{$test};
+		} else {
+		  $line .= $arg . $test . "=" . $self->{conf}->{scores}->{$test};
+		}
+	      }
+	      return $line;
+	    },
+
+	    PREVIEW => sub { $self->get_content_preview() },
+
+	    REPORT => sub {
+	      return "\n" . ($self->{tag_data}->{REPORT} || "");
+	    },
+
+	  );
+
+  if (exists $tags{$tag}) {
+      return $tags{$tag}->(@_);
+  } elsif ($self->{tag_data}->{$tag}) {
+    return $self->{tag_data}->{$tag};
+  } else {
+    return "";
   }
-
-  $line .= "version=" . Mail::SpamAssassin::Version();
-
-  # If the configuration says no folded headers, unfold what we have.
-  if ( ! $self->{conf}->{fold_headers} ) {
-    $line =~ s/\s+/ /g;
-  }
-
-  return $line;
 }
 
 ###########################################################################
@@ -827,10 +873,6 @@ called to ensure Perl's garbage collection will clean up old status objects.
 sub finish {
   my ($self) = @_;
 
-  if (exists $self->{main}->{bayes_scanner}) {
-    $self->{main}->{bayes_scanner}->finish();
-  }
-
   delete $self->{body_text_array};
   delete $self->{main};
   delete $self->{msg};
@@ -860,7 +902,8 @@ sub get_raw_body_text_array {
   my $cte = $self->{msg}->get_header ('Content-Transfer-Encoding');
   if (defined $cte && $cte =~ /quoted-printable/i) {
     $self->{found_encoding_quoted_printable} = 1;
-  } elsif (defined $cte && $cte =~ /base64/) {
+  }
+  elsif (defined $cte && $cte =~ /base64/i) {
     $self->{found_encoding_base64} = 1;
   }
 
@@ -935,7 +978,8 @@ sub get_raw_body_text_array {
     if (/^Content-Transfer-Encoding: /i) {
       if (/quoted-printable/i) {
 	$self->{found_encoding_quoted_printable} = 1;
-      } elsif (/base64/i) {
+      }
+      elsif (/base64/i) {
 	$self->{found_encoding_base64} = 1;
       }
     }
@@ -949,7 +993,8 @@ sub get_raw_body_text_array {
 
 	if (/^Content-Type: (\S+?\/\S+?)(?:\;|\s|$)/i) {
 	  $ctype = $1;
-	  if ($ctype =~ /^(text\/\S+|message\/\S+|multipart\/alternative)/i) {
+	  if ($ctype =~ /^(text\/\S+|message\/\S+|multipart\/alternative|multipart\/related)/i)
+	  {
 	    $ctypeistext = 1; next;
 	  } else {
 	    $ctypeistext = 0; next;
@@ -995,48 +1040,48 @@ sub get_decoded_body_text_array {
     my $b64lines = 0;
     my @decoded = ();
     foreach my $line (@{$textary}) {
-      if ($line =~ /[ \t]/ or $line =~ /^--/) {  # base64 can't have whitespace on the line or start --
-
+      # base64 can't have whitespace on the line or start --
+      if ($line =~ /[ \t]/ or $line =~ /^--/) {
 	# decode what we have so far
 	push (@decoded, $self->split_b64_decode ($_), $line);
 	$_ = '';
         $foundb64 = 0;
         next;
       }
-
-      if (length($line) != $lastlinelength && !$foundb64) { # This line is a different length from the last one
-
+      # This line is a different length from the last one
+      if (length($line) != $lastlinelength && !$foundb64) {
 	push (@decoded, $self->split_b64_decode ($_));
-        $_ = $line;                                         # Could be the first line of a base 64 part
+        $_ = $line;	# Could be the first line of a base 64 part
         $lastlinelength = length($line);
         next;
       }
-
-      if ($lastlinelength == length ($line)) {              # Same length as the last line.  Starting to look like a base64 encoding
-        if ($b64lines++ == 3) {                             # Three lines the same length, with no spaces in them
-          $foundb64 = 1;                                    # Sounds like base64 to me!
+      # Same length as the last line.  Starting to look like a base64 encoding
+      if ($lastlinelength == length ($line)) {
+	# Three lines the same length, with no spaces in them
+        if ($b64lines++ == 3 && length ($line) > 3) {
+	  # Sounds like base64 to me!
+          $foundb64 = 1;
         }
         $_ .= $line;
         next;
       }
-
-      if ($foundb64) {                                      # Last line is shorter, so we are done.
+      # Last line is shorter, so we are done.
+      if ($foundb64) {
         $_ .= $line;
         last;
       }
     }
-
     push (@decoded, $self->split_b64_decode ($_));
     return \@decoded;
-
-  } elsif ($self->{found_encoding_quoted_printable}) {
+  }
+  elsif ($self->{found_encoding_quoted_printable}) {
     $_ = join ('', @{$textary});
     s/\=\r?\n//gs;
     s/\=([0-9A-F]{2})/chr(hex($1))/ge;
     my @ary = $self->split_into_array_of_short_lines ($_);
     return \@ary;
-
-  } elsif ($self->{found_encoding_uuencode}) {
+  }
+  elsif ($self->{found_encoding_uuencode}) {
     # remove uuencoded regions
     my $uu_region = 0;
     $_ = '';
@@ -1062,7 +1107,8 @@ sub get_decoded_body_text_array {
     s/\r//;
     my @ary = $self->split_into_array_of_short_lines ($_);
     return \@ary;
-  } else {
+  }
+  else {
     return $textary;
   }
 }
@@ -1132,6 +1178,7 @@ sub get_decoded_stripped_body_text_array {
   $self->{html}{image_area} = 0;
   $self->{html}{shouting} = 0;
   $self->{html}{max_shouting} = 0;
+  $self->{html}{total_comment_ratio} = 0;
 
   # do HTML conversions if necessary
   if ($text =~ m/<(?:$re_strict|$re_loose|!--|!doctype)(?:\s|>)/ois) {
@@ -1143,15 +1190,41 @@ sub get_decoded_stripped_body_text_array {
     my $before = substr($text, 0, length($1));
     $text = substr($text, length($1));
 
+    # NOTE: We *only* need to fix the rendering when we verify that it
+    # differs from what people see in their MUA.  Testing is best done with
+    # the most common MUAs and browsers, if you catch my drift.
+
+    # NOTE: HTML::Parser can cope with: <?xml pis>, <? with space>, so we
+    # don't need to fix them here.
+
+    # bug #1551: HTML declarations, like <!foo>, are being used by spammers
+    # for obfuscation, and they aren't stripped out by HTML::Parser prior to
+    # version 3.28.  We have to modify these out *before* the parser is
+    # invoked, because otherwise a spammer could do "&lt;! body of message
+    # &gt;", which would get turned into "<! body of message >" by the
+    # parser, and then the whole body message would be stripped.
+
+    # convert <!foo> to <!--foo-->
+    if ($HTML::Parser::VERSION < 3.28) { 
+      $text =~ s/<!((?!--|doctype)[^>]*)>/<!--$1-->/gsi;
+    }
+
+    # remove empty close tags: </>, </ >, </ foo>
+    if ($HTML::Parser::VERSION < 3.29) { 
+      $text =~ s/<\/(?:\s.*?)?>//gs;
+    }
+
     $self->{html_text} = [];
     $self->{html_last_tag} = 0;
     my $hp = HTML::Parser->new(
 		api_version => 3,
 		handlers => [
+		  start_document => [sub { $self->html_init(@_) }],
 		  start => [sub { $self->html_tag(@_) }, "tagname,attr,'+1'"],
 		  end => [sub { $self->html_tag(@_) }, "tagname,attr,'-1'"],
 		  text => [sub { $self->html_text(@_) }, "dtext"],
 		  comment => [sub { $self->html_comment(@_) }, "text"],
+		  declaration => [sub { $self->html_declaration(@_) }, "text"],
 		],
 		marked_sections => 1);
 
@@ -1176,9 +1249,13 @@ sub get_decoded_stripped_body_text_array {
       }
       $self->{html}{non_space_len} = $self->{html}{non_uri_len} - $space;
       $self->{html}{ratio} = ($raw - $self->{html}{non_uri_len}) / $raw;
+      if (exists $self->{html}{total_comment_length} && $self->{html}{non_uri_len} > 0) {
+        $self->{html}{total_comment_ratio} = $self->{html}{total_comment_length} / $self->{html}{non_uri_len};
+      }
     } # if ($raw > 0)
     delete $self->{html_last_tag};
-  }
+
+  } # if HTML
 
   # whitespace handling (warning: small changes have large effects!)
   $text =~ s/\n+\s*\n+/\f/gs;		# double newlines => form feed
@@ -1398,15 +1475,17 @@ sub do_head_tests {
 
   # note: we do this only once for all head pattern tests.  Only
   # eval tests need to use stuff in here.
-  $self->{test_log_msgs} = '';	# clear test state
+  $self->{test_log_msgs} = ();	# clear test state
 
   dbg ("running header regexp tests; score so far=".$self->{hits});
 
+  my $doing_user_rules = 
+    $self->{conf}->{user_rules_to_compile}->{Mail::SpamAssassin::Conf::TYPE_HEAD_TESTS};
+
   # speedup code provided by Matt Sergeant
-  if (defined &Mail::SpamAssassin::PerMsgStatus::_head_tests
-       && !$self->{conf}->{user_rules_to_compile} ) {
-      Mail::SpamAssassin::PerMsgStatus::_head_tests($self);
-      return;
+  if (defined &Mail::SpamAssassin::PerMsgStatus::_head_tests && !$doing_user_rules) {
+    Mail::SpamAssassin::PerMsgStatus::_head_tests($self);
+    return;
   }
 
   my $evalstr = '';
@@ -1434,6 +1513,10 @@ sub do_head_tests {
       }
     ';
 
+    if ($doing_user_rules) {
+      next if (!$self->is_user_rule_sub ($rulename.'_head_test'));
+    }
+
     $evalstr2 .= '
       sub '.$rulename.'_head_test {
         my $self = shift;
@@ -1446,6 +1529,9 @@ sub do_head_tests {
       }';
 
   }
+
+  # clear out a previous version of this fn, if already defined
+  if (defined &_head_tests) { undef &_head_tests; }
 
   $evalstr = <<"EOT";
 {
@@ -1480,10 +1566,11 @@ sub do_body_tests {
 
   dbg ("running body-text per-line regexp tests; score so far=".$self->{hits});
 
-  $self->{test_log_msgs} = '';	# clear test state
-  if ( defined &Mail::SpamAssassin::PerMsgStatus::_body_tests
-       && !$self->{conf}->{user_rules_to_compile} ) {
-    # ok, we've compiled this before. Or have we?
+  my $doing_user_rules = 
+    $self->{conf}->{user_rules_to_compile}->{Mail::SpamAssassin::Conf::TYPE_BODY_TESTS};
+
+  $self->{test_log_msgs} = ();	# clear test state
+  if ( defined &Mail::SpamAssassin::PerMsgStatus::_body_tests && !$doing_user_rules) {
     Mail::SpamAssassin::PerMsgStatus::_body_tests($self, @$textary);
     return;
   }
@@ -1499,6 +1586,11 @@ sub do_body_tests {
         '.$rulename.'_body_test($self,@_);
       }
     ';
+
+    if ($doing_user_rules) {
+      next if (!$self->is_user_rule_sub ($rulename.'_body_test'));
+    }
+
     $evalstr2 .= '
     sub '.$rulename.'_body_test {
            my $self = shift;
@@ -1512,6 +1604,9 @@ sub do_body_tests {
     }
     ';
   }
+
+  # clear out a previous version of this fn, if already defined
+  if (defined &_body_tests) { undef &_body_tests; }
 
   # generate the loop that goes through each line...
   $evalstr = <<"EOT";
@@ -1541,6 +1636,12 @@ EOT
   }
 }
 
+sub is_user_rule_sub {
+  my ($self, $subname) = @_;
+  return 0 if (eval 'defined &Mail::SpamAssassin::PerMsgStatus::'.$subname);
+  1;
+}
+
 # Taken from URI and URI::Find
 my $reserved   = q(;/?:@&=+$,[]\#|);
 my $mark       = q(-_.!~*'());                                    #'; emacs
@@ -1552,7 +1653,7 @@ my $schemeRE = qr/(?:https?|ftp|mailto|javascript|file)/;
 my $uricCheat = $uricSet;
 $uricCheat =~ tr/://d;
 
-my $schemelessRE = qr/(?<!\.)(?:www\.|ftp\.)/;
+my $schemelessRE = qr/(?<![.=])(?:www\.|ftp\.)/;
 my $uriRe = qr/\b(?:$schemeRE:[$uricCheat]|$schemelessRE)[$uricSet#]*/o;
 
 # Taken from Email::Find (thanks Tatso!)
@@ -1672,10 +1773,11 @@ sub do_body_uri_tests {
   dbg ("running uri tests; score so far=".$self->{hits});
   my @uris = $self->get_uri_list();
 
-  $self->{test_log_msgs} = '';	# clear test state
-  if ( defined &Mail::SpamAssassin::PerMsgStatus::_body_uri_tests
-       && !$self->{conf}->{user_rules_to_compile} ) {
-    # ok, we've compiled this before.
+  my $doing_user_rules = 
+    $self->{conf}->{user_rules_to_compile}->{Mail::SpamAssassin::Conf::TYPE_URI_TESTS};
+
+  $self->{test_log_msgs} = ();	# clear test state
+  if (defined &Mail::SpamAssassin::PerMsgStatus::_body_uri_tests && !$doing_user_rules) {
     Mail::SpamAssassin::PerMsgStatus::_body_uri_tests($self, @uris);
     return;
   }
@@ -1692,6 +1794,10 @@ sub do_body_uri_tests {
       }
     ';
 
+    if ($doing_user_rules) {
+      next if (!$self->is_user_rule_sub ($rulename.'_uri_test'));
+    }
+
     $evalstr2 .= '
     sub '.$rulename.'_uri_test {
        my $self = shift;
@@ -1705,6 +1811,9 @@ sub do_body_uri_tests {
     }
     ';
   }
+
+  # clear out a previous version of this fn, if already defined
+  if (defined &_body_uri_tests) { undef &_body_uri_tests; }
 
   # generate the loop that goes through each line...
   $evalstr = <<"EOT";
@@ -1740,10 +1849,11 @@ sub do_rawbody_tests {
 
   dbg ("running raw-body-text per-line regexp tests; score so far=".$self->{hits});
 
-  $self->{test_log_msgs} = '';	# clear test state
-  if ( defined &Mail::SpamAssassin::PerMsgStatus::_rawbody_tests
-       && !$self->{conf}->{user_rules_to_compile} ) {
-    # ok, we've compiled this before.
+  my $doing_user_rules = 
+    $self->{conf}->{user_rules_to_compile}->{Mail::SpamAssassin::Conf::TYPE_RAWBODY_TESTS};
+
+  $self->{test_log_msgs} = ();	# clear test state
+  if (defined &Mail::SpamAssassin::PerMsgStatus::_rawbody_tests && !$doing_user_rules) {
     Mail::SpamAssassin::PerMsgStatus::_rawbody_tests($self, @$textary);
     return;
   }
@@ -1759,6 +1869,11 @@ sub do_rawbody_tests {
          '.$rulename.'_rawbody_test($self, @_); # call procedurally for speed
       }
     ';
+
+    if ($doing_user_rules) {
+      next if (!$self->is_user_rule_sub ($rulename.'_rawbody_test'));
+    }
+
     $evalstr2 .= '
     sub '.$rulename.'_rawbody_test {
        my $self = shift;
@@ -1772,6 +1887,9 @@ sub do_rawbody_tests {
     }
     ';
   }
+
+  # clear out a previous version of this fn, if already defined
+  if (defined &_rawbody_tests) { undef &_rawbody_tests; }
 
   # generate the loop that goes through each line...
   $evalstr = <<"EOT";
@@ -1807,12 +1925,14 @@ sub do_full_tests {
   
   dbg ("running full-text regexp tests; score so far=".$self->{hits});
 
-  $self->{test_log_msgs} = '';	# clear test state
+  my $doing_user_rules = 
+    $self->{conf}->{user_rules_to_compile}->{Mail::SpamAssassin::Conf::TYPE_FULL_TESTS};
 
-  if (defined &Mail::SpamAssassin::PerMsgStatus::_full_tests
-       && !$self->{conf}->{user_rules_to_compile} ) {
-      Mail::SpamAssassin::PerMsgStatus::_full_tests($self, $fullmsgref);
-      return;
+  $self->{test_log_msgs} = ();	# clear test state
+
+  if (defined &Mail::SpamAssassin::PerMsgStatus::_full_tests && !$doing_user_rules) {
+    Mail::SpamAssassin::PerMsgStatus::_full_tests($self, $fullmsgref);
+    return;
   }
 
   # build up the eval string...
@@ -1829,6 +1949,8 @@ sub do_full_tests {
       }
     ';
   }
+
+  if (defined &_full_tests) { undef &_full_tests; }
 
   # and compile it.
   $evalstr = <<"EOT";
@@ -1856,17 +1978,6 @@ EOT
 }
 
 ###########################################################################
-
-sub do_rbl_eval_tests {
-  my ($self, $needresult) = @_;
-  $self->run_rbl_eval_tests ($self->{conf}->{rbl_evals}, $needresult);
-}
-
-sub do_rbl_res_eval_tests {
-  my ($self) = @_;
-  # run_rbl_eval_tests doesn't process check returns unless you set needresult
-  $self->run_rbl_eval_tests ($self->{conf}->{rbl_res_evals}, 1);
-}
 
 sub do_head_eval_tests {
   my ($self) = @_;
@@ -1898,14 +2009,14 @@ sub do_awl_tests {
     local $_ = lc $self->get('From:addr');
     return 0 unless /\S/;
 
-    my $rcvd = $self->get('Received');
+    # find the earliest usable "originating IP".  ignore reserved nets
     my $origip;
-
-    if ($rcvd =~ /^.*[^\d](\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/s) {
-      $origip = $1;
-    } elsif (defined $rcvd && $rcvd =~ /\S/) {
-      $rcvd =~ s/\s+/ /gs;
-      dbg ("failed to find originating IP in '$rcvd'");
+    foreach my $rly (reverse (@{$self->{relays_trusted}}, @{$self->{relays_untrusted}}))
+    {
+      next if ($rly->{ip_is_reserved});
+      if ($rly->{ip}) {
+	$origip = $rly->{ip}; last;
+      }
     }
 
     # Create the AWL object, catching 'die's
@@ -1923,6 +2034,8 @@ sub do_awl_tests {
       if(defined($meanscore))
       {
           $delta = ($meanscore - $self->{hits}) * $self->{main}->{conf}->{auto_whitelist_factor};
+	  $self->{tag_data}->{AWL} = sprintf("%2.1f",$delta);
+	  # Save this for _AWL_ tag
       }
 
       # Update the AWL *before* adding the new score, otherwise
@@ -1934,8 +2047,13 @@ sub do_awl_tests {
         $whitelist->add_score($self->{hits});
       }
 
-      if($delta != 0) {
-          $self->_handle_hit("AWL",$delta,"AWL: ","Auto-whitelist adjustment");
+      # current AWL score changes with each hit
+      for my $set (0..3) {
+	$self->{conf}->{scoreset}->[$set]->{"AWL"} = sprintf("%0.3f", $delta);
+      }
+
+      if ($delta != 0) {
+	$self->_handle_hit("AWL",$delta,"AWL: ","Auto-whitelist adjustment");
       }
 
       dbg("Post AWL score: ".$self->{hits});
@@ -1958,9 +2076,11 @@ sub do_meta_tests {
 
   dbg( "running meta tests; score so far=" . $self->{hits} );
 
+  my $doing_user_rules = 
+    $self->{conf}->{user_rules_to_compile}->{Mail::SpamAssassin::Conf::TYPE_META_TESTS};
+
   # speedup code provided by Matt Sergeant
-  if ( defined &Mail::SpamAssassin::PerMsgStatus::_meta_tests
-    && !$self->{conf}->{user_rules_to_compile} ) {
+  if ( defined &Mail::SpamAssassin::PerMsgStatus::_meta_tests && !$doing_user_rules) {
     Mail::SpamAssassin::PerMsgStatus::_meta_tests($self);
     return;
   }
@@ -2035,6 +2155,8 @@ sub do_meta_tests {
         . join ( ", ", grep($metas{$_},@{ $rule_deps{$rulename} }) ) );
   }
 
+  if (defined &_meta_tests) { undef &_meta_tests; }
+
   # setup the environment for meta tests
   $evalstr = <<"EOT";
 {
@@ -2072,12 +2194,23 @@ sub run_eval_tests {
   
   my $debugenabled = $Mail::SpamAssassin::DEBUG->{enabled};
 
+  my $scoreset = $self->{conf}->get_score_set();
   while (my ($rulename, $test) = each %{$evalhash}) {
+    # Score of 0, skip it.
     next unless ($self->{conf}->{scores}->{$rulename});
+
+    # If the rule is a net rule, and we're in a non-net enabled scoreset, skip it.
+    next if (exists $self->{conf}->{tflags}->{$rulename} &&
+      (($scoreset & 1) == 0) && $self->{conf}->{tflags}->{$rulename} =~ /\bnet\b/);
+
+    # If the rule is a learn rule, and we're in a non-learn enabled scoreset, skip it.
+    next if (exists $self->{conf}->{tflags}->{$rulename} &&
+      (($scoreset & 2) == 0) && $self->{conf}->{tflags}->{$rulename} =~ /\blearn\b/);
+
     my $score = $self->{conf}{scores}{$rulename};
     my $result;
 
-    $self->{test_log_msgs} = '';	# clear test state
+    $self->{test_log_msgs} = ();	# clear test state
 
     my ($function, @args) = @{$test};
     unshift(@args, @extraevalargs);
@@ -2105,7 +2238,7 @@ sub run_eval_tests {
 ###########################################################################
 
 sub run_rbl_eval_tests {
-  my ($self, $evalhash, $needresult) = @_;
+  my ($self, $evalhash) = @_;
   my ($rulename, $pat, @args);
   local ($_);
 
@@ -2117,34 +2250,23 @@ sub run_rbl_eval_tests {
   my $debugenabled = $Mail::SpamAssassin::DEBUG->{enabled};
 
   while (my ($rulename, $test) = each %{$evalhash}) {
-    next unless ($self->{conf}->{scores}->{$rulename});
-    my $score = $self->{conf}{scores}{$rulename};
-    my $result;
+    my $score = $self->{conf}->{scores}->{$rulename};
+    next unless $score;
 
-    $self->{test_log_msgs} = '';	# clear test state
+    $self->{test_log_msgs} = ();	# clear test state
 
     my ($function, @args) = @{$test};
 
+    my $result;
     eval {
-       $result = $self->$function(@args, $needresult);
+       $result = $self->$function($rulename, @args);
     };
 
-    # A run with $job eq 0 is just to start DNS queries
-    if ($needresult eq 1)
-    {
-	if ($@) {
-	  warn "Failed to run $rulename RBL SpamAssassin test, skipping:\n".
-		    "\t($@)\n";
-          $self->{rule_errors}++;
-	  next;
-	}
-
-	if ($result) {
-	    $self->got_hit ($rulename, "RBL: ");
-	    dbg("Ran run_rbl_eval_test rule $rulename ======> got hit", "rulesrun", 64) if $debugenabled;
-	} else {
-            #dbg("Ran run_rbl_eval_test rule $rulename but did not get hit", "rulesrun", 64) if $debugenabled;
-	}
+    if ($@) {
+      warn "Failed to run $rulename RBL SpamAssassin test, skipping:\n".
+		"\t($@)\n";
+      $self->{rule_errors}++;
+      next;
     }
   }
 }
@@ -2177,7 +2299,7 @@ sub got_uri_pattern_hit {
 #
 # the clearing of the test state is now inlined as:
 #
-# $self->{test_log_msgs} = '';	# clear test state
+# $self->{test_log_msgs} = ();	# clear test state
 
 sub _handle_hit {
     my ($self, $rule, $score, $area, $desc) = @_;
@@ -2185,16 +2307,14 @@ sub _handle_hit {
     # ignore meta-match sub-rules.
     if ($rule =~ /^__/) { push(@{$self->{subtest_names_hit}}, $rule); return; }
 
-    $score = sprintf("%2.1f",$score);
-
     my $tflags = $self->{conf}->{tflags}->{$rule}; $tflags ||= '';
 
     # ignore 'learn' or 'userconf' rules, when considering score for
     # Bayesian auto-learning
     if ($tflags =~ /\b(?:learn|userconf)\b/i) {
       $self->{learned_hits} += $score;
-
-    } else {
+    }
+    else {
       $self->{hits} += $score;
       if (!$self->{conf}->maybe_header_only ($rule)) {
 	$self->{body_only_hits} += $score;
@@ -2207,15 +2327,23 @@ sub _handle_hit {
     push(@{$self->{test_names_hit}}, $rule);
     $area ||= '';
 
-    if ($self->{conf}->{use_terse_report}) {
-	$self->{test_logs} .= sprintf ("* % 2.1f -- %s%s\n%s",
-				       $score, $area, $desc, $self->{test_log_msgs});
-    } else {
-	$self->{test_logs} .= sprintf ("%-18s %-14s%s%s\n%s",
-				       $rule,"($score points)",
-				       $area, $desc, $self->{test_log_msgs});
+    if ($score >= 10 || $score <= -10) {
+      $score = sprintf("%4.0f", $score);
     }
-    $self->{test_log_msgs} = '';	# clear test logs
+    else {
+      $score = sprintf("%4.1f", $score);
+    }
+
+    # save both summaries
+    $self->{tag_data}->{REPORT} .= sprintf ("* %s %s %s%s\n%s",
+				       $score, $rule, $area, $desc,
+				       ($self->{test_log_msgs}->{TERSE} ?
+				        "*      " . $self->{test_log_msgs}->{TERSE} : '')
+				   );
+    $self->{tag_data}->{SUMMARY} .= sprintf ("%s %-22s %s%s\n%s",
+				       $score, $rule, $area, $desc,
+				       ($self->{test_log_msgs}->{LONG} || ''));
+    $self->{test_log_msgs} = ();	# clear test logs
 }
 
 sub handle_hit {
@@ -2252,10 +2380,12 @@ sub test_log {
 
 sub _test_log_line {
   my ($self, $msg) = @_;
-  if ($self->{conf}->{use_terse_report}) {
-    $self->{test_log_msgs} .= sprintf ("%9s [%s]\n", "", $msg);
+
+  $self->{test_log_msgs}->{TERSE} .= sprintf ("[%s]\n", $msg);
+  if (length($msg) > 47) {
+    $self->{test_log_msgs}->{LONG} .= sprintf ("%78s\n", "[$msg]");
   } else {
-    $self->{test_log_msgs} .= sprintf ("%18s [%s]\n", "", $msg);
+    $self->{test_log_msgs}->{LONG} .= sprintf ("%27s [%s]\n", "", $msg);
   }
 }
 
@@ -2333,26 +2463,7 @@ sub generic_base64_decode {
 
 ###########################################################################
 
-sub work_out_local_domain {
-  my ($self) = @_;
-
-  # TODO -- if needed.
-
-  # my @rcvd = $self->{msg}->get_header ("Received");
-
-# from dogma.slashnull.org (dogma.slashnull.org [212.17.35.15]) by
-    # mail.netnoteinc.com (Postfix) with ESMTP id 3E010114097 for
-    # <jm@netnoteinc.com>; Thu, 19 Apr 2001 07:28:53 +0000 (Eire)
- # (from jm@localhost) by dogma.slashnull.org (8.9.3/8.9.3) id
-    # IAA28324 for jm@netnoteinc.com; Thu, 19 Apr 2001 08:28:53 +0100
- # from gaganan.com ([211.51.69.106]) by dogma.slashnull.org
-    # (8.9.3/8.9.3) with SMTP id IAA28319 for <jm@jmason.org>; Thu,
-    # 19 Apr 2001 08:28:50 +0100
-
-}
-
 sub dbg { Mail::SpamAssassin::dbg (@_); }
-sub timelog { Mail::SpamAssassin::timelog (@_); }
 sub sa_die { Mail::SpamAssassin::sa_die (@_); }
 
 ###########################################################################
@@ -2375,6 +2486,12 @@ sub clean_spamassassin_headers {
   $self->{msg}->delete_header ("X-Spam-Prev-Content-Type");
   $self->{msg}->delete_header ("X-Spam-Report");
   $self->{msg}->delete_header ("X-Spam-Status");
+  foreach my $header (keys %{$self->{conf}->{headers_spam}} ) {
+    $self->{msg}->delete_header ("X-Spam-$header");
+  }
+  foreach my $header (keys %{$self->{conf}->{headers_ham}} ) {
+    $self->{msg}->delete_header ("X-Spam-$header");
+  }
 }
 
 ###########################################################################

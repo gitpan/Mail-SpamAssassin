@@ -83,8 +83,9 @@ eval {
 	     'remove-markup|despamassassinify|d' => \$opt{'remove-markup'},
              'revoke|k'                          => \$opt{'revoke'},
 	     'report|r'                          => \$opt{'report'},
-	     'config-file|config-dir|c|C=s'      => \$opt{'config-file'},
-	     'prefs-file|p=s'                    => \$opt{'prefs-file'},
+	     'configpath|config-file|config-dir|c|C=s' => \$opt{'configpath'},
+	     'prefspath|prefs-file|p=s'          => \$opt{'prefspath'},
+	     'siteconfigpath=s'                  => \$opt{'siteconfigpath'},
 	     'create-prefs!'                     => \$opt{'create-prefs'},
 	     'x'                                 => sub { $opt{'create-prefs'} = 0 },
 	     'log-to-mbox|l=s'                   => \$opt{'log-to-mbox'},
@@ -150,8 +151,9 @@ eval {
 
 # create the tester factory
   my $spamtest = new Mail::SpamAssassin ({
-    rules_filename	=> $opt{'config-file'},
-    userprefs_filename => $opt{'prefs-file'},
+    rules_filename	=> $opt{'configpath'},
+    site_rules_filename	=> $opt{'siteconfigpath'},
+    userprefs_filename	=> $opt{'prefspath'},
     local_tests_only	=> $opt{'local'},
     debug             => defined($opt{'debug-level'}),
     dont_copy_prefs   => ($opt{'create-prefs'} ? 0 : 1),
@@ -192,7 +194,7 @@ eval {
 # handle unconditional reportage
   if ($opt{'report'}) {
     if ( $spamtest->report_as_spam ($mail) ) {
-      warn "Warning, unable to report spam\n";
+      warn "Warning, unable to report spam\nFor more information, re-run with -D option to see debug output.\n";
     }
     if ($opt{'warning-from'}) {
       $spamtest->reply_with_warning ($mail, $opt{'warning-from'});
@@ -320,8 +322,9 @@ Options:
  -k, --revoke                      Revoke message as spam
  -w addr, --warning-from=addr      Send a warning mail to sender from addr
  -d, --remove-markup               Remove spam reports from a message
- -C file, --config-file=file       Path to standard configuration dir
- -p prefs, --prefs-file=file       Set user preferences file
+ -C path, --configpath=path, --config-file=path	  Path to standard configuration dir
+ -p prefs, --prefspath=file, --prefs-file=file    Set user preferences file
+ --siteconfigpath=path             Path for site configs (def: /etc/mail/spamassassin)
  -x, --nocreate-prefs              Don't create user preferences file
  -e, --exit-code                   Exit with a non-zero exit code if the
                                    tested message was spam
@@ -329,15 +332,15 @@ Options:
  -t, --test-mode                   Pipe message through and add extra
                                    report to the bottom
  --lint                            Lint the rule set: report syntax errors
- -a, --auto-whitelist              Use auto-whitelists
- -W, --add-to-whitelist            Add addresses in mail to whitelist
- --add-to-blacklist                Add addresses in mail to blacklist
+ -a, --auto-whitelist              Use auto-whitelists (AWL)
+ -W, --add-to-whitelist            Add addresses in mail to whitelist (AWL)
+ --add-to-blacklist                Add addresses in mail to blacklist (AWL)
  -R, --remove-from-whitelist       Remove all addresses found in mail
-                                   from whitelist
- --add-addr-to-whitelist=addr      Add addr to whitelist
- --add-addr-to-blacklist=addr      Add addr to blacklist
- --remove-addr-from-whitelist=addr Remove addr from whitelist
- -M, --whitelist-factory           Select whitelist factory
+                                   from whitelist (AWL)
+ --add-addr-to-whitelist=addr      Add addr to whitelist (AWL)
+ --add-addr-to-blacklist=addr      Add addr to blacklist (AWL)
+ --remove-addr-from-whitelist=addr Remove addr from whitelist (AWL)
+ -M, --whitelist-factory           Select whitelist factory (AWL)
  -D, --debug [area=n,...]          Print debugging messages
  -V, --version                     Print version
  -h, --help                        Print usage message
@@ -357,8 +360,12 @@ and should not be used anymore.
 Use auto-whitelists.  Auto-whitelists track the long-term average score for
 each sender and then shift the score of new messages toward that long-term
 average.  This can increase or decrease the score for messages, depending on
-the long-term behavior of the particular correspondent.  See the README file
-for more details.
+the long-term behavior of the particular correspondent.
+
+For more information about the auto-whitelist system, please look
+at the the C<Automatic Whitelist System> section of the README file.
+The auto-whitelist is not intended as a general-purpose replacement for
+static whitelist entries added to your config files
 
 =item B<-e>, B<--error-code>, B<--exit-code>
 
@@ -422,16 +429,18 @@ typos and rules that do not compile correctly.  Exits immediately with
 
 =item B<-W>, B<--add-to-whitelist>
 
-Add all email addresses, in the headers and body of the mail message read from
-STDIN, to the automatic whitelist.  Note that you must be running C<spamassassin>
-or C<spamd> with the B<-a> switch for this to work.
+Add all email addresses, in the headers and body of the mail message read
+from STDIN, to the automatic whitelist.  Note that you must be running
+C<spamassassin> or C<spamd> with the B<-a> switch for this to work.
+See the B<-a> documentation for more information.
 
 =item B<--add-to-blacklist>
 
-Add all email addresses, in the headers and body of the mail message read from
-STDIN, to the automatic whitelist with a high score (ensuring they will be
-''blacklisted'').  Note that you must be running C<spamassassin> or C<spamd>
-with the B<-a> switch.
+Add all email addresses, in the headers and body of the mail message read
+from STDIN, to the automatic whitelist with a high score (ensuring they
+will be ''blacklisted'').  Note that you must be running C<spamassassin>
+or C<spamd> with the B<-a> switch.  See the B<-a> documentation for
+more information.
 
 =item B<-R>, B<--remove-from-whitelist>
 
@@ -440,23 +449,27 @@ from STDIN, from the automatic whitelist. STDIN must contain a full email
 message, so to remove a single address you should use
 B<--remove-addr-from-whitelist> instead.
 
-Note that you must be running C<spamassassin> or C<spamd> with the B<-a> switch.
+Note that you must be running C<spamassassin> or C<spamd> with the B<-a>
+switch.  See the B<-a> documentation for more information.
 
 =item B<--add-addr-to-whitelist>
 
-Add the named email address to the automatic whitelist.  Note that you must be
-running C<spamassassin> or C<spamd> with the B<-a> switch.
+Add the named email address to the automatic whitelist.  Note that
+you must be running C<spamassassin> or C<spamd> with the B<-a> switch.
+See the B<-a> documentation for more information.
 
 =item B<--add-addr-to-blacklist>
 
 Add the named email address to the automatic whitelist with a high score
 (ensuring they will be ''blacklisted'').  Note that you must be running
-C<spamassassin> or C<spamd> with the B<-a> switch.
+C<spamassassin> or C<spamd> with the B<-a> switch.  See the B<-a>
+documentation for more information.
 
 =item B<--remove-addr-from-whitelist>
 
-Remove the named email address from the automatic whitelist.  Note that you
-must be running C<spamassassin> or C<spamd> with the B<-a> switch.
+Remove the named email address from the automatic whitelist.  Note that
+you must be running C<spamassassin> or C<spamd> with the B<-a> switch.
+See the B<-a> documentation for more information.
 
 =item B<-w> I<fromaddr>, B<--warning-from>=I<fromaddr>
 
@@ -487,13 +500,19 @@ to stdout.
 reformatted due to some features of the Mail::Internet package, but the body
 text will be.)
 
-=item B<-C> I<config>, B<--config-file>=I<config>
+=item B<-C> I<path>, B<--configpath>=I<path>, B<--config-file>=I<path>
 
-Read configuration from I<config>.
+Use the specified path for locating the distributed configuration files.
+Ignore the default directories (usually C</usr/share/spamassassin> or similar).
 
-=item B<-p> I<prefs>, B<--prefs-file>=I<prefs>
+=item B<--siteconfigpath>=I<path>
 
-Read user score preferences from I<prefs>.
+Use the specified path for locating site-specific configuration files.  Ignore
+the default directories (usually C</etc/mail/spamassassin> or similar).
+
+=item B<-p> I<prefs>, B<--prefspath>=I<prefs>, B<--prefs-file>=I<prefs>
+
+Read user score preferences from I<prefs> (usually C<$HOME/.spamassassin/user_prefs>).
 
 =item B<-D> [I<area=n,...>], B<--debug> [I<area=n,...>]
 
@@ -540,9 +559,10 @@ By default, configuration data is loaded from the first existing directory in:
 F<@@DEF_RULES_DIR@@>;
 F<@@PREFIX@@/share/spamassassin>;
 F</usr/local/share/spamassassin>;
-F</usr/share/spamassassin>.
+F</usr/share/spamassassin> .
 
-The configuration data in the first existing directory in:
+Site-specific configuration data is used to override any values which had
+already been set.  This is loaded from the first existing directory in:
 F<@@LOCAL_RULES_DIR@@>;
 F<@@PREFIX@@/etc/mail/spamassassin>;
 F<@@PREFIX@@/etc/spamassassin>;
@@ -550,16 +570,18 @@ F</usr/local/etc/spamassassin>;
 F</usr/pkg/etc/spamassassin>;
 F</usr/etc/spamassassin>;
 F</etc/mail/spamassassin>;
-F</etc/spamassassin>
-are used to override any values which had already been set
+F</etc/spamassassin> .
 
-Spamassassin will read *.cf in these directories, in alphanumeric order within each directory
-(similar to SysV-style startup scripts).  In other words, it will read F<10_misc.cf> before F<50_scores.cf> and F<20_body_tests.cf> before F<20_head_test.cf>.  Options in later files will override earlier files.
+Spamassassin will read *.cf in these directories, in alphanumeric order within
+each directory (similar to SysV-style startup scripts).  In other words, it
+will read F<10_misc.cf> before F<50_scores.cf> and F<20_body_tests.cf> before
+F<20_head_test.cf>.  Options in later files will override earlier files.
 
 The user preferences (such as scores to attach to each rule), are loaded from
 the file specified in the B<-p> argument.  If this is not specified,
-F<~/.spamassassin/user_prefs> is used if it exists.  C<spamassassin> will create this
-file if it does not exist, using F<user_prefs.template> as a template.  This file will be looked for in: 
+F<~/.spamassassin/user_prefs> is used if it exists.  C<spamassassin> will
+create this file if it does not exist, using F<user_prefs.template> as a
+template.  This file will be looked for in: 
 F<@@LOCAL_RULES_DIR@@>;
 F<@@PREFIX@@/etc/mail/spamassassin>;
 F<@@PREFIX@@/share/spamassassin>;
@@ -591,7 +613,7 @@ present) from the original spam message:
 =item Subject: header
 
 The string C<*****SPAM*****> is also prepended to the subject,
-unless the C<rewrite_subject 0> configuration option is given.
+if the C<rewrite_subject 1> configuration option is given.
 
 =item From: header
 
@@ -603,20 +625,29 @@ unless the C<rewrite_subject 0> configuration option is given.
 
 =back
 
-And these headers are added:
+And (by default) these headers are added:
 
 =over 4
 
 =item X-Spam-Status: header
 
-A string, C<Yes, hits=nn required=nn> is set in this header to reflect
-the filter status.
+A string, C<Yes, hits=nn required=nn tests=xxx,xxx
+autolearn=(ham|spam|no)> is set in this header to reflect the filter
+status.
 
 =item X-Spam-Flag: header
 
 Set to C<YES>.
 
 =item X-Spam-Report: header
+
+=back
+
+Please note that the headers that added are now fully configurable via
+the add_header option. Please see the manpage for
+Mail::SpamAssassin::Conf(3) for more information.
+
+=over 4
 
 =item spam mail body text
 
@@ -625,16 +656,21 @@ if the message is marked as spam.
 
 =back
 
-=head2 TAGGING FOR HAM (NON-SPAM) MAILS
+=head2 DEFAULT TAGGING FOR HAM (NON-SPAM) MAILS
 
 =over 4
 
 =item X-Spam-Status: header
 
-A string, C<No, hits=nn required=nn> is set in this header to reflect
-the filter status.
+A string, C<No, hits=nn required=nn tests=xxx,xxx
+autolearn=(ham|spam|no)> is set in this header to reflect the filter
+status.
 
 =back
+
+Added headers are fully configurable via the add_header configuration
+option. Please see the manpage for Mail::SpamAssassin::Conf(3) for
+more information.
 
 =head1 SPAM TRAPPING
 

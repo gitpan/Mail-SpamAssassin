@@ -12,8 +12,9 @@ use Getopt::Long;
 use Pod::Usage;
 
 use vars qw(
-  $spamtest %opt $isspam $forget $messagecount $messagelimit
-  $rebuildonly $learnprob @targets
+  $spamtest %opt $isspam $forget
+  $messagecount $learnedcount $messagelimit
+  $rebuildonly $learnprob @targets $bayes_override_path
 );
 
 ###########################################################################
@@ -21,7 +22,9 @@ use vars qw(
 sub cmdline_run {
   my ($opts) = shift;
 
-  %opt = ();
+  %opt = ( 'force-expire' => 0,
+  	   'norebuild'    => 0,
+	 );
 
   Getopt::Long::Configure(qw(bundling no_getopt_compat
                          permute no_auto_abbrev no_ignore_case));
@@ -31,8 +34,10 @@ sub cmdline_run {
 	     'ham|nonspam'			=> sub { $isspam = 0; },
 	     'rebuild'				=> \$rebuildonly,
 	     'forget'				=> \$forget,
-             'config-file|C=s'                  => \$opt{'config-file'},
-             'prefs-file|p=s'                   => \$opt{'prefs-file'},
+
+             'configpath|config-file|config-dir|c|C=s' => \$opt{'configpath'},
+             'prefspath|prefs-file|p=s'          => \$opt{'prefspath'},
+             'siteconfigpath=s'                  => \$opt{'siteconfigpath'},
 
 	     'folders|f=s'			=> \$opt{'folders'},
              'showdots'                         => \$opt{'showdots'},
@@ -40,7 +45,7 @@ sub cmdline_run {
 	     'local|L'				=> \$opt{'local'},
 	     'force-expire'			=> \$opt{'force-expire'},
 
-             'stopafter'                        => \$opt{'stopafter'},
+             'stopafter=i'                      => \$opt{'stopafter'},
 	     'learnprob=f'			=> \$opt{'learnprob'},
 	     'randseed=i'			=> \$opt{'randseed'},
 
@@ -48,10 +53,16 @@ sub cmdline_run {
              'version|V'                        => \$opt{'version'},
              'help|h|?'                         => \$opt{'help'},
 
-	     'dir'			=> sub { $opt{'format'} = 'dir'; },
-	     'file'			=> sub { $opt{'format'} = 'file'; },
+	     'dump:s'			=> \$opt{'dump'},
+	     'import'			=> \$opt{'import'},
+
+	     'dir'			=> sub { $opt{'old_format'} = 'dir'; },
+	     'file'			=> sub { $opt{'old_format'} = 'file'; },
 	     'mbox'			=> sub { $opt{'format'} = 'mbox'; },
-	     'single'			=> sub { $opt{'format'} = 'single'; },
+	     'single'			=> sub { $opt{'old_format'} = 'single'; },
+
+	     'db|dbpath=s'		=> \$bayes_override_path,
+	     're|regexp=s'		=> \$opt{'regexp'},
 
 	     '<>'			=> \&target,
   ) or usage(0, "Unknown option!");
@@ -65,19 +76,30 @@ sub cmdline_run {
   if ($opt{'force-expire'}) {
     $rebuildonly=1;
   }
-  if ( !defined $isspam && !defined $rebuildonly && !defined $forget ) {
-    usage(0, "Please select either --spam, --ham, --forget, or --rebuild");
+
+  if ( !defined $isspam && !defined $rebuildonly && !defined $forget && !defined $opt{'dump'} && !defined $opt{'import'} && !defined $opt{'folders'} ) {
+    usage(0, "Please select either --spam, --ham, --folders, --forget, --rebuild, --import or --dump");
   }
 
-  if (defined($opt{'format'}) && $opt{'format'} eq 'single') {
-    $opt{'format'} = 'file';
-    push (@ARGV, '-');
+  # We need to make sure the journal syncs pre-forget...
+  if ( defined $forget && $opt{'norebuild'} ) {
+    $opt{'norebuild'} = 0;
+    warn "sa-learn warning: --forget requires read/write access to the database, and is incompatible with --no-rebuild\n";
+  }
+
+  if (defined $opt{'old_format'}) {
+    #Format specified in the 2.5x form of --dir, --file, --mbox or --single.
+    #Convert it to the new behavior:
+    if($opt{'old_format'} eq 'single') {
+      push (@ARGV, '-');
+    }
   }
 
   # create the tester factory
   $spamtest = new Mail::SpamAssassin ({
-    rules_filename	=> $opt{'config-file'},
-    userprefs_filename  => $opt{'prefs-file'},
+    rules_filename      => $opt{'configpath'},
+    site_rules_filename => $opt{'siteconfigpath'},
+    userprefs_filename  => $opt{'prefspath'},
     debug               => defined($opt{'debug-level'}),
     local_tests_only    => 1,
     dont_copy_prefs     => 1,
@@ -88,8 +110,58 @@ sub cmdline_run {
 
   $spamtest->init (1);
 
+  # Add a default prefix if the path is a directory
+  if (defined $bayes_override_path && -d $bayes_override_path) {
+    $bayes_override_path = File::Spec->catfile($bayes_override_path, 'bayes');
+  }
+
+  if (defined $opt{'dump'}) {
+    my($magic, $toks);
+
+    if ($opt{'dump'} eq 'all' || $opt{'dump'} eq '') {	# show us all tokens!
+      ($magic, $toks) = (1,1);
+    }
+    elsif ($opt{'dump'} eq 'magic') {		# show us magic tokens only
+      ($magic, $toks) = (1,0);
+    }
+    elsif ($opt{'dump'} eq 'data') {		# show us data tokens only
+      ($magic, $toks) = (0,1);
+    }
+    else {					# unknown option
+      warn "Unknown dump option '".$opt{'dump'}."'\n";
+      $spamtest->finish_learner();
+      return 1;
+    }
+
+    # kluge to support old check_bayes_db operation
+    if ( defined $bayes_override_path ) {
+      # init() above ties to the db r/o and leaves it that way
+      # so we need to untie before dumping (it'll reopen)
+      $spamtest->finish_learner();
+      $spamtest->{conf}->{bayes_path} = $bayes_override_path;
+    }
+
+    $spamtest->dump_bayes_db($magic, $toks, $opt{'regexp'});
+    $spamtest->finish_learner();
+    return 0;
+  }
+
+  if (defined $opt{'import'}) {
+    if ( defined $bayes_override_path ) {
+      # init() above ties to the db r/o and leaves it that way
+      # so we need to untie before dumping (it'll reopen)
+      $spamtest->finish_learner();
+      $spamtest->{conf}->{bayes_path} = $bayes_override_path;
+    }
+
+    my $ret = $spamtest->{bayes_scanner}->{store}->upgrade_old_dbm_files();
+    $spamtest->finish_learner();
+    return (!(defined $ret && $ret == 2));
+  }
+
   $spamtest->init_learner({
       force_expire	=> $opt{'force-expire'},
+      learn_to_journal	=> $opt{'norebuild'},
       wait_for_lock	=> 1,
       caller_will_untie	=> 1
   });
@@ -110,6 +182,13 @@ sub cmdline_run {
     srand ($opt{'randseed'});
   }
 
+  # sync the journal first if we're going to go r/w so we make sure to
+  # learn everything before doing anything else.
+  #
+  if (!$opt{norebuild}) {
+    $spamtest->rebuild_learner_caches();
+  }
+
   # run this lot in an eval block, so we can catch die's and clear
   # up the dbs.
   eval {
@@ -120,6 +199,9 @@ sub cmdline_run {
       open (F, $opt{folders}) || die $!;
       while (<F>) {
 	chomp;
+	if (/^(?:ham|spam):/) {
+	  push(@targets, $_);
+	}
 	target($_);
       }
       close (F);
@@ -127,6 +209,11 @@ sub cmdline_run {
 
     # add leftover args as targets
     foreach (@ARGV) { target($_); }
+
+    #No arguments means they want stdin:
+    if($#targets < 0) {
+      target('-');
+    }
 
     my $iter = new Mail::SpamAssassin::ArchiveIterator ({
 	'opt_j' => 1,
@@ -136,6 +223,7 @@ sub cmdline_run {
 
     $iter->set_functions(\&wanted, sub { });
     $messagecount = 0;
+    $learnedcount = 0;
 
     eval {
       $iter->run (@targets);
@@ -143,11 +231,7 @@ sub cmdline_run {
     if ($@) { die $@ unless ($@ =~ /HITLIMIT/); }
 
     print STDERR "\n" if ($opt{showdots});
-    print "Learned from $messagecount messages.\n";
-
-    if (!$opt{norebuild}) {
-      $spamtest->rebuild_learner_caches();
-    }
+    print "Learned from $learnedcount message(s) ($messagecount message(s) examined).\n";
   };
 
   if ($@) {
@@ -167,13 +251,11 @@ sub killed {
 
 sub target  {
   my ($target) = @_;
-  if (!defined($opt{'format'})) {
-    warn "please specify target type with --dir, --file, or --mbox: $target\n";
-  }
-  else {
-    my $class = ($isspam ? "spam" : "ham");
-    push (@targets, "$class:" . $opt{'format'} . ":$target");
-  }
+
+  my $class = ($isspam ? "spam" : "ham");
+  my $format = (defined($opt{'format'}) ? $opt{'format'} : "detect");
+
+  push (@targets, "$class:$format:$target");
 }
 
 ###########################################################################
@@ -188,12 +270,13 @@ sub wanted {
     }
   }
 
-  if (defined($messagelimit) && $messagecount > $messagelimit)
+  if (defined($messagelimit) && $learnedcount > $messagelimit)
 					{ die 'HITLIMIT'; }
 
+  $messagecount++;
   my $ma = Mail::SpamAssassin::NoMailAudit->new ('data' => $dataref);
 
-  if ($ma->get ("X-Spam-Status")) {
+  if ($ma->get ("X-Spam-Checker-Version")) {
     my $newtext = $spamtest->remove_spamassassin_markup($ma);
     my @newtext = split (/^/m, $newtext);
     $dataref = \@newtext;
@@ -201,10 +284,10 @@ sub wanted {
   }
 
   $ma->{noexit} = 1;
-  my $status = $spamtest->learn ($ma, $id, $isspam, $forget);
+  my $status = $spamtest->learn ($ma, undef, $isspam, $forget);
 
   if ($status->did_learn()) {
-    $messagecount++;
+    $learnedcount++;
   }
 
   $status->finish();

@@ -33,7 +33,7 @@ else
   EXTRALIBS = -lm
 endif
 
-all: evolve
+all: badrules evolve
 
 evolve: tmp/tests.h craig-evolve.c
 	$(CC) -Wall $(OPT) $(USE_MPI) -DWL=2 -DOPTIMIZE -L$(PGALIB) -I$(PGAINC) craig-evolve.c -o evolve -lpgaO $(EXTRALIBS)
@@ -47,6 +47,9 @@ tmp/ranges.data: tmp/.created freqs score-ranges-from-freqs
 
 freqs: spam.log ham.log
 	./hit-frequencies -x -p -s $(SCORESET) > freqs
+
+badrules: freqs
+	./lint-rules-from-freqs < freqs > badrules
 
 tmp/.created:
 	-mkdir tmp

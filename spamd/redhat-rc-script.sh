@@ -18,10 +18,10 @@
 [ ${NETWORKING} = "no" ] && exit 0
 
 # Source spamd configuration.
-if [ -f /etc/sysconfig/spamd ] ; then
-        . /etc/sysconfig/spamd
+if [ -f /etc/sysconfig/spamassassin ] ; then
+        . /etc/sysconfig/spamassassin
 else
-        OPTIONS="-d -c -a"
+        SPAMDOPTIONS="-d -c -a -m5 -H"
 fi
 
 [ -f /usr/bin/spamd -o -f /usr/local/bin/spamd ] || exit 0
@@ -32,10 +32,10 @@ case "$1" in
   start)
 	# Start daemon.
 	echo -n "Starting spamd: "
-	daemon spamd $OPTIONS
+	daemon spamd $SPAMDOPTIONS
 	RETVAL=$?
         echo
-        [ $RETVAL = 0 ] && touch /var/lock/subsys/spamd
+        [ $RETVAL = 0 ] && touch /var/lock/subsys/spamassassin
         ;;
   stop)
         # Stop daemons.
@@ -43,14 +43,14 @@ case "$1" in
         killproc spamd
         RETVAL=$?
         echo
-        [ $RETVAL = 0 ] && rm -f /var/lock/subsys/spamd
+        [ $RETVAL = 0 ] && rm -f /var/lock/subsys/spamassassin
         ;;
   restart)
         $0 stop
         $0 start
         ;;
   condrestart)
-       [ -e /var/lock/subsys/spamd ] && $0 restart
+       [ -e /var/lock/subsys/spamassassin ] && $0 restart
        ;;
   status)
 	status spamd

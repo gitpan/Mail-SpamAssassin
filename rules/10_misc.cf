@@ -14,34 +14,28 @@
 #
 ###########################################################################
 
-# Default template. Try to keep it under 76 columns (inside the the dots below).
-# Bear in mind that EVERY line will be prefixed with "SPAM: " in order to make
-# it clear what's been added, and allow other filters to *remove* spamfilter
-# modifications, so you lose 6 columns right there.
-#
-#      ......................................................................
+# Default template. Try to keep it under 78 columns (inside the the dots below).
+#      ........................................................................
 clear_report_template
-report This mail is probably spam.  The original message has been attached
-report along with this report, so you can recognize or block similar unwanted
-report mail in future.  See http://spamassassin.org/tag/ for more details.
+report Spam detection software, running on the system "_HOSTNAME_", has
+report identified this incoming email as possible spam.  The original message
+report has been attached to this so you can view it (if it isn't spam) or block
+report similar future email.  If you have any questions, see
+report _CONTACTADDRESS_ for details.
 report 
 report Content preview:  _PREVIEW_
 report 
 report Content analysis details:   (_HITS_ points, _REQD_ required)
+report
+report " pts rule name              description"
+report  ---- ---------------------- --------------------------------------------------
 report _SUMMARY_
-#      ......................................................................
+#      ........................................................................
 
-###########################################################################
+# A 'contact address' users should contact for more info. (replaces
+# _CONTACTADDRESS_ above if present)
+report_contact	@@CONTACT_ADDRESS@@
 
-# Terse report template.
-#
-#            ......................................................................
-clear_terse_report_template
-terse_report ---- Start SpamAssassin results
-terse_report _HITS_ points, _REQD_ required;
-terse_report _SUMMARY_
-terse_report ---- End of SpamAssassin results
-#            ......................................................................
 
 ###########################################################################
 # and now, a template for spam-trap responses.  If the first few lines
@@ -74,7 +68,7 @@ spamtrap
 #
 #             ......................................................................
 clear_unsafe_report_template
-unsafe_report The original message did not contain plain text, and may be unsafe to
+unsafe_report The original message was not completely plain text, and may be unsafe to
 unsafe_report open with some email clients; in particular, it may contain a virus,
 unsafe_report or confirm that your address can receive spam.  If you wish to view
 unsafe_report it, it may be safer to save it to a file and open it with an editor.
@@ -111,6 +105,30 @@ unsafe_report it, it may be safer to save it to a file and open it with an edito
 # auto_whitelist_path        /var/spool/spamassassin/auto-whitelist
 # auto_whitelist_file_mode   0666
 
+##########################################################################
+# Headers to be added to mail (can be overriden by users in
+# ~/.spamassassin/user_prefs)
+# Make sure the header stays entirely on one line here
+
+clear_headers
+
+#X-Spam-Checker-Version: SpamAssassin 2.60-cvs (1.188-2003-05-24-exp)
+add_header all Checker-Version SpamAssassin _VERSION_ (_SUBVERSION_) on _HOSTNAME_
+
+#X-Spam-Flag: YES
+add_header spam Flag _YESNOCAPS_
+
+#X-Spam-Level: *************
+add_header all Level _STARS(*)_
+
+#X-Spam-Status: Yes, hits=14.0 required=5.0 tests=BAYES_99,CALL_FREE
+#        DATE_IN_PAST_12_24,DCC_CHECK,DRASTIC_REDUCED,FROM_HAS_MIXED_NUMS
+#        FROM_HAS_MIXED_NUMS3,HOME_EMPLOYMENT,INVALID_DATE,INVALID_MSGID
+#        LINES_OF_YELLING,MSGID_HAS_NO_AT,NO_REAL_NAME,ONCE_IN_LIFETIME
+#        REMOVE_SUBJ,SMTPD_IN_RCVD,T_INVALID_DATE_2,T_INVALID_DATE_HMS
+#        UNDISC_RECIPS autolearn=spam version=2.60-cvs
+add_header all Status "_YESNO_, hits=_HITS_ required=_REQD_ tests=_TESTS_ autolearn=_AUTOLEARN_ version=_VERSION_"
+
 ###########################################################################
 # Default prefs values: users can override these in their 
 # ~/.spamassassin/user_prefs files.
@@ -129,20 +147,22 @@ ok_languages            all
 
 # Mail which scores outside this range will be fed back into SpamAssassin's
 # learning system automatically, to train the Bayesian scanner.
-auto_learn_threshold_nonspam	-2
-auto_learn_threshold_spam	15
+bayes_auto_learn_threshold_nonspam	0.1
+bayes_auto_learn_threshold_spam		12.0
 
 # Set this to 0 to turn off auto-learning.
-auto_learn			1
+bayes_auto_learn			1
+
+# report_safe controls the markup of spam. If you set it to 0, the message
+# body of spam messages will not be modified
+report_safe           1
 
 # Some common prefs settings can be set here, to take effect site-wide
 # unless the user override them. See the user_prefs.template file for
 # explanations.
 
 # rewrite_subject       0
-# report_safe           1
 # subject_tag           *****SPAM*****
-# use_terse_report      0
 # skip_rbl_checks       0
 # check_mx_attempts     2
 # check_mx_delay        5

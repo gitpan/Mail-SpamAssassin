@@ -2,13 +2,27 @@
 Important Note For Users Upgrading From Earlier Versions
 --------------------------------------------------------
 
+Due to major reliability shortcomings in the database support libraries
+other than DB_File, we now require that the DB_File module be installed to
+use SpamAssassin's Bayes rules.
+
+SpamAssassin will still work without DB_File installed, but the Bayes
+support will be disabled.
+
+If you install DB_File and wish to import old Bayes database data, each
+user with a Bayes db should run "sa-learn --import" to copy old entries
+from the other formats into a new DB_File file.
+
+
+Note For Users Upgrading From SpamAssassin 2.3x or 2.4x
+-------------------------------------------------------
+
 SpamAssassin no longer includes code to handle local mail delivery, as it
 was not reliable enough, compared to procmail.  So now, if you relied on
 spamassassin to write the mail into your mail folder, you'll have to
-change your setup to use procmail as detailed below.
-
-If you used spamassassin to filter your mail and then something else wrote
-it into a folder for you, then you should be fine.
+change your setup to use procmail as detailed below.  If you used
+spamassassin to filter your mail and then something else wrote it into a
+folder for you, then you should be fine.
 
 Support for versions of the optional Mail::Audit module before 1.9 is no
 longer included.
@@ -16,12 +30,13 @@ longer included.
 The default mode of tagging (which used to be ***SPAM*** in the subject
 line) no longer takes place.  Instead the message is rewritten.
 
-Using Razor version 1 is no longer recommended; it will be dropped in
-a future release.  Please upgrade to Razor version 2.
+Using Razor version 1 is no longer supported.  Please upgrade to Razor
+version 2 and also read the instructions located in the Razor2.patch
+file.
 
 
-Installing SpamAssassin
------------------------
+Installing or Upgrading SpamAssassin
+------------------------------------
 
 The easiest way to do this is using CPAN.pm, like so:
 
@@ -40,7 +55,7 @@ http://spamassassin.org/ , and install that, like so:
 	perl Makefile.PL
 	[option: add -DSPAMC_SSL to $CFLAGS to build an SSL-enabled spamc]
 	make
-	make install				[as root]
+	make install                            [as root]
 
 To install as non-root, do something like this:
 
@@ -54,8 +69,15 @@ To install as non-root, do something like this:
 If you are running AFS, you may also need to specify INSTALLSITELIB and
 SITELIBEXP.
 
-This will install the SpamAssassin modules and rules into the ~/sausr
-and ~/saetc directories off your home directory.
+This will install the SpamAssassin modules and rules below the ~/sausr
+and ~/saetc directories off your home directory. Please see the file
+PACKAGING, sections "Changing paths in the Makefile" and "Setting further
+options on the command line" for more informations on available command
+line variables.
+
+Note that you can upgrade SpamAssassin using these instructions, as long
+as you take care to read the caveats at the top of this file.   Upgrading
+will not delete your learnt Bayes data or local rule modifications.
 
 
 SunOS Note
@@ -124,6 +146,10 @@ target:
 	make
 	make install
 
+Please see the file PACKAGING, sections "Changing paths in the Makefile"
+and "Setting further options on the command line" for more informations
+on available command line variables.
+
 4. If you already use procmail, skip to step 6.  If not, ensure procmail
 is installed using "which procmail" or install it from www.procmail.org.
 
@@ -171,6 +197,8 @@ These modules are required for spamassassin to build:
     Without the proper version the build will fail to create the Makefile.
     This is included in Perl versions 5.6 and later.
 
+    Version 6.16 or later is recommended.
+
 
 These modules are required for spamassassin to run:
 
@@ -179,12 +207,15 @@ These modules are required for spamassassin to run:
     The File::Spec module is required in version 0.8 (Mar 2000) or later.
     This is included in Perl versions 5.6 and later.
 
-  - Pod::Usage           (from CPAN, or included in Perl 5.6 and higher)
+  - Pod::Usage >= 1.10   (from CPAN, or included in Perl 5.6 and higher)
 
     The Pod::Usage module is required.  This is included in Perl versions
-    5.6 and later.
+    5.6 and later.  The modules shipped with earlier versions  are buggy
+    and need to be upgraded.
 
-  - HTML::Parser >= 3.0  (from CPAN)
+  - HTML::Parser >= 3.24 (from CPAN)
+
+    Version 3.29 or later is recommended.
 
     HTML is used for an ever-increasing amount of email so this dependency
     is unavoidable.  Run "perldoc -q html" for additional information.
@@ -192,10 +223,18 @@ These modules are required for spamassassin to run:
     If you use Debian, you can get HTML::Parser from the libhtml-parser-perl
     package.
 
-  - Sys::Syslog    (from CPAN)
+  - Sys::Syslog          (from CPAN)
 
     This is a required module if you use spamd.  spamd logs information
     about scanned messages to syslog using this module.
+
+    Note: perl versions 5.003_07 and later should have Sys::Syslog already
+    installed.  You can easily test this by running:
+    perl -MSys::Syslog -e 1
+
+    If it generates an error, you need to install the module.  If the
+    command just returns, you should be ok.
+
 
 Optional Additional Modules
 ---------------------------
@@ -240,9 +279,20 @@ skipped.
     still work well without it.
 
     Note that Razor support does not seem to work on Windows systems.
-    Win32 users should disable the Razor tests using "score RAZOR2_CHECK
-    0".
+    Win32 users should disable the Razor tests using "score RAZOR2_CHECK 0".
+
+    You (and any users who use Razor) will need to register an account
+    to do so, like this:
+
+	# razor-client          [creates symbolic links]
+	# razor-admin -create   [creates the razor home]
+	# razor-admin -register [registers an account]
     
+    If you want to use Razor and you are using Vipul's Razor 2.22 or higher
+    (until at least 2.36), you need to apply a small patch to use Razor in
+    "taint mode" which is now the default in SpamAssassin.  The instructions
+    are located in the Razor2.patch file.
+
 
   - DCC    http://www.rhyolite.com/anti-spam/dcc/
 
@@ -254,15 +304,15 @@ skipped.
     http://www.rhyolite.com/anti-spam/dcc/source/dcc-dccproc.tar.Z and
     perform the following steps:
 
-    # tar xfvz dcc-dccproc.tar.Z
-    # cd dcc-dccproc-X.X.X
-    # ./configure && make && make install
-    # cdcc 'info'
+	# tar xfvz dcc-dccproc.tar.Z
+	# cd dcc-dccproc-X.X.X
+	# ./configure && make && make install
+	# cdcc 'info'
 
     The last command will give some output. One line of it should contain
     something like:
 
-        dcc.rhyolite.com,-         RTT+0 ms    anon
+	dcc.rhyolite.com,-         RTT+0 ms    anon
 
     Note that MIMEDefang users may need to set the 'dcc_path'
     configuration setting, since MIMEDefang does not set a PATH by
@@ -323,6 +373,7 @@ skipped.
 	install Mail::Audit
 	quit
 
+
   - Digest::SHA1  (from CPAN)
 
     The Digest::SHA1 module will speed up some cryptographic hash tests,
@@ -331,10 +382,20 @@ skipped.
     If you use Debian, you can get Digest::SHA1 from the libdigest-sha1-perl
     package.
 
+
   - Net::Ident   (from CPAN)
 
     If you plan to use the --auth-ident option to spamd, you will need
     to install this module.
+
+
+  - IO::Socket::SSL	(from CPAN)
+
+    If you wish to use SSL encryption to communicate between spamc and
+    spamd (the --ssl option to spamd), you need to install this
+    module. (You will need the OpenSSL libraries and use the
+    ENABLE_SSL="yes" argument to Makefile.PL to build and run an SSL
+    compatibile spamc.)
 
 
 What Next?

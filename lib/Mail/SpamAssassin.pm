@@ -79,26 +79,22 @@ BEGIN {
 
 use vars qw{
   @ISA $VERSION $SUB_VERSION @EXTRA_VERSION $IS_DEVEL_BUILD $HOME_URL
-  $DEBUG $TIMELOG
+  $DEBUG
   @default_rules_path @default_prefs_path
   @default_userprefs_path @default_userstate_dir
   @site_rules_path
 };
 
-$VERSION = "2.55";              # update after release
+$VERSION = "2.60";              # update after release
 #$IS_DEVEL_BUILD = 1;            # change for release versions
 
-# Create the hash so that it really points to something, otherwise we can't
-# get a reference to it -- Marc
-$TIMELOG->{dummy}=0;
 @ISA = qw();
 
 # SUB_VERSION is now <revision>-<yyyy>-<mm>-<dd>-<state>
-$SUB_VERSION = lc(join('-', (split(/[ \/]/, '$Id: SpamAssassin.pm,v 1.174.2.19 2003/05/19 22:34:23 felicity Exp $'))[2 .. 5, 8]));
+$SUB_VERSION = lc(join('-', (split(/[ \/]/, '$Id: SpamAssassin.pm,v 1.212 2003/09/23 00:08:04 felicity Exp $'))[2 .. 5, 8]));
 
 # If you hacked up your SA, add a token to identify it here. Eg.: I use
 # "mss<number>", <number> increasing with every hack.
-# Deersoft might want to use "pro" :o)
 @EXTRA_VERSION = qw();
 
 if (defined $IS_DEVEL_BUILD && $IS_DEVEL_BUILD) {
@@ -165,6 +161,10 @@ following attribute-value pairs to the constructor.
 
 The filename to load spam-identifying rules from. (optional)
 
+=item site_rules_filename
+
+The filename to load site-specific spam-identifying rules from. (optional)
+
 =item userprefs_filename
 
 The filename to load preferences from. (optional)
@@ -177,15 +177,16 @@ The directory user state is stored in. (optional)
 
 The text of all rules and preferences.  If you prefer not to load the rules
 from files, read them in yourself and set this instead.  As a result, this will
-override the settings for C<rules_filename> and C<userprefs_filename>.
+override the settings for C<rules_filename>, C<site_rules_filename>,
+and C<userprefs_filename>.
 
 =item languages_filename
 
 If you want to be able to use the language-guessing rule
-C<UNDESIRED_LANGUAGE_BODY>, and are using C<config_text> instead of
-C<rules_filename> and C<userprefs_filename>, you will need to set this.  It
-should be the path to the B<languages> file normally found in the SpamAssassin
-B<rules> directory.
+C<UNWANTED_LANGUAGE_BODY>, and are using C<config_text> instead of
+C<rules_filename>, C<site_rules_filename>, and C<userprefs_filename>, you will
+need to set this.  It should be the path to the B<languages> file normally
+found in the SpamAssassin B<rules> directory.
 
 =item local_tests_only
 
@@ -216,9 +217,9 @@ effective UID under UNIX).
 
 =back
 
-If none of C<rules_filename>, C<userprefs_filename>, or C<config_text> is set,
-the C<Mail::SpamAssassin> module will search for the configuration files in the
-usual installed locations.
+If none of C<rules_filename>, C<site_rules_filename>, C<userprefs_filename>, or
+C<config_text> is set, the C<Mail::SpamAssassin> module will search for the
+configuration files in the usual installed locations.
 
 =cut
 
@@ -232,6 +233,10 @@ sub new {
 
   $DEBUG->{enabled} = 0;
   if (defined $self->{debug} && $self->{debug} > 0) { $DEBUG->{enabled} = 1; }
+
+  # if the libs are installed in an alternate location, and the caller
+  # didn't set PREFIX, we should have an estimated guess ready ...
+  $self->{PREFIX} ||= '@@PREFIX@@';  # substituted at 'make' time
 
   # This should be moved elsewhere, I know, but SA really needs debug sets 
   # I'm putting the intialization here for now, move it if you want
@@ -247,8 +252,8 @@ sub new {
   $DEBUG->{dcc}=0;
   $DEBUG->{pyzor}=0;
   $DEBUG->{rbl}=0;
-  $DEBUG->{timelog}=0;
   $DEBUG->{dnsavailable}=-2;
+  $DEBUG->{bayes}=0;
   # Bitfield:
   # header regex: 1 | body-text: 2 | uri tests: 4 | raw-body-text: 8
   # full-text regexp: 16 | run_eval_tests: 32 | run_rbl_eval_tests: 64
@@ -286,6 +291,76 @@ sub new {
 
 ###########################################################################
 
+=item $f->trim_rules ($regexp)
+
+Remove all rules that don't match the given regexp (or are sub-rules of
+meta-tests that match the regexp).
+
+=cut
+
+my @rule_types = ("body_tests", "uri_tests", "uri_evals",
+                  "head_tests", "head_evals", "body_evals", "full_tests",
+                  "full_evals", "rawbody_tests", "rawbody_evals",
+                  "meta_tests");
+
+sub trim_rules {
+  my ($self, $regexp) = @_;
+
+  my @all_rules;
+
+  foreach my $rule_type (@rule_types) {
+    push(@all_rules, keys(%{$self->{conf}->{$rule_type}}));
+  }
+
+  my @rules_to_keep = grep(/$regexp/, @all_rules);
+
+  if (@rules_to_keep == 0) {
+    die "trim_rules(): All rules excluded, nothing to test.\n";
+  }
+
+  my @meta_tests    = grep(/$regexp/, keys(%{$self->{conf}->{meta_tests}}));
+  foreach my $meta (@meta_tests) {
+    push(@rules_to_keep, add_meta_depends($self->{conf}, $meta))
+  }
+
+  my %rules_to_keep_hash = ();
+
+  foreach my $rule (@rules_to_keep) {
+    $rules_to_keep_hash{$rule} = 1;
+  }
+
+  foreach my $rule_type (@rule_types) {
+    foreach my $rule (keys(%{$self->{conf}->{$rule_type}})) {
+      delete $self->{conf}->{$rule_type}->{$rule}
+        if (!$rules_to_keep_hash{$rule});
+    }
+  }
+} # trim_rules()
+
+sub add_meta_depends {
+  my ($conf, $meta) = @_;
+
+  my @rules = ();
+
+  my @tokens = $conf->{meta_tests}->{$meta} =~ m/(\w+)/g;
+
+  @tokens = grep(!/^\d+$/, @tokens);
+  # @tokens now only consists of sub-rules
+
+  foreach my $token (@tokens) {
+    push(@rules, $token);
+
+    # If the sub-rule is a meta-test, recurse
+    if ($conf->{meta_tests}->{$token}) {
+      push(@rules, add_meta_depends($conf, $token));
+    }
+  } # foreach my $token (@tokens)
+
+  return @rules;
+} # add_meta_depends()
+
+###########################################################################
+
 =item $status = $f->check ($mail)
 
 Check a mail, encapsulated in a C<Mail::Audit> or
@@ -305,19 +380,11 @@ sub check {
   my ($self, $mail_obj) = @_;
   local ($_);
 
-  timelog("Starting SpamAssassin Check", "SAfull", 1);
   $self->init(1);
-  timelog("Init completed");
   my $mail = $self->encapsulate_mail_object ($mail_obj);
   my $msg = Mail::SpamAssassin::PerMsgStatus->new($self, $mail);
-  chomp($TIMELOG->{mesgid} = ($mail_obj->get("Message-Id") || 'nomsgid'));
-  $TIMELOG->{mesgid} =~ s#<(.*)>#$1#;
   # Message-Id is used for a filename on disk, so we can't have '/' in it.
-  $TIMELOG->{mesgid} =~ s#/#-#g;
-  timelog("Created message object, checking message", "msgcheck", 1);
   $msg->check();
-  timelog("Done checking message", "msgcheck", 2);
-  timelog("Done running SpamAssassin", "SAfull", 2);
   $msg;
 }
 
@@ -355,28 +422,21 @@ sub learn {
   my ($self, $mail_obj, $id, $isspam, $forget) = @_;
   local ($_);
 
-  timelog("Starting SpamAssassin Learn", "SAfull", 1);
   require Mail::SpamAssassin::PerMsgLearner;
   $self->init(1);
-  timelog("Init completed");
   my $mail = $self->encapsulate_mail_object ($mail_obj);
-  my $msg = Mail::SpamAssassin::PerMsgLearner->new($self, $mail, $id);
-  $TIMELOG->{mesgid} = $id;
-  $TIMELOG->{mesgid} =~ s#/#-#g;
-  timelog("Created message object, learning from message", "msglearn", 1);
+  my $msg = Mail::SpamAssassin::PerMsgLearner->new($self, $mail);
 
   if ($forget) {
-    $msg->forget();
+    $msg->forget($id);
   } elsif ($isspam) {
     dbg("Learning Spam");
-    $msg->learn_spam();
+    $msg->learn_spam($id);
   } else {
     dbg("Learning Ham");
-    $msg->learn_ham();
+    $msg->learn_ham($id);
   }
 
-  timelog("Done learning from message", "msglearn", 2);
-  timelog("Done running SpamAssassin", "SAfull", 2);
   $msg;
 }
 
@@ -398,6 +458,11 @@ from the Bayes databases (by calling C<finish_learner()>) (optional, default 0).
 
 Should an expiration run be forced to occur immediately? (optional, default 0).
 
+=item learn_to_journal
+
+Should learning data be written to the journal, instead of directly to the
+databases? (optional, default 0).
+
 =item wait_for_lock
 
 Whether or not to wait a long time for locks to complete (optional, default 0).
@@ -410,9 +475,10 @@ sub init_learner {
   my $self = shift;
   my $opts = shift;
   dbg ("Initialising learner");
-  if ($opts->{force_expire}) { $self->{learn_force_expire} = 1; }
-  if ($opts->{caller_will_untie}) { $self->{learn_caller_will_untie} = 1; }
-  if ($opts->{wait_for_lock}) { $self->{learn_wait_for_lock} = 1; }
+  if (defined $opts->{force_expire}) { $self->{learn_force_expire} = $opts->{force_expire}; }
+  if (defined $opts->{learn_to_journal}) { $self->{learn_to_journal} = $opts->{learn_to_journal}; }
+  if (defined $opts->{caller_will_untie}) { $self->{learn_caller_will_untie} = $opts->{caller_will_untie}; }
+  if (defined $opts->{wait_for_lock}) { $self->{learn_wait_for_lock} = $opts->{wait_for_lock}; }
   1;
 }
 
@@ -429,7 +495,7 @@ if set to 1.
 sub rebuild_learner_caches {
   my $self = shift;
   my $opts = shift;
-  $self->{bayes_scanner}->sync($opts);
+  $self->{bayes_scanner}->sync(1,1,$opts);
   1;
 }
 
@@ -442,6 +508,18 @@ Finish learning.
 sub finish_learner {
   my $self = shift;
   $self->{bayes_scanner}->finish();
+  1;
+}
+
+=item $f->dump_bayes_db()
+
+Dump the contents of the Bayes DB
+
+=cut
+
+sub dump_bayes_db {
+  my($self,@opts) = @_;
+  $self->{bayes_scanner}->dump_bayes_db(@opts);
   1;
 }
 
@@ -557,8 +635,10 @@ sub report_as_spam {
 
   $mail = $self->encapsulate_mail_object ($mail);
 
-  # learn as spam
-  $self->learn ($mail, $mail->get_header("Message-Id"), 1, 0);
+  # learn as spam if enabled
+  if ( $self->{conf}->{bayes_learn_during_report} ) {
+    $self->learn ($mail, undef, 1, 0);
+  }
 
   require Mail::SpamAssassin::Reporter;
   $mail = Mail::SpamAssassin::Reporter->new($self, $mail, $options);
@@ -569,9 +649,9 @@ sub report_as_spam {
 
 =item $f->revoke_as_spam ($mail, $options)
 
-Revoke a mail, encapsulated in a C<Mail::Audit> object, as human-verified ham.
-This will revoke the mail message from live, collaborative, spam-blocker
-databases, allowing other users to block this message.
+Revoke a mail, encapsulated in a C<Mail::Audit> object, as human-verified ham
+(non-spam).  This will revoke the mail message from live, collaborative,
+spam-blocker databases, allowing other users to block this message.
 
 It will also submit the mail to SpamAssassin's Bayesian learner as nonspam.
 
@@ -598,7 +678,7 @@ sub revoke_as_spam {
   $mail = $self->encapsulate_mail_object ($mail);
 
   # learn as nonspam
-  $self->learn ($mail, $mail->get_header("Message-Id"), 0, 0);
+  $self->learn ($mail, undef, 0, 0);
 
   require Mail::SpamAssassin::Reporter;
   $mail = Mail::SpamAssassin::Reporter->new($self, $mail, $options);
@@ -996,8 +1076,6 @@ sub compile_now {
 
   # note: this may incur network access. Good.  We want to make sure
   # as much as possible is preloaded!
-  # Timelog uses the Message-ID for the filename on disk, so let's set that
-  # to a value easy to recognize. It'll show when spamd was restarted -- Marc
   my @testmsg = ("From: ignore\@compiling.spamassassin.taint.org\n", 
     "Message-Id:  <".time."\@spamassassin_spamd_init>\n", "\n",
     "I need to make this message body somewhat long so TextCat preloads\n"x20);
@@ -1067,8 +1145,16 @@ sub lint_rules {
 sub init {
   my ($self, $use_user_pref) = @_;
 
-  if ($self->{_initted}) { return; }
-  $self->{_initted} = 1;
+  if (defined $self->{_initted}) {
+    # seed PRNG whenever the process id changes
+    if ($self->{_initted} != $$) {
+      $self->{_initted} = $$;
+      srand;
+    }
+    return;
+  }
+
+  $self->{_initted} = $$;
 
   #fix spamd reading root prefs file
   unless (defined $use_user_pref) {
@@ -1078,16 +1164,21 @@ sub init {
   if (!defined $self->{config_text}) {
     $self->{config_text} = '';
 
-    my $fname = $self->first_existing_path (@default_rules_path);
-    $self->{rules_filename} or $self->{config_text} .= $self->read_cf ($fname, 'default rules dir');
+    my $fname = $self->{rules_filename};
+    $fname ||= $self->first_existing_path (@default_rules_path);
+    if ($fname) {
+      $self->{config_text} .= $self->read_cf ($fname, 'default rules dir');
 
-    if (-f "$fname/languages") {
-      $self->{languages_filename} = "$fname/languages";
+      if (-f "$fname/languages") {
+	$self->{languages_filename} = "$fname/languages";
+      }
     }
 
-    $fname = $self->{rules_filename};
+    $fname = $self->{site_rules_filename};
     $fname ||= $self->first_existing_path (@site_rules_path);
-    $self->{config_text} .= $self->read_cf ($fname, 'site rules dir');
+    if ($fname) {
+      $self->{config_text} .= $self->read_cf ($fname, 'site rules dir');
+    }
 
     if ( $use_user_pref != 0 ) {
       $self->get_and_create_userstate_dir();
@@ -1097,7 +1188,7 @@ sub init {
       $fname ||= $self->first_existing_path (@default_userprefs_path);
 
       if (defined $fname) {
-        if (!-f $fname && !$self->create_default_prefs($fname)) {
+        if (!-f $fname && !$self->{dont_copy_prefs} && !$self->create_default_prefs($fname)) {
           warn "Failed to create default user preference file $fname\n";
         }
       }
@@ -1123,8 +1214,10 @@ sub init {
 
   $self->{conf}->set_score_set ($set);
 
-  if ($self->{conf}->{auto_learn}) {
-    $self->init_learner({ });
+  $self->init_learner({ 'learn_to_journal' => $self->{conf}->{bayes_learn_to_journal} });
+
+  if ($self->{only_these_rules}) {
+    $self->trim_rules($self->{only_these_rules});
   }
 
   # TODO -- open DNS cache etc. if necessary
@@ -1388,66 +1481,6 @@ sub find_all_addrs_in_line {
 
   return @addrs;
 }
-
-# First argument is the message you want to log for that time
-# wheredelta is 1 for starting a split on the stopwatch, and 2 for showing the
-# instant delta (used to show how long a specific routine took to run)
-# deltaslot says which stopwatch you are working with (needs to match for begin
-# and end obviously)
-sub timelog {
-  my ($msg, $deltaslot, $wheredelta) = @_;
-  my $now=CORE::time();
-  my $tl=$Mail::SpamAssassin::TIMELOG;
-  my $dbg=$Mail::SpamAssassin::DEBUG;
-
-  if (defined($deltaslot) and ($deltaslot eq "SAfull") and defined($wheredelta) and ($wheredelta eq 1)) {
-    $tl->{'start'}=$now;
-    # Because spamd is long running, we need to close and re-open the log file
-    if ($tl->{flushedlogs}) {
-	$tl->{flushedlogs}=0;
-	$tl->{mesgid}="";
-	@{$tl->{keeplogs}} = ();
-	close(LOG);
-    }
-  } 
-
-  if (defined $wheredelta) {
-    $tl->{stopwatch}->{$deltaslot}=$now if ($wheredelta eq 1);
-    if ($wheredelta eq 2) {
-      if (not defined $tl->{stopwatch}->{$deltaslot}) {
-	warn("Error: got end of time log for $deltaslot but never got the start\n");
-      } else {
-	$msg.=sprintf(" (Delta: %.3fs)", 
-	  $now - $tl->{stopwatch}->{$deltaslot} );
-      }
-    }
-  }
-
-  $msg=sprintf("%.3f: $msg\n", $now - ($tl->{start}||0));
-
-  if (not ($tl->{logpath} and $tl->{mesgid})) {
-    push (@{$tl->{keeplogs}}, $msg);
-    print $msg if ($dbg->{timelog});
-    dbg("Log not yet opened, continuing", "timelog", -2);
-    return;
-  } 
-  if (not $tl->{flushedlogs} and $tl->{logpath} and $tl->{mesgid}) {
-    my $file="$tl->{logpath}/".sprintf("%.4f",time)."_$tl->{mesgid}";
-
-    $tl->{flushedlogs}=1;
-    dbg("Flushing logs to $file", "timelog", -2);
-    open (LOG, ">>$file") or warn("Can't open $file: $!");
-
-    while (defined ($_ = shift(@{$tl->{keeplogs}})))
-    {
-      print LOG $_;
-    }
-    dbg("Done flushing logs", "timelog", -2);
-  }
-  print LOG $msg;
-  print $msg if ($dbg->{timelog});
-}
-
 
 # Only the first argument is needed, and it can be a reference to a list if
 # you want

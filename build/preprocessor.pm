@@ -11,6 +11,7 @@ use vars qw(
   $Is_VMS
 );
 
+# taken from ExtUtils::Install version 1.30
 use ExtUtils::Install;
 @ISA = qw(ExtUtils::Install);
 

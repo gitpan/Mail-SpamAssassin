@@ -5,19 +5,18 @@
 
 #%include        /usr/lib/rpm/macros.perl
 
-%define perl_archlib %(eval "`%{__perl} -V:installarchlib`"; echo "$installarchlib")
 %define perl_sitelib %(eval "`%{__perl} -V:installsitelib`"; echo "$installsitelib")
-%define perl_sitearch %(eval "`%{__perl} -V:installsitearch`"; echo "$installsitearch")
 
 %define pdir    Mail
 %define pnam    SpamAssassin
+%define debug_package %{nil}
 
 Summary:        a spam filter for email which can be invoked from mail delivery agents
 Summary(pl):    Filtr antyspamowy, przeznaczony dla programów dostarczaj±cych pocztê (MDA)
 
 Group:          Applications/Mail
-%define version 2.55
-%define real_version 2.55
+%define version 2.60
+%define real_version 2.60
 %define release 1
 
 %define name    spamassassin
@@ -105,22 +104,21 @@ aplikacji do czytania poczty.
 %setup -q -n %{pdir}-%{pnam}-%{real_version}
 
 %build
-%{__perl} Makefile.PL INST_PREFIX=%{_prefix} INST_SYSCONFDIR=%{_sysconfdir} PREFIX=$RPM_BUILD_ROOT/%{_prefix} SYSCONFDIR=$RPM_BUILD_ROOT/%{_sysconfdir} < /dev/null
-# now override the PREFIX setting to not use %buildroot%. MakeMaker
-# does not have a better way to do this, it seems...
-%{__make} PREFIX=%{_prefix}
+%{__perl} Makefile.PL PREFIX=%{_prefix} SYSCONFDIR=%{_sysconfdir} DESTDIR=$RPM_BUILD_ROOT < /dev/null
+%{__make}
 %{__make} spamd/libspamc.so
-# make test
 
 %install
 [ "$RPM_BUILD_ROOT" != "/" ] && rm -rf $RPM_BUILD_ROOT
-%makeinstall PREFIX=%buildroot/%{_prefix} \
-        INSTALLMAN1DIR=%buildroot/%{_mandir}/man1 \
-	INSTALLMAN3DIR=%buildroot/%{_mandir}/man3 \
-	INSTALLSITEMAN1DIR=%buildroot/%{_mandir}/man1 \
-	INSTALLSITEMAN3DIR=%buildroot/%{_mandir}/man3 \
-	INSTALLVENDORMAN1DIR=%buildroot/%{_mandir}/man1 \
-	INSTALLVENDORMAN3DIR=%buildroot/%{_mandir}/man3
+# Specify the man dir locations since Perl sometimes gets it wrong... :(
+%makeinstall \
+	INSTALLMAN1DIR=%{_mandir}/man1 \
+	INSTALLMAN3DIR=%{_mandir}/man3 \
+	INSTALLSITEMAN1DIR=%{_mandir}/man1 \
+	INSTALLSITEMAN3DIR=%{_mandir}/man3 \
+	INSTALLVENDORMAN1DIR=%{_mandir}/man1 \
+	INSTALLVENDORMAN3DIR=%{_mandir}/man3
+
 install -d %buildroot/%{initdir}
 install -d %buildroot/%{_includedir}
 install -m 0755 spamd/redhat-rc-script.sh %buildroot/%{initdir}/spamassassin
@@ -155,20 +153,37 @@ mkdir -p %{buildroot}/etc/mail/spamassassin
 [ "$RPM_BUILD_ROOT" != "/" ] && rm -rf $RPM_BUILD_ROOT
 
 %post
-if [ $1 = 1 ]; then
-        /sbin/chkconfig --add spamassassin
+/sbin/chkconfig --add spamassassin
+
+# older versions used /etc/sysconfig/spamd whereas it should have been
+# spamassassin, so fix it here
+if [ -f /etc/sysconfig/spamd ]; then
+  %{__sed} -e 's/^OPTIONS=/SPAMDOPTIONS=/' /etc/sysconfig/spamd > /etc/sysconfig/spamassassin
+  %{__mv} /etc/sysconfig/spamd /etc/sysconfig/spamassassin.rpmold
+fi
+# If spamd is running, let's be sure to change the lock file as well ...
+if [ -f /var/lock/subsys/spamd ]; then
+  %{__mv} /var/lock/subsys/spamd /var/lock/subsys/spamassassin
 fi
 /sbin/service spamassassin condrestart
 
 %preun
 if [ $1 = 0 ]; then
-	/sbin/service spamassassin stop
-        /sbin/chkconfig --del spamassassin
+    /sbin/service spamassassin stop >/dev/null 2>&1
+    /sbin/chkconfig --del spamassassin
+fi
+
+%postun
+if [ "$1" -ge "1" ]; then
+    /sbin/service spamassassin condrestart > /dev/null 2>&1
 fi
 
 %changelog
-* Sun May 18 2003 Theo Van Dinter <felicity@kluge.net> 2.55-1
-- updated to 2.55
+* Thu Sep 09 2003 Malte S. Stretz <spamassassin-contrib@msquadrat.de>
+- take advantage of the new simplified build system
+
+* Wed May 28 2003 Theo Van Dinter <felicity@kluge.net> 2.60-1
+- updated to 2.60
 
 * Thu Apr 03 2003 Theo Van Dinter <felicity@kluge.net> 2.54-1
 - updated to 2.54

@@ -37,7 +37,7 @@ lang it describe ASCII_FORM_ENTRY   Contiene un form con caratteri ASCII
 lang it describe ASKS_BILLING_ADDRESS   Richiede un indirizzo per la fatturazione
 lang it describe AUTO_EMAIL_REMOVAL     Contiene la frase 'Auto Email Removal'
 lang it describe BAD_HELO_WARNING       Nome incorretto usato con il comando SMTP 'HELO'
-lang it describe BASE64_ENC_TEXT        Testo del messaggio mascherato con codifica base64
+lang it describe MIME_BASE64_TEXT        Testo del messaggio mascherato con codifica base64
 lang it describe BE_AMAZED              Contiene la frase: 'be amazed'
 lang it describe BILLION_DOLLARS        Parla di molti, molti soldi
 lang it describe BILL_1618              Dichiara la conformità al decreto 1618 del senato USA
@@ -90,17 +90,15 @@ lang it describe GENTLE_FEROCITY        Contiene 'gentle ferocity'
 lang it describe GREAT_OFFER            Grande offerta
 lang it describe GUARANTEE     		Contiene la parola 'GUARANTEE' in maiuscolo 
 lang it describe HOME_EMPLOYMENT	Contiene informazioni su come lavorare a domicilio (1)
-lang it describe HR_3113                Fa riferimento alla legge anti-spam 'H.R. 3113'
+lang it describe HR_3113                Fa riferimento alla legge anti-spam 'HR 3113'
 lang it describe HTML_WITH_BGCOLOR      Email in formato HTML con sfondo non bianco
 lang it describe HTTP_CTRL_CHARS_HOST   Utilizza sequenze di controllo nell'hostname di un URL
 lang it describe HTTP_ESCAPED_HOST      Utilizza sequenze di escape %xx nell' hostname di un URL
-lang it describe HTTP_USERNAME_USED     Utilizza uno username in un URL
 lang it describe HTTP_WITH_EMAIL_IN_URL L'URL 'remove' contiene un indirizzo email
 lang it describe INVALID_DATE   L'header Date: non è corretto secondo l' RFC 2822
 lang it describe INVALID_DATE_TZ_ABSURD L'header Date: non è corretto (la timezone non esiste)
 lang it describe INVALID_MSGID  L'header Message-Id: non è valido, secondo l' RFC 2822
 lang it describe IN_ACCORDANCE_WITH_LAWS Sostiene di essere conforme alle leggi anti-spam
-lang it describe IN_REP_TO      Presente l'header In-Reply-To:
 lang it describe JODY   Contiene 'My wife, Jody'
 lang it describe KIFF   Contiene 'temple kiff'
 lang it describe LARGE_HEX     	Contiene un lungo blocco di cifre esadecimali
@@ -136,7 +134,6 @@ lang it describe OPPORTUNITY    Parla di un'opportunità unica
 lang it describe OPT_IN 	Contiene 'opt-in'
 lang it describe PENIS_ENLARGE 	Spiega come aumentare le dimensioni del proprio pene 
 lang it describe PENNIES_A_DAY         Contiene la frase 'for only pennies a day'
-lang it describe PGP_SIGNATURE  Contiene un messaggio con firma PGP
 lang it describe PLING_PLING    Il soggetto contiene molti punti esclamativi
 lang it describe PORN_4 Contiene URL in cui compaiono riferimenti alla pornografia
 lang it describe PORN_6 Fa riferimento a immagini pornografiche
@@ -145,16 +142,13 @@ lang it describe PREST_NON_ACCREDITED   Contiene la frase 'Prestigious Non-Accre
 lang it describe PRINT_FORM_SIGNATURE   Chiede la firma su di un form
 lang it describe PRODUCED_AND_SENT_OUT  Contiene una frase indicante pubblicità
 lang it describe PURE_PROFIT    Contiene 'pure profit'
-lang it describe Q_FOR_SELLER   Il soggetto contiene una domanda di eBay
-lang it describe RAZOR_CHECK    Email presente nella lista di Razor,  vedere http://razor.sf.net/
 lang it describe RCVD_IN_BL_SPAMCOP_NET Ricevuto tramite un relay presente in bl.spamcom.net
-lang it describe RCVD_IN_DUL    Ricevuto tramite un dialup spammer, visitare http://www.mail-abuse.org/dul/
+lang it describe RCVD_IN_MAPS_DUL    Ricevuto tramite un dialup spammer, visitare http://www.mail-abuse.org/dul/
 lang it describe RCVD_IN_ORBS   Ricevuto tramite un relay presente in orbs.dorkslayers.com
-lang it describe RCVD_IN_OSIRUSOFT_COM 	Ricevuto tramite un relay presente in relays.osirusoft.com
-lang it describe RCVD_IN_RBL   	Ricevuto tramite un relay RBL, visitare http://www.mail-abuse.org/rbl/
+lang it describe RCVD_IN_MAPS_RBL   	Ricevuto tramite un relay RBL, visitare http://www.mail-abuse.org/rbl/
 lang it describe RCVD_IN_RELAYS_ORDB_ORG Ricevuto tramite un relay presente in relays.ordb.org
 lang it describe RCVD_IN_RFCI   Ricevuto tramite un relay presente in ipwhois.rfc-ignorant.org
-lang it describe RCVD_IN_RSS    Ricevuto tramite un relay RSS, visitare  http://www.mail-abuse.org/rss/
+lang it describe RCVD_IN_MAPS_RSS    Ricevuto tramite un relay RSS, visitare  http://www.mail-abuse.org/rss/
 lang it describe REMOVAL_INSTRUCTIONS   Contiene istruzioni per rimuoversi da una lista
 lang it describe REMOVE_IN_QUOTES       Contiene istruzioni per rimuoversi da una lista
 lang it describe REMOVE_PAGE    Contiene un URL in cui compare 'remove'
@@ -198,6 +192,7 @@ lang it describe USER_IN_ALL_SPAM_TO   	Il destinatario è nella lista all_spam_t
 lang it describe USER_IN_BLACKLIST      Il mittente è nella black-list del'utente
 lang it describe USER_IN_MORE_SPAM_TO   Il destinatario è nella lista more_spam_to
 lang it describe USER_IN_WHITELIST      Il mittente è nella white-list dell'utente
+lang it describe USER_IN_DEF_WHITELIST  Il mittente è nella white-list dell'utente
 lang it describe USER_IN_WHITELIST_TO   Il destinatario è nella whitelist_to 
 lang it describe US_DOLLARS     Nigerian scam key phrase (million dollars)
 lang it describe VERY_SUSP_RECIPS      	Gli header To: e Cc: contengono almeno 5 destinatari simili
@@ -210,8 +205,6 @@ lang it describe WORK_AT_HOME   Contiene informazioni su come lavorare a domicil
 lang it describe WWW_CLIK4YOU_COM       Contiene frase usata nello spam
 lang it describe X_MAILER_GIBBERISH     L'header X-Mailer: contiene caratteri senza senso
 lang it describe X_MSMAIL_PRIORITY_HIGH L'header X-Msmail-Priority: definisce una priorità elevata
-lang it describe X_OSIRU_SPAMWARE_SITE  Il mittente è un sito Spamware
-lang it describe X_OSIRU_SPAM_SRC      	Il mittente è indicato da DNSBL come spammer 
 lang it describe X_PMFLAGS_PRESENT      Presente l'header X-PMFLAGS: (maiuscolo)
 lang it describe X_PRIORITY_HIGH        Messaggio ad alta priorità 
 lang it describe YAHOO_MSGID_ADDED      Il Message-Id è stato aggiunto da Yahoo!, e ciò è cosa buona
@@ -232,7 +225,6 @@ lang it describe US_DOLLARS_2           Nigerian scam key phrase ($NNN.N m/USDNN
 lang it describe US_DOLLARS_3       	Nigerian scam key phrase ($NN,NNN,NNN.NN)
 lang it describe FRONTPAGE		Mail creata con Frontpage
 lang it describe SAFEGUARD_NOTICE	Contiene testo generato da programma di spam non registrato
-lang it describe EVITE			Contiene un riferimento a 'evite.citysearch.com'
 lang it describe READ_TO_END            Contiene un invito a leggere il messaggio fino alla fine
 lang it describe ALL_NATURAL            Offre un prodotto naturale al 100%
 lang it describe MONEY_BACK             Assicura ritorno economico
@@ -246,12 +238,9 @@ lang it describe NOT_INTENDED           Esclusi gli abitanti di una certa zona
 lang it describe COPY_ACCURATELY        Copia accuratamente questo messaggio 
 lang it describe SEE_FOR_YOURSELF       Contiene 'See for yourself'
 lang it describe FROM_STARTS_WITH_NUMS	L'header From: comincia con cifre
-lang it describe MSGID_CHARS_SPAM	L'header Message-Id: contiene caratteri che indicano spam
 lang it describe DOMAIN_SUBJECT		Il soggetto fa riferimento alla registrazione di nuovi domini
+lang it describe RCVD_IN_VISI		Ricevuto tramite un relay presente in 'relay.visi.com'
 lang it describe FORGED_JUNO_RCVD	L'header 'From: juno.com' è stato falsificato
-lang it describe BUGZILLA_BUG		Sembrerebbe un bug di Bugzilla
-lang it describe MAJORDOMO             	Mail generata da Majordomo (gestore mailing-list)
-lang it describe X_AUTH_WARNING        	Presente header X-Authentication-Warning:
 lang it describe X_MAIL_ID_PRESENT     	Presente header X-MailingID:
 lang it describe X_SERV_HOST_PRESENT   	Presente header X-ServerHost:
 lang it describe X_X_PRESENT           	Presente header X-x:
@@ -274,13 +263,12 @@ lang it describe DATE_IN_FUTURE_96_XX	La data è posteriore di 96 ore o più alla 
 lang it describe KOREAN_UCE_SUBJECT	Il soggetto contiene un tag coreano per lo spamming
 lang it describe INCREASE_SOMETHING	Contiene istruzioni su come aumentare qualcosa
 lang it describe MIME_MISSING_BOUNDARY	Manca il delimitatore della sezione MIME
-lang it describe UNDESIRED_LANGUAGE_BODY	Scritta in un linguaggio non desiderato
+lang it describe UNWANTED_LANGUAGE_BODY	Scritta in un linguaggio non desiderato
 lang it describe ORDER_NOW          Invita a ordinare subito
 lang it describe DATE_YEAR_ZERO_FIRST	Data non valida: l'anno comincia per zero
 lang it describe RCVD_IN_DSBL          Ricevuto tramite un relay presente in list.dsbl.org
 lang it describe RCVD_IN_MULTIHOP_DSBL Ricevuto tramite un relay presente in multihop.dsbl.org
 lang it describe RCVD_IN_UNCONFIRMED_DSBL      Ricevuto tramite un relay presente in unconfirmed.dsbl.org
-lang it describe PGP_SIGNATURE_2       Contiene un messaggio con firma PGP
 lang it describe TO_INVESTORS   To: contiene 'Investors@'
 lang it describe TO_MALFORMED           To: contiene un indirizzo non valido
 

@@ -5,7 +5,7 @@
  * "License".
  */
 
-#include "../config.h"
+#include "config.h"
 #include "libspamc.h"
 #include "utils.h"
 
@@ -47,10 +47,12 @@
 #if (defined(__sun__) && defined(__sparc__) && !defined(__svr4__)) /* SunOS */ \
      || (defined(__sgi))  /* IRIX */ \
      || (defined(__osf__)) /* Digital UNIX */ \
-     || (defined(hpux) || defined(__hpux)) /* HPUX */
+     || (defined(hpux) || defined(__hpux)) /* HPUX */ \
+     || (defined(_WIN32) || defined(__CYGWIN__)) /* CygWin, Win32 */
 
 extern int optind;
 extern char *optarg;
+
 #endif
 
 /* safe fallback defaults to on now - CRH */
@@ -75,21 +77,37 @@ void print_usage(void)
   printf("-h: print this help message\n");
   printf("-p port: specify port for connection [default: 783]\n");
   printf("-s size: specify max message size, any bigger and it will be returned w/out processing [default: 250k]\n");
+#ifdef SPAMC_SSL
   printf("-S: use SSL to talk to spamd\n");
+#endif
   printf("-u username: specify the username for spamd to process this message under\n");
   printf("-x: don't fallback safely - in a comms error, exit with a TEMPFAIL error code\n");
   printf("-t: timeout in seconds to read from spamd. 0 disables. [default: 600]\n\n");
+  printf("-H: randomize the IP addresses in the looked-up hostname\n");
+  printf("-U path: use UNIX domain socket with path\n");
 }
 
 int
-read_args(int argc, char **argv, char **hostname, int *port, int *max_size, char **username)
+read_args(int argc, char **argv, int *max_size, const char **username,
+	struct transport *ptrn)
 {
   int opt, i, j;
 
-  while(-1 != (opt = getopt(argc,argv,"-BcrRd:e:fhyp:t:s:u:xS")))
+  while(-1 != (opt = getopt(argc,argv,"-BcrRd:e:fhyp:t:s:u:xSHU:")))
   {
     switch(opt)
     {
+    case 'H':
+      {
+        flags |= SPAMC_RANDOMIZE_HOSTS;
+        break;
+      }
+    case 'U':
+      {
+        ptrn->type       = TRANSPORT_UNIX;
+        ptrn->socketpath = optarg;
+        break;
+      }
     case 'B':
       {
         flags = (flags & ~SPAMC_MODE_MASK) | SPAMC_BSMTP_MODE;
@@ -117,7 +135,8 @@ read_args(int argc, char **argv, char **hostname, int *port, int *max_size, char
       }
     case 'd':
       {
-	*hostname = optarg;	/* fix the ptr to point to this string */
+        ptrn->type     = TRANSPORT_TCP;
+	ptrn->hostname = optarg;	/* fix the ptr to point to this string */
 	break;
       }
     case 'e':
@@ -132,7 +151,7 @@ read_args(int argc, char **argv, char **hostname, int *port, int *max_size, char
       }
     case 'p':
       {
-	*port = atoi(optarg);
+	ptrn->port = atoi(optarg);
 	break;
       }
     case 'f':
@@ -155,11 +174,13 @@ read_args(int argc, char **argv, char **hostname, int *port, int *max_size, char
 	*max_size = atoi(optarg);
 	break;
       }
+#ifdef SPAMC_SSL
     case 'S':
       {
 	flags |= SPAMC_USE_SSL;
 	break;
       }
+#endif
     case 't':
       {
 	timeout = atoi(optarg);
@@ -219,59 +240,108 @@ void get_output_fd(int *fd){
     exit(EX_OSERR);
 }
 
-int main(int argc, char **argv){
-  int port = 783;
+int main (int argc, char **argv) {
   int max_size = 250*1024;
-  char *hostname = (char *) "127.0.0.1";
-  char *username = NULL;
-  struct passwd *curr_user;
-  struct hostent hent;
+  const char *username = NULL;
   int ret;
   struct message m;
   int out_fd;
+  struct transport trans;
+  int result;
+
+  transport_init(&trans);
+
+#ifdef LIBSPAMC_UNIT_TESTS
+  /* unit test support; divert execution.  will not return */
+  do_libspamc_unit_tests();
+#endif
 
   openlog ("spamc", LOG_CONS|LOG_PID, LOG_MAIL);
   signal (SIGPIPE, SIG_IGN);
 
-  read_args(argc,argv,&hostname,&port,&max_size,&username);
+  read_args(argc,argv, &max_size, &username, &trans);
 
+  /*--------------------------------------------------------------------
+   * DETERMINE USER
+   *
+   * If the program's caller didn't identify the user to run as, use the
+   * current user for this. Note that we're not talking about UNIX perm-
+   * issions, but giving SpamAssassin a username so it can do per-user
+   * configuration (whitelists & the like).
+   *
+   * Since "curr_user" points to static library data, we don't wish to risk
+   * some other part of the system overwriting it, so we copy the username
+   * to our own buffer - then this won't arise as a problem.
+   */
+ 
   if(NULL == username)
   {
+  static char   userbuf[256];
+  struct passwd *curr_user;
+
     curr_user = getpwuid(geteuid());
     if (curr_user == NULL) {
       perror ("getpwuid failed");
             if(flags&SPAMC_CHECK_ONLY) { printf("0/0\n"); return EX_NOTSPAM; } else { return EX_OSERR; }
     }
-    username = curr_user->pw_name;
+    memset(userbuf, 0, sizeof userbuf);
+    strncpy(userbuf, curr_user->pw_name, sizeof userbuf - 1);
+    userbuf[sizeof userbuf - 1] = '\0';
+    username = userbuf;
   }
 
+  /*--------------------------------------------------------------------
+   * SET UP TRANSPORT
+   *
+   * This takes the user parameters and digs up what it can about how
+   * we connect to the spam daemon. Mainly this involves lookup up the
+   * hostname and getting the IP addresses to connect to.
+   */
+  if ( (ret = transport_setup(&trans, flags)) != EX_OK )
+    goto FAIL;
+
+
     out_fd=-1;
-    m.type=MESSAGE_NONE;
-
-    ret=lookup_host_for_failover (hostname, &hent);
-    if(ret!=EX_OK) goto FAIL;
-
+    m.type    = MESSAGE_NONE;
     m.max_len = max_size;
     m.timeout = timeout;
 
     ret=message_read(STDIN_FILENO, flags, &m);
     if(ret!=EX_OK) goto FAIL;
-    ret=message_filter_with_failover(&hent, port, username, flags, &m);
+    ret=message_filter(&trans, username, flags, &m);
     if(ret!=EX_OK) goto FAIL;
     get_output_fd(&out_fd);
-    if(message_write(out_fd, &m)<0) goto FAIL;
 
-    if((flags&SPAMC_CHECK_ONLY) && m.is_spam!=EX_TOOBIG) return m.is_spam;
+    if(message_write(out_fd, &m)<0) {
+      goto FAIL;
+    }
 
-    return ret;
+    result = m.is_spam;
+    if ((flags&SPAMC_CHECK_ONLY) && result != EX_TOOBIG) {
+      message_cleanup (&m);
+      return result;
+    } else {
+      message_cleanup (&m);
+      return ret;
+    }
 
 FAIL:
     get_output_fd(&out_fd);
-    if(flags&SPAMC_CHECK_ONLY || flags&SPAMC_REPORT || flags&SPAMC_REPORT_IFSPAM){
-        full_write(out_fd, (unsigned char *) "0/0\n", 4);
+
+    result = m.is_spam;
+    if((flags&SPAMC_CHECK_ONLY) && result != EX_TOOBIG) {
+	/* probably, the write to stdout failed; we can still report exit code */
+	message_cleanup (&m);
+	return result;
+
+    } else if(flags&SPAMC_CHECK_ONLY || flags&SPAMC_REPORT || flags&SPAMC_REPORT_IFSPAM) {
+        full_write(out_fd, "0/0\n", 4);
+	message_cleanup (&m);
         return EX_NOTSPAM;
+
     } else {
         message_dump(STDIN_FILENO, out_fd, &m);
+	message_cleanup (&m);
         if (ret == EX_TOOBIG) {
           return 0;
         } else if (flags & SPAMC_SAFE_FALLBACK) {

@@ -51,13 +51,9 @@ sa-learn - train SpamAssassin's Bayesian classifier
 
 =head1 SYNOPSIS
 
-B<sa-learn> [options] --file I<message>
+B<sa-learn> [options] [file]...
 
-B<sa-learn> [options] --mbox I<mailbox>
-
-B<sa-learn> [options] --dir I<directory>
-
-B<sa-learn> [options] --single < I<message>
+B<sa-learn> [options] --dump [ all | data | magic ]
 
 Options:
 
@@ -66,15 +62,23 @@ Options:
  --forget			   Forget a message
  --rebuild			   Rebuild the database if needed
  --force-expire			   Force an expiry run, rebuild every time
+ --dump [all|data|magic]           Display the contents of the Bayes database
+                                   Takes optional argument for what to display
+  --dbpath <path>                  For dump/import only, specifies (in bayes_path form)
+                                   where to read the Bayes DB from
+  --regexp <re>                    For dump only, specifies which tokens to
+                                   dump based on a regular expression.
  -f file, --folders=file           Read list of files/directories from file
- --dir                             Learn a directory of RFC 822 files
- --file                            Learn a file in RFC 822 format
- --mbox                            Learn a file in mbox format
+ --dir                             Ignored; historical compatability
+ --file                            Ignored; historical compatability
+ --mbox                            Input sources are in mbox format
  --showdots                        Show progress using dots
  --no-rebuild                      Skip building databases after scan
  -L, --local			   Operate locally, no network accesses
- -C file, --config-file=file       Path to standard configuration dir
- -p prefs, --prefs-file=file       Set user preferences file
+ --import                          Upgrade data from an earlier database version
+ -C path, --configpath=path, --config-file=path   Path to standard configuration dir
+ -p prefs, --prefspath=file, --prefs-file=file    Set user preferences file
+ --siteconfigpath=path             Path for site configs (def: /etc/mail/spamassassin)
  -D, --debug-level                 Print debugging messages
  -V, --version                     Print version
  -h, --help                        Print usage message
@@ -89,11 +93,13 @@ mean ham.
 Simply run this command once for each of your mail folders, and it will
 ''learn'' from the mail therein.
 
-Note that I<globbing> in the mail folder names is supported; in other words,
-listing a folder name as C<*> will scan every folder that matches.
+Note that I<globbing> in the mail folder names is supported (except when
+using perl 5.005 in taint-mode); in other words, listing a folder name
+as C<*> will scan every folder that matches.
 
 SpamAssassin remembers which mail messages it's learnt already, and will not
 re-learn those messages again, unless you use the B<--forget> option.
+Messages learnt as spam will have SpamAssassin markup removed, on the fly.
 
 If you make a mistake and scan a mail as ham when it is spam, or vice
 versa, simply rerun this command with the correct classification, and the
@@ -105,7 +111,7 @@ previous indications.
 (Thanks to Michael Bell for this section!)
 
 For a more lengthy description of how this works, go to
-http://www.paulgraham.com and see "A Plan for Spam". It's reasonably
+http://www.paulgraham.com/ and see "A Plan for Spam". It's reasonably
 readable, even if statistics make me break out in hives.
 
 The short semi-inaccurate version: Given training, a spam heuristics engine
@@ -114,9 +120,9 @@ analysis. Furthermore, once given a basis for the analysis, the engine can
 continue to learn iteratively by applying both it's non-Bayesian and Bayesian
 ruleset together to create evolving "intelligence".
 
-SpamAssassin 2.50 supports Bayesian spam analysis, in the form of the
-BAYES rules. This is a new feature, quite powerful, and is disabled
-until enough messages have been learnt.
+SpamAssassin 2.50 and later supports Bayesian spam analysis, in
+the form of the BAYES rules. This is a new feature, quite powerful,
+and is disabled until enough messages have been learnt.
 
 The pros of Bayesian spam analysis:
 
@@ -168,8 +174,8 @@ First a high-level overview:
 
 I suggest several thousand of each, placed in SPAM and HAM directories or
 mailboxes.  Yes, you MUST hand-sort this - otherwise the results won't be much
-better than SpamAssassin on its own. Verify the spamminess/haminess of
-EVERY message.  You're urged to avoid using a publicly available corpus (sample) -
+better than SpamAssassin on its own. Verify the spamminess/haminess of EVERY
+message.  You're urged to avoid using a publicly available corpus (sample) -
 this must be taken from YOUR mail server, if it's to be statistically useful.
 Otherwise, the results may be pretty skewed.
 
@@ -192,7 +198,7 @@ been processed before).
 
 =item Learning from single messages uses a command like this:
 
-	cat mailmessage | sa-learn --ham --no-rebuild --single
+	cat mailmessage | sa-learn --ham --no-rebuild
 
 This is handy for binding to a key in your mail user agent.  It's very fast, as
 all the time-consuming stuff is deferred until you run with the C<--rebuild>
@@ -221,6 +227,11 @@ Note that if your mail folders contain things like forwarded spam,
 discussions of spam-catching rules, etc., this will cause trouble.  You
 should avoid scanning those messages if possible.  (An easy way to do this
 is to move them aside, into a folder which is not scanned.)
+
+If the messages you are learning from have already been filtered through
+SpamAssassin, the learner will compensate for this.  In effect, it learns what
+each message would look like if you had run C<spamassassin -d> over it in
+advance.
 
 Another thing to be aware of, is that typically you should aim to train
 with at least 1000 messages of spam, and 1000 ham messages, if
@@ -276,7 +287,7 @@ It should be supplemented with some supervised training in addition, if
 possible.
 
 This is the default, but can be turned off by setting the SpamAssassin
-configuration parameter C<auto_learn> to 0.
+configuration parameter C<bayes_auto_learn> to 0.
 
 =item 4. Mistake-based training
 
@@ -292,17 +303,21 @@ takes longer to get it right than a full training session would.
 
 =item B<--ham>
 
-Learn the input message(s) as ham.   If you have previously learnt
-any of the messages as spam, SpamAssassin will forget them first, then
-re-learn them as ham.  Alternatively, if you have previously learnt
-them as ham, it'll skip them this time around.
+Learn the input message(s) as ham.   If you have previously learnt any of the
+messages as spam, SpamAssassin will forget them first, then re-learn them as
+ham.  Alternatively, if you have previously learnt them as ham, it'll skip them
+this time around.  If the messages have already been filtered through
+SpamAssassin, the learner will ignore any modifications SpamAssassin may have
+made.
 
 =item B<--spam>
 
-Learn the input message(s) as spam.   If you have previously learnt
-any of the messages as ham, SpamAssassin will forget them first, then
-re-learn them as spam.  Alternatively, if you have previously learnt
-them as spam, it'll skip them this time around.
+Learn the input message(s) as spam.   If you have previously learnt any of the
+messages as ham, SpamAssassin will forget them first, then re-learn them as
+spam.  Alternatively, if you have previously learnt them as spam, it'll skip
+them this time around.  If the messages have already been filtered through
+SpamAssassin, the learner will ignore any modifications SpamAssassin may have
+made.
 
 =item B<--rebuild>
 
@@ -312,34 +327,55 @@ a busy server.
 
 =item B<--force-expire>
 
-Forces an expiry run, regardless of whether it may be necessary or not.
+Forces an expiry attempt, regardless of whether it may be necessary
+or not.  Note: This doesn't mean any tokens will actually expire.
+Please see the EXPIRATION section below.
 
 =item B<--forget>
 
 Forget a given message previously learnt.
 
+=item B<--dump> I<option>
+
+Display the contents of the Bayes database.  Without an option or with
+the I<all> option, all magic tokens and data tokens will be displayed.
+I<magic> will only display magic tokens, and I<data> will only display
+the data tokens.
+
+Can also use the B<--dbpath> I<path> option to specify the location of
+the Bayes files to use.
+
+Can also use the B<--regexp> I<RE> option to specify which tokens to
+display based on a regular expression.
+
 =item B<-h>, B<--help>
 
 Print help message and exit.
 
-=item B<-C> I<config>, B<--config-file>=I<config>
+=item B<-C> I<path>, B<--configpath>=I<path>, B<--config-file>=I<path>
 
-Read configuration from I<config>.
+Use the specified path for locating the distributed configuration files.
+Ignore the default directories (usually C</usr/share/spamassassin> or similar).
 
-=item B<-p> I<prefs>, B<--prefs-file>=I<prefs>
+=item B<--siteconfigpath>=I<path>
 
-Read user score preferences from I<prefs>.
+Use the specified path for locating site-specific configuration files.  Ignore
+the default directories (usually C</etc/mail/spamassassin> or similar).
 
-=item B<-D>, B<--debug-level>
+=item B<-p> I<prefs>, B<--prefspath>=I<prefs>, B<--prefs-file>=I<prefs>
+
+Read user score preferences from I<prefs> (usually C<$HOME/.spamassassin/user_prefs>).
+
+ =item B<-D>, B<--debug-level>
 
 Produce diagnostic output.
 
 =item B<--no-rebuild>
 
 Skip the slow rebuilding step which normally takes place after changing
-database entries.  If you plan to scan many folders in a batch, it is faster to
-use this switch and run C<sa-learn --rebuild> once all the folders have been
-scanned.
+database entries.  If you plan to scan many folders in a batch, or to learn
+individual messages one-by-one, it is faster to use this switch and run
+C<sa-learn --rebuild> once all the folders have been scanned.
 
 =item B<-L>, B<--local>
 
@@ -349,6 +385,17 @@ slightly lower accuracy.
 
 Note that this is currently ignored, as current versions of SpamAssassin will
 not perform network access while learning; but future versions may.
+
+=item B<--import>
+
+If you previously used SpamAssassin's Bayesian learner without the C<DB_File>
+module installed, it will have created files in other formats, such as
+C<GDBM_File>, C<NDBM_File>, or C<SDBM_File>.  This switch allows you to migrate
+that old data into the C<DB_File> format.  It will overwrite any data currently
+in the C<DB_File>.
+
+Can also be used with the B<--dbpath> I<path> option to specify the location of
+the Bayes files to use.
 
 =back
 
@@ -396,50 +443,150 @@ When you run C<sa-learn --rebuild>, the journal is read, and the tokens that
 were accessed during the journal's lifetime will have their last-access time
 updated in the C<bayes_toks> database.
 
-=item bayes_msgcount
-
-Every time SpamAssassin accesses a mail message for scanning, or every time
-the C<sa-learn> command is run, the 'message count' is increased by one.
-This is used to control expiration of old tokens.
-
-Since many processes may be running simultaneously, SpamAssassin does not
-use a locked database file for this operation; instead, it uses the size
-of this file as a counter, appending one byte for each message.  Once it
-hits 5000 bytes, the C<bayes_toks> database is locked, and the message
-counter entry in that database is increased accordingly.
-
 =back
 
 =head1 EXPIRATION
 
-Since SpamAssassin auto-learns, the Bayes database files could increase
-perpetually until they fill your disk or you run out of memory.  To control
-this, SpamAssassin performs expiration.
+Since SpamAssassin can auto-learn messages, the Bayes database files
+could increase perpetually until they fill your disk.  To control this,
+SpamAssassin performs journal synchronization and bayes expiration
+periodically when certain criteria (listed below) are met.
 
-Every C<bayes_expiry_scan_count> / 2 messages, or when C<sa-learn --rebuild
---force-expire> is run, SpamAssassin will attempt an expiry run, as follows.
-
-SpamAssassin runs through every token in the database.  If that token has not
-been used during the scanning of the last C<bayes_expiry_scan_count> messages,
-it is marked for deletion.
-
-Next, if that operation would bring the number of tokens below the
-C<bayes_expiry_min_db_size> threshold, it removes tokens from the for-deletion
-list until the resulting database would contain C<bayes_expiry_min_db_size>
-token entries.
-
-It then removes the listed tokens and updates the 'last expiry' setting.
-
-The SpamAssassin configuration settings which control this operation are:
+SpamAssassin can sync the journal and expire the DB tokens either
+manually or opportunistically.  A journal sync is due if I<--rebuild>
+is passed to sa-learn (manual), or if the following is true
+(opportunistic):
 
 =over 4
 
-=item C<bayes_expiry_min_db_size> is part of the SpamAssassin configuration.
-The default value is 100000, which is roughly equivalent to a 5Mb database file
-if you're using DB_File.
+=item - bayes_journal_max_size does not equal 0 (means don't sync)
 
-=item C<bayes_expiry_scan_count> is also part of the SpamAssassin
-configuration.  The default value is 5000.
+=item - the journal file exists
+
+=back
+
+and either:
+
+=over 4
+
+=item - the journal file has a size greater than bayes_journal_max_size
+
+=back
+
+or
+
+=over 4
+
+=item - at least 1 day has passed since the last journal sync
+
+=back
+
+Expiry is due if I<--force-expire> is passed to sa-learn (manual),
+or if all of the following are true (opportunistic):
+
+=over 4
+
+=item - the last expire was attempted at least 12hrs ago
+
+=item - bayes_auto_expire does not equal 0
+
+=item - the number of tokens in the DB is > 100,000
+
+=item - the number of tokens in the DB is > bayes_expiry_max_db_size
+
+=item - there is at least a 12 hr difference between the oldest and newest token atimes
+
+=back
+
+=head2 EXPIRE LOGIC
+
+If either the manual or opportunistic method causes an expire run
+to start, here is the logic that is used:
+
+=over 4
+
+=item - figure out how many tokens to keep.  take the larger of
+either bayes_expiry_max_db_size * 75% or 100,000 tokens.  therefore, the goal
+reduction is number of tokens - number of tokens to keep.
+
+=item - if the reduction number is < 1000 tokens, abort (not worth the effort).
+
+=item - if an expire has been done before, guesstimate the new
+atime delta based on the old atime delta.  (new_atime_delta =
+old_atime_delta * old_reduction_count / goal)
+
+=item - if no expire has been done before, or the last expire looks
+"wierd", do an estimation pass.  The definition of "wierd" is:
+
+=over 8
+
+=item - last expire over 30 days ago
+
+=item - last atime delta was < 12 hrs
+
+=item - last reduction count was < 1000 tokens
+
+=item - estimated new atime delta is < 12 hrs
+
+=item - the difference between the last reduction count and the goal reduction count is > 50%
+
+=back
+
+=back
+
+=head2 ESTIMATION PASS LOGIC
+
+Go through each of the DB's tokens.  Starting at 12hrs, calculate
+whether or not the token would be expired (based on the difference
+between the token's atime and the db's newest token atime) and keep
+the count.  Work out from 12hrs exponentially by powers of 2.  ie:
+12hrs * 1, 12hrs * 2, 12hrs * 4, 12hrs * 8, and so on, up to 12hrs
+* 512 (6144hrs, or 256 days).
+
+The larger the delta, the smaller the number of tokens that will
+be expired.  Conversely, the number of tokens goes up as the delta
+gets smaller.  So starting at the largest atime delta, figure out
+which delta will expire the most tokens without going above the
+goal expiration count.  Use this to choose the atime delta to use,
+unless one of the following occurs:
+
+=over 8
+
+=item - the largest atime (smallest reduction count) would expire
+too many tokens.  this means the learned tokens are mostly old and
+there needs to be new tokens learned before an expire can
+occur.
+
+=item - all of the atime choices result in 0 tokens being removed.
+this means the tokens are all newer than 12 hours and there needs
+to be new tokens learned before an expire can occur.
+
+=item - the number of tokens that would be removed is < 1000.  the
+benefit isn't worth the effort.  more tokens need to be learned.
+
+=back
+
+If the expire run gets past this point, it will continue to the end.
+A new DB is created since the majority of DB libraries don't shrink the
+DB file when tokens are removed.  So we do the "create new, migrate old
+to new, remove old, rename new" shuffle.
+
+=head2 EXPIRY RELATED CONFIGURATION SETTINGS
+
+=over 4
+
+=item C<bayes_auto_expire> is used to specify whether or not SpamAssassin
+ought to opportunistically attempt to expire the Bayes databaase.
+The default is 1 (yes).
+
+=item C<bayes_expiry_max_db_size> specifies both the auto-expire token
+count point, as well as the resulting number of tokens after expiry
+as described above.  The default value is 150,000, which is roughly
+equivalent to a 6Mb database file if you're using DB_File.
+
+=item C<bayes_journal_max_size> specifies how large the Bayes
+journal will grow before it is opportunistically synced.  The
+default value is 102400.
 
 =back
 
