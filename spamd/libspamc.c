@@ -21,13 +21,6 @@
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
 
-#ifdef SPAMC_SSL
-#include <openssl/crypto.h>
-#include <openssl/pem.h>
-#include <openssl/ssl.h>
-#include <openssl/err.h>
-#endif
-
 #ifdef HAVE_SYSEXITS_H
 #include <sysexits.h>
 #endif
@@ -340,7 +333,8 @@ static void clear_message(struct message *m){
     m->content_length=-1;
 }
 
-static int message_read_raw(int fd, struct message *m){
+static int
+message_read_raw(int fd, struct message *m){
     clear_message(m);
     if((m->raw=malloc(m->max_len+1))==NULL) return EX_OSERR;
     m->raw_len=full_read(fd, (unsigned char *) m->raw, m->max_len+1, m->max_len+1);
@@ -441,8 +435,15 @@ long message_write(int fd, struct message *m){
     off_t jlimit;
     char buffer[1024];
 
+    /* if we're to output a message, m->is_spam will be EX_OUTPUTMESSAGE */
     if(m->is_spam==EX_ISSPAM || m->is_spam==EX_NOTSPAM){
-        return full_write(fd, (unsigned char *) m->out, m->out_len);
+	return full_write(fd, (unsigned char *) m->out, m->out_len);
+    }
+
+    if (m->is_spam != EX_OUTPUTMESSAGE && m->is_spam != EX_TOOBIG) {
+      syslog(LOG_ERR,
+	    "Cannot write this message, is_spam = %d!\n", m->is_spam);
+      return -1;
     }
 
     switch(m->type){
@@ -499,7 +500,7 @@ void message_dump(int in_fd, int out_fd, struct message *m){
 }
 
 static int
-_spamc_read_full_line (struct message *m, int flags, int sock,
+_spamc_read_full_line (struct message *m, int flags, SSL *ssl, int sock,
 		char *buf, int *lenp, int bufsiz)
 {
     int failureval;
@@ -509,11 +510,9 @@ _spamc_read_full_line (struct message *m, int flags, int sock,
     /* Now, read from spamd */
     for(len=0; len<bufsiz-1; len++) {
 	if(flags&SPAMC_USE_SSL) {
-#ifdef SPAMC_SSL
-	  bytesread=timeout_read(SSL_read, ssl, buf+len, 1);
-#endif
+	  bytesread = ssl_timeout_read (ssl, buf+len, 1);
 	} else {
-	  bytesread=timeout_read(read, sock, buf+len, 1);
+	  bytesread = fd_timeout_read (sock, buf+len, 1);
 	}
 
         if(buf[len]=='\n') {
@@ -581,22 +580,26 @@ static int _message_filter(const struct sockaddr *addr,
     float version;
     int response;
     int failureval;
-#ifdef SPAMC_SSL
     SSL_CTX* ctx;
     SSL* ssl;
     SSL_METHOD *meth;
 
-    if(flags&SPAMC_USE_SSL){	
+    if (flags&SPAMC_USE_SSL) {
+#ifdef SPAMC_SSL
       SSLeay_add_ssl_algorithms();
       meth = SSLv2_client_method();
       SSL_load_error_strings();
       ctx = SSL_CTX_new(meth);
-    }    
+#else
+      (void) ssl; (void) meth; (void) ctx;	/* avoid "unused" warnings */
+      syslog(LOG_ERR, "spamc not built with SSL support");
+      return EX_SOFTWARE;
 #endif
+    }    
 
     m->is_spam=EX_TOOBIG;
     if((m->out=malloc(m->max_len+EXPANSION_ALLOWANCE+1))==NULL){
-        return EX_OSERR;
+        failureval = EX_OSERR; goto failure;
     }
     m->out_len=0;
 
@@ -653,7 +656,7 @@ static int _message_filter(const struct sockaddr *addr,
     }
 
     /* ok, now read and parse it.  SPAMD/1.2 line first... */
-    failureval = _spamc_read_full_line (m, flags, sock, buf, &len, bufsiz);
+    failureval = _spamc_read_full_line (m, flags, ssl, sock, buf, &len, bufsiz);
     if (failureval != EX_OK) { goto failure; }
 
     if(sscanf(buf, "SPAMD/%f %d %*s", &version, &response)!=2) {
@@ -665,7 +668,7 @@ static int _message_filter(const struct sockaddr *addr,
     m->threshold = 0;
     m->is_spam = EX_TOOBIG;
     while (1) {
-	failureval = _spamc_read_full_line (m, flags, sock, buf, &len, bufsiz);
+	failureval = _spamc_read_full_line (m, flags, ssl, sock, buf, &len, bufsiz);
 	if (failureval != EX_OK) { goto failure; }
 
 	if (len == 0 && buf[0] == '\0') {
@@ -686,19 +689,19 @@ static int _message_filter(const struct sockaddr *addr,
 	    failureval = EX_PROTOCOL; goto failure;
       }
       return EX_OK;
-    } else {
+    }
+    else {
+	m->is_spam=EX_OUTPUTMESSAGE;
 	if (m->content_length < 0) {
 	    /* should have got a length too. */
 	    failureval = EX_PROTOCOL; goto failure;
 	}
 
 	if (flags&SPAMC_USE_SSL) {
-#ifdef SPAMC_SSL
-	  len=timeout_read(SSL_read,ssl, m->out+m->out_len,
+	  len = ssl_timeout_read (ssl, m->out+m->out_len,
 		     m->max_len+EXPANSION_ALLOWANCE+1-m->out_len);
-#endif
 	} else{
-	  len=full_read(sock, (unsigned char *) m->out+m->out_len,
+	  len = full_read (sock, (unsigned char *) m->out+m->out_len,
 		     m->max_len+EXPANSION_ALLOWANCE+1-m->out_len,
 		     m->max_len+EXPANSION_ALLOWANCE+1-m->out_len);
 	}
@@ -708,7 +711,6 @@ static int _message_filter(const struct sockaddr *addr,
 	    failureval = EX_TOOBIG; goto failure;
 	}
 	m->out_len+=len;
-
 
 	shutdown(sock, SHUT_RD);
 	close(sock);
@@ -728,7 +730,7 @@ failure:
     close(sock);
     libspamc_timeout = 0;
 
-    if(flags&SPAMC_USE_SSL){
+    if(flags&SPAMC_USE_SSL) {
 #ifdef SPAMC_SSL
       SSL_free(ssl);
       SSL_CTX_free(ctx);

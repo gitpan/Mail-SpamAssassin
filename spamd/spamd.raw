@@ -11,7 +11,15 @@ my $DEF_RULES_DIR = '@@DEF_RULES_DIR@@';  # substituted at 'make' time
 my $LOCAL_RULES_DIR = '@@LOCAL_RULES_DIR@@';  # substituted at 'make' time
 use lib '@@INSTALLSITELIB@@'; # substituted at 'make' time
 
-use lib '../lib';	# added by jm for use inside the distro
+BEGIN {			# added by jm for use inside the distro
+  if ( -e '../blib/lib/Mail/SpamAssassin.pm' ) {
+    unshift(@INC, '../blib/lib');
+  }
+  else {
+    unshift(@INC, '../lib');
+  }
+}
+
 use strict;
 
 use IO::Socket;
@@ -147,8 +155,8 @@ if ($opt{'ssl'}) {
 }
 
 # This can be changed on the command line with the -s flag
-my $log_facility = $opt{'syslog'}       || 'mail';
-my $log_socket   = $opt{'sylog-socket'} || 'unix';
+my $log_facility = $opt{'syslog'}        || 'mail';
+my $log_socket   = $opt{'syslog-socket'} || 'unix';
 $log_facility = 'stderr' if $log_socket eq 'none';
 
 my $dontcopy = 1;
@@ -1050,6 +1058,12 @@ sub cleanupchildren {
   # may be required on some platforms even though we use SIG{CHLD} = 'IGNORE'.
   # cf. mail from Stefan Seiz <talklists@index-s.de>, Fri, 27 Dec 2002 17:32:54
   # <BA323F46.19AF5%talklists@index-s.de> noting it on MacOS X Server 10.1.5.
+
+  # causes a warning on recent linux kernels (cf:
+  # http://bugzilla.spamassassin.org/show_bug.cgi?id=1536 ), so don't do
+  # this if we're on a known-good OS which will *not* leave dead kids.
+  return if ($^O =~ /linux/);
+
   my $kid;
   do {
     $kid = waitpid(-1,&WNOHANG);

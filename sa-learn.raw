@@ -4,9 +4,13 @@ use strict;
 
 use File::Spec;
 
-my $PREFIX = '@@PREFIX@@';  # substituted at 'make' time
-my $DEF_RULES_DIR = '@@DEF_RULES_DIR@@';  # substituted at 'make' time
-my $LOCAL_RULES_DIR = '@@LOCAL_RULES_DIR@@';  # substituted at 'make' time
+# Do 'use vars' instead of my() since CmdLearn looks for these and my()
+# makes them non-exportable.  Doh.
+use vars qw/ $PREFIX $DEF_RULES_DIR $LOCAL_RULES_DIR /;
+
+$PREFIX = '@@PREFIX@@';  # substituted at 'make' time
+$DEF_RULES_DIR = '@@DEF_RULES_DIR@@';  # substituted at 'make' time
+$LOCAL_RULES_DIR = '@@LOCAL_RULES_DIR@@';  # substituted at 'make' time
 
 use lib '@@INSTALLSITELIB@@';  # substituted at 'make' time
 
@@ -71,8 +75,6 @@ Options:
  -L, --local			   Operate locally, no network accesses
  -C file, --config-file=file       Path to standard configuration dir
  -p prefs, --prefs-file=file       Set user preferences file
- -a, --auto-whitelist              Use auto-whitelists
- --whitelist-factory               Select whitelist factory
  -D, --debug-level                 Print debugging messages
  -V, --version                     Print version
  -h, --help                        Print usage message
@@ -310,11 +312,6 @@ Forces an expiry run, regardless of whether it may be necessary or not.
 
 Forget a given message previously learnt.
 
-=item B<-a>, B<--auto-whitelist>
-
-Use auto-whitelists.  While learning, add addresses to the auto-whitelist
-as appropriate.
-
 =item B<-h>, B<--help>
 
 Print help message and exit.
@@ -330,10 +327,6 @@ Read user score preferences from I<prefs>.
 =item B<-D>, B<--debug-level>
 
 Produce diagnostic output.
-
-=item B<-M> I<factory>, B<--whitelist-factory>=I<factory>
-
-Select alternative whitelist factory.
 
 =item B<--no-rebuild>
 

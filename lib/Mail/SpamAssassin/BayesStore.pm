@@ -60,6 +60,8 @@ use vars qw{
 # it into place.
 @DB_EXTENSIONS = ('', '.db', '.dir', '.pag', '.dbm', '.cdb');
 
+# These are the magic tokens we use to track stuff in the DB.
+# The format MUST be '**' followed by a capital letter ([A-Z]).
 $NSPAM_MAGIC_TOKEN = '**NSPAM';
 $NHAM_MAGIC_TOKEN = '**NHAM';
 $OLDEST_TOKEN_AGE_MAGIC_TOKEN = '**OLDESTAGE';
@@ -187,7 +189,13 @@ sub tie_db_writable {
     };
   }
 
-  if ($main->{locker}->safe_lock ($path)) {
+  my $tout;
+  if ($main->{learn_wait_for_lock}) {
+    $tout = 300;	# TODO: Dan to write better lock code
+  } else {
+    $tout = 10;
+  }
+  if ($main->{locker}->safe_lock ($path, $tout)) {
     $self->{locked_file} = $path;
     $self->{is_locked} = 1;
   } else {
@@ -317,13 +325,7 @@ sub expire_old_tokens_trapped {
   if ($showdots) { print STDERR "\n"; }
 
   foreach my $tok (keys %{$self->{db_toks}}) {
-    next if ($tok eq $NSPAM_MAGIC_TOKEN
-	  || $tok eq $NHAM_MAGIC_TOKEN
-	  || $tok eq $LAST_EXPIRE_MAGIC_TOKEN
-	  || $tok eq $NTOKENS_MAGIC_TOKEN
-	  || $tok eq $OLDEST_TOKEN_AGE_MAGIC_TOKEN
-	  || $tok eq $SCANCOUNT_BASE_MAGIC_TOKEN
-	  || $tok eq $RUNNING_EXPIRE_MAGIC_TOKEN);
+    next if ($tok =~ /^\*\*[A-Z]+$/); # skip magic tokens
 
     my ($ts, $th, $atime) = $self->tok_get ($tok);
 
@@ -480,13 +482,17 @@ sub tok_get {
 sub nspam_nham_get {
   my ($self) = @_;
   my $ns = $self->{db_toks}->{$NSPAM_MAGIC_TOKEN};
+  if (!$ns || $ns =~ /\D/) { $ns = 0; }
   my $nn = $self->{db_toks}->{$NHAM_MAGIC_TOKEN};
-  ($ns || 0, $nn || 0);
+  if (!$nn || $nn =~ /\D/) { $nn = 0; }
+  ($ns, $nn);
 }
 
 sub get_running_expire_tok {
   my ($self) = @_;
-  return $self->{db_toks}->{$RUNNING_EXPIRE_MAGIC_TOKEN};
+  my $running = $self->{db_toks}->{$RUNNING_EXPIRE_MAGIC_TOKEN};
+  if (!$running || $running =~ /\D/) { return undef; }
+  return $running;
 }
 
 sub set_running_expire_tok {
@@ -607,9 +613,8 @@ sub sync_journal_trapped {
   my $showdots = $opts->{showdots};
   my $retirepath = $path.".old";
 
-  # now read the retired journal
-  if (!open (JOURNAL, "<$path")) {
-    warn "bayes: cannot open read $path\n";
+  if (!-r $path) { # will we be able to read the file?
+    warn "bayes: bad permissions on journal, can't read: $path\n";
     return 0;
   }
 
@@ -617,9 +622,15 @@ sub sync_journal_trapped {
   # TODO: use locking here
   if (!rename ($path, $retirepath)) {
     warn "bayes: failed rename $path to $retirepath\n";
-    close(JOURNAL);
     return 0;
   }
+
+  # now read the retired journal
+  if (!open (JOURNAL, "<$retirepath")) {
+    warn "bayes: cannot open for reading $retirepath\n";
+    return 0;
+  }
+
 
   # Read the journal
   while (<JOURNAL>) {
@@ -699,7 +710,14 @@ sub tok_put {
   $ts ||= 0;
   $th ||= 0;
 
-  my $exists_already = exists $self->{db_toks}->{$tok};
+  if ( $tok =~ /^\*\*[A-Z]+$/ ) { # magic token?  Ignore it!
+    return;
+  }
+
+  # use defined() rather than exists(); the latter is not supported
+  # by NDBM_File, believe it or not.  Using defined() did not
+  # indicate any noticeable speed hit in my testing. (Mar 31 2003 jm)
+  my $exists_already = defined $self->{db_toks}->{$tok};
 
   if ($ts == 0 && $th == 0) {
     if ($exists_already) { # If the token exists, lower the token count
