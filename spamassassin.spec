@@ -16,8 +16,8 @@ Summary:        a spam filter for email which can be invoked from mail delivery 
 Summary(pl):    Filtr antyspamowy, przeznaczony dla programów dostarczaj±cych pocztê (MDA)
 
 Group:          Applications/Mail
-%define version 2.43
-%define real_version 2.43
+%define version 2.44
+%define real_version 2.44
 %define release 1
 
 %define name    spamassassin
@@ -159,6 +159,20 @@ if [ $1 = 0 ]; then
 fi
 
 %changelog
+* Wed Oct 16 2002 Justin Mason <jm-spec@jmason.org>
+- bumped specfile version to 2.44
+
+* Tue Oct 15 2002 Theo Van Dinter <felicity@kluge.net> -1
+- updated to 2.43
+
+* Sat Oct 05 2002 Theo Van Dinter <felicity@kluge.net> -3
+- fixed some small typos in the spec file
+
+* Fri Oct 04 2002 Theo Van Dinter <felicity@kluge.net> -2
+- small bug where 2.42 still called itself 2.42-cvs
+
+* Fri Oct 04 2002 Theo Van Dinter <felicity@kluge.net> -1
+- updated to SA 2.42
 
 * Wed Sep 11 2002 Justin Mason <jm-spec@jmason.org>
 - spamassassin RPM now requires perl-Mail-SpamAssassin; from Theo
