@@ -4,13 +4,15 @@
 
 package Mail::SpamAssassin::EncappedMessage;
 
-use Carp;
 use strict;
+use bytes;
+use Carp;
+
 
 use Mail::SpamAssassin::AuditMessage;
 
-use vars	qw{
-  	@ISA
+use vars qw{
+  @ISA
 };
 
 @ISA = qw(Mail::SpamAssassin::AuditMessage);
@@ -25,6 +27,11 @@ sub replace_header {
 sub delete_header {
   my ($self, $hdr) = @_;
   $self->{mail_object}->delete_header ($hdr);
+}
+
+sub get_pristine_header {
+  my ($self, $hdr) = @_;
+  return $self->get_header ($hdr);
 }
 
 sub get_header {

@@ -1,3 +1,4 @@
+# $Id: MailingList.pm,v 1.12 2003/01/09 23:51:56 msquadrat Exp $
 
 # Eval Tests to detect genuine mailing lists.
 
@@ -5,6 +6,10 @@ package Mail::SpamAssassin::MailingList;
 1;
 
 package Mail::SpamAssassin::PerMsgStatus;
+
+use strict;
+use bytes;
+
 
 sub detect_mailing_list {
     my ($self) = @_;
@@ -41,10 +46,30 @@ sub detect_ml_ezmlm {
 #  List-Unsubscribe: .*<mailto:.*=unsubscribe>
 #  List-Archive: 
 #  X-Mailman-Version: \d
+#
+# However, for for mailing list membership reminders, most of
+# those headers are gone, so we identify on the following:
+#
+#  Subject: ...... mailing list memberships reminder
+#  X-Mailman-Version: \d
+#  Precedence: bulk
+#  X-No-Archive: yes
+#  X-Ack: no
+#  Errors-To: 
+#  X-BeenThere: 
 sub detect_ml_mailman {
     my ($self) = @_;
     return 0 unless $self->get('x-mailman-version') =~ /^\d/;
     return 0 unless $self->get('precedence') eq "bulk\n";
+
+    if ($self->get('subject') =~ /mailing list memberships reminder$/) {
+        return 0 unless $self->get('errors-to');
+        return 0 unless $self->get('x-beenthere');
+        return 0 unless $self->get('x-no-archive') =~ /yes/;
+        return 0 unless $self->get('x-ack') =~ /no/;
+        return 1;
+    }
+
     return 0 unless $self->get('list-id');
     return 0 unless $self->get('list-help') =~ /^<mailto:/;
     return 0 unless $self->get('list-post') =~ /^<mailto:/;
@@ -77,29 +102,31 @@ sub detect_ml_lyris {
 }
 
 # ListBuilder
-sub detect_ml_listbuilder {
-  my ($self, $full) = @_;
+# Sep 17 2002 jm: turned off due to bad S/O ratio
 
-  my $reply = $self->get ('Reply-To:addr');
-  if ($reply !~ /\@lb.bcentral.com/) { return 0; }
-
-  # Received: from unknown (HELO lbrout14.listbuilder.com) (204.71.191.9)
-  my $rcvd = $self->get('received');
-  return 0 unless ($rcvd =~ /\blbrout\d+\.listbuilder\.com\b/i);
-  return 0 unless ($rcvd =~ /\b204\.71\.191\.\d+\b/);
-
-  # _______________________________________________________________________
-  # Powered by List Builder
-  # To unsubscribe follow the link:
-  # http://lb.bcentral.com/ex/sp?c=19511&s=76CA511711046877&m=14
-  $full = join ("\n", @{$full});
-
-  if ($full !~ /__________________{40,}\s+Powered by List Builder\s/) { return 0; }
-  if ($full !~
-         m,\shttp://lb\.bcentral\.com/ex/sp\?c=[0-9A-Z]*&s=[0-9A-Z]*&m=[0-9A-Z]*\s,)
-         { return 0; }
-
-  return 1;
-}
+# sub detect_ml_listbuilder {
+#   my ($self, $full) = @_;
+# 
+#   my $reply = $self->get ('Reply-To:addr');
+#   if ($reply !~ /\@lb.bcentral.com/) { return 0; }
+# 
+#   # Received: from unknown (HELO lbrout14.listbuilder.com) (204.71.191.9)
+#   my $rcvd = $self->get('received');
+#   return 0 unless ($rcvd =~ /\blbrout\d+\.listbuilder\.com\b/i);
+#   return 0 unless ($rcvd =~ /\b204\.71\.191\.\d+\b/);
+# 
+#   # _______________________________________________________________________
+#   # Powered by List Builder
+#   # To unsubscribe follow the link:
+#   # http://lb.bcentral.com/ex/sp?c=19511&s=76CA511711046877&m=14
+#   $full = join ("\n", @{$full});
+# 
+#   if ($full !~ /__________________{40,}\s+Powered by List Builder\s/) { return 0; }
+#   if ($full !~
+#          m,\shttp://lb\.bcentral\.com/ex/sp\?c=[0-9A-Z]*&s=[0-9A-Z]*&m=[0-9A-Z]*\s,)
+#          { return 0; }
+# 
+#   return 1;
+# }
 
 1;

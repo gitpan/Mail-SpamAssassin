@@ -35,6 +35,7 @@
 import sys, string
 import re, getopt
 import smtplib, socket
+import exceptions
 
 # EX_TEMPFAIL is 75 on every Unix I've checked, but...
 # check /usr/include/sysexits.h if you have odd problems.
@@ -68,7 +69,10 @@ class LMTP(smtplib.SMTP):
             host = host[5:]
             self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             if self.debuglevel > 0: print 'connect:', host
-            self.sock.connect(host)
+            try:
+              self.sock.connect(host)
+            except socket.error:
+              sys.exit(TEMPFAIL)
         else:
             i = string.find(host, ':')
             if i >= 0:
@@ -188,15 +192,24 @@ def process_message(spamd_host, spamd_port, lmtp_host, sender, recipient):
         except:
             sys.stderr.write('%s: %s\n' % sys.exc_info()[:2])
             checked_data = data # fallback
-        lmtp = LMTP(lmtp_host)
+
+        try:
+            lmtp = LMTP(lmtp_host)
+        except:
+            sys.exit(TEMPFAIL)
+
         code, msg = lmtp.lhlo()
         if code != 250: sys.exit(TEMPFAIL)
 
         #lmtp.set_debuglevel(1)
         try:
             lmtp.sendmail(sender, recipient, checked_data)
-        except smtplib.SMTPRecipientsRefused:
-            sys.exit(NOUSER)
+        except smtplib.SMTPRecipientsRefused, e:
+            if e.recipients.has_key(recipient):
+                if e.recipients[recipient][0] == 550:
+                    sys.exit(NOUSER)
+                else:
+                    sys.exit(TEMPFAIL)  # XXXX sort this out
         except smtplib.SMTPDataError, errors:
             if errors.smtp_code/100 == 4:
                 sys.exit(TEMPFAIL)
@@ -204,7 +217,10 @@ def process_message(spamd_host, spamd_port, lmtp_host, sender, recipient):
                 sys.exit(DATAERR)
     else:
         # too much data.  Just pass it through unchanged
-        lmtp = LMTP(lmtp_host)
+        try:
+            lmtp = LMTP(lmtp_host)
+        except:
+            sys.exit(TEMPAIL)
         code, msg = lmtp.lhlo()
         if code != 250: sys.exit(TEMPFAIL)
         #lmtp.set_debuglevel(1)
@@ -212,7 +228,8 @@ def process_message(spamd_host, spamd_port, lmtp_host, sender, recipient):
         code, msg = lmtp.mail(sender)
         if code != 250: sys.exit(TEMPFAIL)
         code, msg = lmtp.rcpt(recipient)
-        if code != 250: sys.exit(NOUSER)
+        if code == 550: sys.exit(NOUSER)
+        if code != 250: sys.exit(TEMPFAIL)
 
         # send the data in chunks
         lmtp.putcmd("data")

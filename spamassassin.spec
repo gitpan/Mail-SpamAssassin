@@ -16,8 +16,8 @@ Summary:        a spam filter for email which can be invoked from mail delivery 
 Summary(pl):    Filtr antyspamowy, przeznaczony dla programów dostarczaj±cych pocztê (MDA)
 
 Group:          Applications/Mail
-%define version 2.44
-%define real_version 2.44
+%define version 2.50
+%define real_version 2.50
 %define release 1
 
 %define name    spamassassin
@@ -39,19 +39,19 @@ Distribution: SpamAssassin
 %define __find_requires /usr/lib/rpm/find-requires.perl
 
 %description
-SpamAssassin provides you with a way to reduce if not completely eliminate
-Unsolicited Commercial Email (spam) from your incoming email.  It can
-be invoked by a MDA such as sendmail or postfix, or can be called from
-a procmail script, .forward file, etc.  It uses a genetic-algorithm
-evolved scoring system to identify messages which look spammy, then
-adds headers to the message so they can be filtered by the user's mail
-reading software.  This distribution includes the spamd/spamc components
-which create a server that considerably speeds processing of mail.
+SpamAssassin provides you with a way to reduce, if not completely eliminate,
+Unsolicited Bulk Email (or "spam") from your incoming email.  It can be
+invoked by a MDA such as sendmail or postfix, or can be called from a procmail
+script, .forward file, etc.  It uses a genetic-algorithm-evolved scoring system
+to identify messages which look spammy, then adds headers to the message so
+they can be filtered by the user's mail reading software.  This distribution
+includes the spamd/spamc components which considerably speeds processing of
+mail.
 
 %description -l pl
 SpamAssassin udostêpnia Ci mo¿liwo¶æ zredukowania, je¶li nie
 kompletnego wyeliminowania Niezamawianej Komercyjnej Poczty
-(Unsolicited Commercial Email, spamu) z Twojej poczty. Mo¿e byæ
+(Unsolicited Bulk Email, spamu) z Twojej poczty. Mo¿e byæ
 wywo³ywany z MDA, np. Sendmaila czy Postfixa, lub z pliku ~/.forward
 itp. U¿ywa ogólnego algorytmu oceniania w celu identyfikacji
 wiadomo¶ci, które wygl±daj± na spam, po czym dodaje nag³ówki do
@@ -61,14 +61,14 @@ uruchomienie serwera, co znacznie przyspieszy proces przetwarzania
 poczty.
 
 %package tools
-Summary:        Miscellaneous tools for SpamAssassin
+Summary:        Miscellaneous tools and documentation for SpamAssassin
 Summary(pl):    Przeró¿ne narzêdzia zwi±zane z SpamAssassin
 Group:          Applications/Mail
 Requires: perl-Mail-SpamAssassin = %{version}-%{release}
 
 %description tools
-Miscellaneous tools from various authors, distributed with SpamAssassin.
-See /usr/share/doc/SpamAssassin-tools-*/.
+Miscellaneous tools and documentation from various authors, distributed
+with SpamAssassin.  See /usr/share/doc/SpamAssassin-tools-*/.
 
 %description tools -l pl
 Przeró¿ne narzêdzia, dystrybuowane razem z SpamAssassin. Zobacz
@@ -101,19 +101,27 @@ oznaczona jako spam w celu pó¼niejszego wyfiltrowania, np. przy u¿yciu
 aplikacji do czytania poczty.
 
 
-%prep -q
+%prep
 %setup -q -n %{pdir}-%{pnam}-%{real_version}
 
 %build
-%{__perl} Makefile.PL PREFIX=$RPM_BUILD_ROOT/%{_prefix} SYSCONFDIR=$RPM_BUILD_ROOT/%{_sysconfdir} INST_PREFIX=%{_prefix} INST_SYSCONFDIR=%{_sysconfdir}
-%{__make} 
+%{__perl} Makefile.PL INST_PREFIX=%{_prefix} INST_SYSCONFDIR=%{_sysconfdir} PREFIX=$RPM_BUILD_ROOT/%{_prefix} SYSCONFDIR=$RPM_BUILD_ROOT/%{_sysconfdir} < /dev/null
+# now override the PREFIX setting to not use %buildroot%. MakeMaker
+# does not have a better way to do this, it seems...
+%{__make} PREFIX=%{_prefix}
+%{__make} spamd/libspamc.so
 # make test
 
 %install
 [ "$RPM_BUILD_ROOT" != "/" ] && rm -rf $RPM_BUILD_ROOT
-%makeinstall 
+%makeinstall PREFIX=%buildroot/%{_prefix} \
+        INSTALLMAN1DIR=%buildroot/%{_mandir}/man1 \
+        INSTALLMAN3DIR=%buildroot/%{_mandir}/man3
 install -d %buildroot/%{initdir}
+install -d %buildroot/%{_includedir}
 install -m 0755 spamd/redhat-rc-script.sh %buildroot/%{initdir}/spamassassin
+install -m 0644 spamd/libspamc.so %buildroot/%{_libdir}
+install -m 0644 spamd/libspamc.h %buildroot/%{_includedir}/libspamc.h
 
 mkdir -p %{buildroot}/etc/mail/spamassassin
 
@@ -121,8 +129,10 @@ mkdir -p %{buildroot}/etc/mail/spamassassin
 
 %files 
 %defattr(-,root,root)
-%doc README Changes sample-nonspam.txt sample-spam.txt spamd/README.spamd doc INSTALL
+%doc README Changes sample-nonspam.txt sample-spam.txt spamd/README.spamd INSTALL
 %attr(755,root,root) %{_bindir}/*
+%attr(644,root,root) %{_includedir}/*
+%attr(644,root,root) %{_libdir}/*.so
 %config(noreplace) %attr(755,root,root) %{initdir}/spamassassin
 %{_mandir}/man1/*
 
@@ -144,38 +154,31 @@ mkdir -p %{buildroot}/etc/mail/spamassassin
 if [ $1 = 1 ]; then
         /sbin/chkconfig --add spamassassin
 fi
-if [ -f /var/lock/subsys/spamassassin ]; then
-        %{initdir}/spamassassin restart 1>&2
-else
-        echo 'Run "/etc/rc.d/init.d/spamassassin start" to start the spamd daemon.'
-fi
+/sbin/service spamassassin condrestart
 
 %preun
 if [ $1 = 0 ]; then
-        if [ -f /var/lock/subsys/spamassassin ]; then
-                %{initdir}/spamassassin stop 1>&2
-        fi
+	/sbin/service spamassassin stop
         /sbin/chkconfig --del spamassassin
 fi
 
 %changelog
-* Wed Oct 16 2002 Justin Mason <jm-spec@jmason.org>
-- bumped specfile version to 2.44
+* Sun Feb 02 2003 Theo Van Dinter <felicity@kluge.net>
+- instead of us trying to do a restart, call service condrestart to do
+  it for us. :)
 
-* Tue Oct 15 2002 Theo Van Dinter <felicity@kluge.net> -1
-- updated to 2.43
+* Wed Dec 18 2002 Justin Mason <jm-spec@jmason.org>
+- fixed specfile to work with Duncan's new Makefile.PL changes
 
-* Sat Oct 05 2002 Theo Van Dinter <felicity@kluge.net> -3
-- fixed some small typos in the spec file
+* Tue Sep 18 2002 Justin Mason <jm-spec@jmason.org>
+- merged 3-package system from b2_4_0 into 2.5x development
 
-* Fri Oct 04 2002 Theo Van Dinter <felicity@kluge.net> -2
-- small bug where 2.42 still called itself 2.42-cvs
+* Tue Sep 11 2002 Justin Mason <jm-spec@jmason.org>
+- merged Michael Brown's libspamc support into 2.50 specfile
+- made "perl Makefile.PL" read from /dev/null to avoid interactivity issues
 
-* Fri Oct 04 2002 Theo Van Dinter <felicity@kluge.net> -1
-- updated to SA 2.42
-
-* Wed Sep 11 2002 Justin Mason <jm-spec@jmason.org>
-- spamassassin RPM now requires perl-Mail-SpamAssassin; from Theo
+* Mon Sep 10 2002 Michael Brown <michaelb@opentext.com>
+- Added building, installation and packaging of libspamc.{h,so}
 
 * Tue Sep 03 2002 Theo Van Dinter <felicity@kluge.net>
 - added INSTALL to documentation files

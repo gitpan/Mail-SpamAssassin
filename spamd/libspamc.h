@@ -1,20 +1,17 @@
-#ifndef LIBSPAMC_H
-#define LIBSPAMC_H 1
-
-#include "../config.h"
-#include <sys/types.h>
-#include <sys/socket.h>
-
 /*
  * This code is copyright 2001 by Craig Hughes
  * Conversion to a thread-safe shared library copyright 2002 Liam Widdowson
  * Portions copyright 2002 by Brad Jorsch
- * It is licensed for use with SpamAssassin according to the terms of the
- * Perl Artistic License
- * The text of this license is included in the SpamAssassin distribution in
- * the file named "License"
+ * It is licensed under the same license as Perl itself.  The text of this
+ * license is included in the SpamAssassin distribution in the file named
+ * "License".
  */
+#ifndef LIBSPAMC_H
+#define LIBSPAMC_H 1
 
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netdb.h>
 #include <stdio.h>
 
 #define EX_ISSPAM       1
@@ -26,8 +23,17 @@
 #define SPAMC_RAW_MODE       0
 #define SPAMC_BSMTP_MODE     1
 
-#define SPAMC_SAFE_FALLBACK  1<<30
-#define SPAMC_CHECK_ONLY     1<<31
+#define SPAMC_USE_SSL	     (1<<27)
+#define SPAMC_SAFE_FALLBACK  (1<<28)
+#define SPAMC_CHECK_ONLY     (1<<29)
+
+/* Jan 30, 2003 ym: added reporting options */
+#define SPAMC_REPORT         (1<<26)
+#define SPAMC_REPORT_IFSPAM  (1<<25)
+
+/* Feb  1 2003 jm: might as well fix bug 191 as well */
+#define SPAMC_SYMBOLS        (1<<24)
+
 
 /* Aug 14, 2002 bj: A struct for storing a message-in-progress */
 typedef enum {
@@ -41,6 +47,7 @@ typedef enum {
 struct message {
     /* Set before passing the struct on! */
     int max_len;  /* messages larger than this will return EX_TOOBIG */
+    int timeout;  /* timeout for read() system calls */
 
     /* Filled in by message_read */
     message_type_t type;
@@ -48,6 +55,7 @@ struct message {
     char *pre; int pre_len;   /* Pre-message data (e.g. SMTP commands) */
     char *msg; int msg_len;   /* The message */
     char *post; int post_len; /* Post-message data (e.g. SMTP commands) */
+    int content_length;
 
     /* Filled in by filter_message */
     int is_spam;              /* EX_ISSPAM if the message is spam, EX_NOTSPAM
@@ -81,6 +89,22 @@ int message_filter(const struct sockaddr *addr, char *username, int flags, struc
 /* Convert the host/port into a struct sockaddr. Returns EX_OK on success, or
  * else an error EX. */
 int lookup_host(const char *hostname, int port, struct sockaddr *a);
+
+/* Pass the message through one of a set of spamd's. This variant will handle
+ * multiple spamd machines; if a connect failure occurs, it will fail-over to
+ * the next one in the struct hostent. Otherwise identical to message_filter().
+ */
+int message_filter_with_failover (const struct hostent *hent, int port, char
+    *username, int flags, struct message *m);
+
+/* Convert the host into a struct hostent, for use with
+ * message_filter_with_failover() above. Returns EX_OK on success, or else an
+ * error EX.  Note that the data filled into hent is from gethostbyname()'s
+ * static storage, so any call to gethostbyname() between
+ * lookup_host_for_failover() and message_filter_with_failover() will overwrite
+ * this.  Take a copy, and use that instead, if you think a call may occur in
+ * your code, or library code that you use (such as syslog()). */
+int lookup_host_for_failover(const char *hostname, struct hostent *hent);
 
 /* Dump the message. If there is any data in the message (typically, m->type
  * will be MESSAGE_ERROR) it will be message_writed. Then, fd_in will be piped

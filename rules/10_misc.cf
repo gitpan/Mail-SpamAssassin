@@ -4,6 +4,9 @@
 # the next update. Use @@LOCAL_RULES_DIR@@/local.cf instead.
 # See 'perldoc Mail::SpamAssassin::Conf' for details.
 #
+# See the file "License" in the top level of the SpamAssassin distribution
+# for usage terms.
+#
 ###########################################################################
 
 # Default template. Try to keep it under 76 columns (inside the the dots below).
@@ -12,23 +15,35 @@
 # modifications, so you lose 6 columns right there.
 #
 #      ......................................................................
-clear-report-template
-report -------------------- Start SpamAssassin results ----------------------
-report This mail is probably spam.  The original message has been altered
-report so you can recognise or block similar unwanted mail in future.
-report See http://spamassassin.org/tag/ for more details.
+clear_report_template
+report This mail is probably spam.  The original message has been attached
+report along with this report, so you can recognize or block similar unwanted
+report mail in future.  See http://spamassassin.org/tag/ for more details.
 report 
-report Content analysis details:   (_HITS_ hits, _REQD_ required)
+report Content preview:  _PREVIEW_
+report 
+report Content analysis details:   (_HITS_ points, _REQD_ required)
 report _SUMMARY_
-report -------------------- End of SpamAssassin results ---------------------
 #      ......................................................................
+
+###########################################################################
+
+# Terse report template.
+#
+#            ......................................................................
+clear_terse_report_template
+terse_report ---- Start SpamAssassin results
+terse_report _HITS_ points, _REQD_ required;
+terse_report _SUMMARY_
+terse_report ---- End of SpamAssassin results
+#            ......................................................................
 
 ###########################################################################
 # and now, a template for spam-trap responses.  If the first few lines
 # begin with "Xxxxxx: " where Xxxxxx is a header, they'll be used as
 # headers.
 
-clear-spamtrap-template
+clear_spamtrap_template
 spamtrap Subject: this address is no longer available
 
 spamtrap [this message has been automatically generated]
@@ -50,15 +65,15 @@ spamtrap
 
 ###########################################################################
 
-# Terse report template.
+# Unsafe-for-viewing message report template.
 #
-#            ......................................................................
-clear-terse-report-template
-terse-report ---- Start SpamAssassin results
-terse-report _HITS_ hits, _REQD_ required;
-terse-report _SUMMARY_
-terse-report ---- End of SpamAssassin results
-#            ......................................................................
+#             ......................................................................
+clear_unsafe_report_template
+unsafe_report The original message did not contain plain text, and may be unsafe to
+unsafe_report open with some email clients; in particular, it may contain a virus,
+unsafe_report or confirm that your address can receive spam.  If you wish to view
+unsafe_report it, it may be safer to save it to a file and open it with an editor.
+#             ......................................................................
 
 ###########################################################################
 # Database configuration options.
@@ -107,14 +122,22 @@ ok_locales              all
 # test, so it is set to "all" so the test will not be used by default.
 ok_languages            all
 
-# Some common prefs settings can be set here, to take effect site-wide
-# unless the user override them. See the .prefs file for explanations.
+# Mail which scores outside this range will be fed back into SpamAssassin's
+# learning system automatically, to train the Bayesian scanner.
+auto_learn_threshold_nonspam	-2
+auto_learn_threshold_spam	15
 
-# rewrite_subject       1
-# report_header         0
+# Set this to 0 to turn off auto-learning.
+auto_learn			1
+
+# Some common prefs settings can be set here, to take effect site-wide
+# unless the user override them. See the user_prefs.template file for
+# explanations.
+
+# rewrite_subject       0
+# report_safe           1
 # subject_tag           *****SPAM*****
 # use_terse_report      0
-# defang_mime           1
 # skip_rbl_checks       0
 # check_mx_attempts     2
 # check_mx_delay        5

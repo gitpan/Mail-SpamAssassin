@@ -43,31 +43,29 @@ Where appropriate, default values are listed in parentheses.
 package Mail::SpamAssassin::Conf;
 
 use strict;
+use bytes;
 
-use vars	qw{
-  	@ISA $type_body_tests $type_head_tests $type_head_evals
-	$type_body_evals $type_full_tests $type_full_evals
-	$type_rawbody_tests $type_rawbody_evals 
-	$type_uri_tests $type_uri_evals
-	$type_rbl_evals $type_rbl_res_evals $type_meta_tests
-        $VERSION
+use vars qw{
+  @ISA $VERSION
 };
 
 @ISA = qw();
 
-$type_head_tests = 101;
-$type_head_evals = 102;
-$type_body_tests = 103;
-$type_body_evals = 104;
-$type_full_tests = 105;
-$type_full_evals = 106;
-$type_rawbody_tests = 107;
-$type_rawbody_evals = 108;
-$type_uri_tests  = 109;
-$type_uri_evals  = 110;
-$type_rbl_evals  = 120;
-$type_rbl_res_evals  = 121;
-$type_meta_tests = 122;
+# odd => eval test
+use constant TYPE_HEAD_TESTS    => 0x0008;
+use constant TYPE_HEAD_EVALS    => 0x0009;
+use constant TYPE_BODY_TESTS    => 0x000a;
+use constant TYPE_BODY_EVALS    => 0x000b;
+use constant TYPE_FULL_TESTS    => 0x000c;
+use constant TYPE_FULL_EVALS    => 0x000d;
+use constant TYPE_RAWBODY_TESTS => 0x000e;
+use constant TYPE_RAWBODY_EVALS => 0x000f;
+use constant TYPE_URI_TESTS     => 0x0010;
+use constant TYPE_URI_EVALS     => 0x0011;
+use constant TYPE_META_TESTS    => 0x0012;
+use constant TYPE_RBL_EVALS     => 0x0013;
+# UNUSED => 0x0014
+use constant TYPE_RBL_RES_EVALS => 0x0015;
 
 $VERSION = 'bogus';     # avoid CPAN.pm picking up version strings later
 
@@ -82,7 +80,11 @@ sub new {
   $self->{tests} = { };
   $self->{descriptions} = { };
   $self->{test_types} = { };
-  $self->{scores} = { };
+  $self->{scoreset} = [ {}, {}, {}, {} ];
+  $self->{scoreset_current} = 0;
+  $self->set_score_set (0);
+  $self->{tflags} = { };
+  $self->{source_file} = { };
 
   # after parsing, tests are refiled into these hashes for each test type.
   # this allows e.g. a full-text test to be rewritten as a body test in
@@ -104,6 +106,7 @@ sub new {
 
   $self->{required_hits} = 5.0;
   $self->{report_template} = '';
+  $self->{unsafe_report_template} = '';
   $self->{terse_report_template} = '';
   $self->{spamtrap_template} = '';
 
@@ -117,33 +120,45 @@ sub new {
 
   $self->{num_check_received} = 2;
 
+  $self->{use_razor1} = 1;
+  $self->{use_razor2} = 1;
   $self->{razor_config} = undef;
   $self->{razor_timeout} = 10;
+
   $self->{rbl_timeout} = 30;
 
-  # this will be sedded by whitelist implementations, so ~ is OK
-  $self->{auto_whitelist_path} = "~/.spamassassin/auto-whitelist";
-  $self->{auto_whitelist_file_mode} = '0600';	# as string, with --x bits
+  # this will be sedded by implementation code, so ~ is OK.
+  # using "__userstate__" is recommended for defaults, as it allows
+  # Mail::SpamAssassin module users who set that configuration setting,
+  # to receive the correct values.
+
+  $self->{auto_whitelist_path} = "__userstate__/auto-whitelist";
+  $self->{auto_whitelist_file_mode} = '0700';
   $self->{auto_whitelist_factor} = 0.5;
 
-  $self->{rewrite_subject} = 1;
-  $self->{detailed_phrase_score} = 0;
+  $self->{auto_learn} = 1;
+  $self->{auto_learn_threshold_nonspam} = -2.0;
+  $self->{auto_learn_threshold_spam} = 15.0;
+
+  $self->{rewrite_subject} = 0;
   $self->{spam_level_stars} = 1;
   $self->{spam_level_char} = '*';
   $self->{subject_tag} = '*****SPAM*****';
-  $self->{report_header} = 0;
+  $self->{report_safe} = 1;
   $self->{use_terse_report} = 0;
-  $self->{defang_mime} = 1;
   $self->{skip_rbl_checks} = 0;
   $self->{dns_available} = "test";
   $self->{check_mx_attempts} = 2;
   $self->{check_mx_delay} = 5;
   $self->{ok_locales} = 'all';
-  $self->{ok_languages} = '';
+  $self->{ok_languages} = 'all';
   $self->{allow_user_rules} = 0;
   $self->{user_rules_to_compile} = 0;
   $self->{fold_headers} = 1;
+  $self->{always_add_headers} = 1;
+  $self->{always_add_report} = 0;
 
+  $self->{use_dcc} = 1;
   $self->{dcc_path} = undef; # Browse PATH
   $self->{dcc_body_max} = 999999;
   $self->{dcc_fuz1_max} = 999999;
@@ -152,10 +167,21 @@ sub new {
   $self->{dcc_timeout} = 10;
   $self->{dcc_options} = '-R';
 
+  $self->{use_pyzor} = 1;
   $self->{pyzor_path} = undef; # Browse PATH
   $self->{pyzor_max} = 5;
   $self->{pyzor_add_header} = 0;
   $self->{pyzor_timeout} = 10;
+  $self->{pyzor_options} = '';
+
+  $self->{use_bayes} = 1;
+  $self->{bayes_path} = "__userstate__/bayes";
+  $self->{bayes_file_mode} = "0700";
+  $self->{bayes_use_hapaxes} = 1;
+  $self->{bayes_use_chi2_combining} = 0;
+  $self->{bayes_expiry_min_db_size} = 100000;
+  $self->{bayes_expiry_scan_count} = 5000;
+  $self->{bayes_ignore_headers} = [ ];
 
   $self->{whitelist_from} = { };
   $self->{blacklist_from} = { };
@@ -164,16 +190,18 @@ sub new {
   $self->{more_spam_to} = { };
   $self->{all_spam_to} = { };
 
-  $self->{spamphrase} = { };
-  $self->{spamphrase_highest_score} = 0;
-
   # this will hold the database connection params
   $self->{user_scores_dsn} = '';
   $self->{user_scores_sql_username} = '';
   $self->{user_scores_sql_password} = '';
   $self->{user_scores_sql_table} = 'userpref'; # Morgan - default to userpref for backwords compatibility
-
-  $self->{_unnamed_counter} = 'aaaaa';
+# Michael 'Moose' Dinn, <dinn@twistedpair.ca>
+# For integration with Horde's preference storage
+# 20020831
+  $self->{user_scores_sql_field_username} = 'username';
+  $self->{user_scores_sql_field_preference} = 'preference';
+  $self->{user_scores_sql_field_value} = 'value';
+  $self->{user_scores_sql_field_scope} = 'spamassassin'; # probably shouldn't change this
 
   $self;
 }
@@ -198,20 +226,41 @@ sub parse_rules {
   $self->_parse ($_[1], 0); # don't copy $rules!
 }
 
+sub set_score_set {
+  my ($self, $set) = @_;
+  $self->{scores} = $self->{scoreset}->[$set];
+  $self->{scoreset_current} = $set;
+  dbg("Score set $set chosen.");
+}
+
+sub get_score_set {
+  my($self) = @_;
+  return $self->{scoreset_current};
+}
+
 sub _parse {
   my ($self, undef, $scoresonly) = @_; # leave $rules in $_[1]
   local ($_);
 
-  my $lang = $ENV{'LC_ALL'};
-  $lang ||= $ENV{'LANGUAGE'};
+  # Language selection:
+  # See http://www.gnu.org/manual/glibc-2.2.5/html_node/Locale-Categories.html
+  # and http://www.gnu.org/manual/glibc-2.2.5/html_node/Using-gettextized-software.html
+  my $lang = $ENV{'LANGUAGE'}; # LANGUAGE has the highest precedence but has a 
+  if ($lang) {                 # special format: The user may specify more than
+    $lang =~ s/:.*$//;         # one language here, colon separated. We use the 
+  }                            # first one only (lazy bums we are :o)
+  $lang ||= $ENV{'LC_ALL'};
   $lang ||= $ENV{'LC_MESSAGES'};
   $lang ||= $ENV{'LANG'};
-  $lang ||= 'C';
+  $lang ||= 'C';               # Nothing set means C/POSIX
 
-  if ($lang eq 'C') { $lang = 'en_US'; }
-  $lang =~ s/[\.\@].*$//;	# .utf8 or @euro
+  if ($lang =~ /^(C|POSIX)$/) {
+    $lang = 'en_US';           # Our default language
+  } else {
+    $lang =~ s/[@.+,].*$//;    # Strip codeset, modifier/audience, etc. 
+  }                            # (eg. .utf8 or @euro)
 
-  my $currentfile = '(no file)';
+  $self->{currentfile} = '(no file)';
   my $skipfile = 0;
 
   foreach (split (/\n/, $_[1])) {
@@ -223,12 +272,16 @@ sub _parse {
     if (s/^lang\s+(\S+)\s+//) { next if ($lang !~ /^$1/i); }
     
     # Versioning assertions
-    if (/^file\s+start\s+(.+)$/) { $currentfile = $1; next; }
+    if (/^file\s+start\s+(.+)$/) { $self->{currentfile} = $1; next; }
     if (/^file\s+end/) {
-      $currentfile = '(no file)';
+      $self->{currentfile} = '(no file)';
       $skipfile = 0;
       next;
     }
+
+    # convert all dashes in setting name to underscores.
+    # Simplifies regexps below...
+    1 while s/^(\S+)\-(\S+)/$1_$2/g;
 
 =item require_version n.nn
 
@@ -239,11 +292,11 @@ ignore it.
 
 =cut
 
-    if (/^require[-_]version\s+(.*)$/) {
+    if (/^require_version\s+(.*)$/) {
       my $req_version = $1;
       $req_version =~ s/^\@\@VERSION\@\@$/$Mail::SpamAssassin::VERSION/;
       if ($Mail::SpamAssassin::VERSION != $req_version) {
-        warn "configuration file \"$currentfile\" requires version ".
+        warn "configuration file \"$self->{currentfile}\" requires version ".
                 "$req_version of SpamAssassin, but this is code version ".
                 "$Mail::SpamAssassin::VERSION. Maybe you need to use ".
                 "the -c switch, or remove the old config files? ".
@@ -269,7 +322,7 @@ e.g.
 
 =cut
 
-    if(/^version[-_]tag\s+(.*)$/) {
+    if(/^version_tag\s+(.*)$/) {
       my $tag = lc($1);
       $tag =~ tr/a-z0-9./_/c;
       foreach (@Mail::SpamAssassin::EXTRA_VERSION) {
@@ -294,10 +347,20 @@ so it doesn't provide a shortcut around SpamAssassin.
 
 Whitelist and blacklist addresses are now file-glob-style patterns, so
 C<friend@somewhere.com>, C<*@isp.com>, or C<*.domain.net> will all work.
+Specifically, C<*> and C<?> are allowed, but all other metacharacters are not.
 Regular expressions are not used for security reasons.
 
-Multiple addresses per line, separated by spaces, is OK.  Multiple C<whitelist_from> lines is also
-OK.
+Multiple addresses per line, separated by spaces, is OK.  Multiple
+C<whitelist_from> lines is also OK.
+
+The headers checked for whitelist addresses are as follows: if C<Resent-From>
+is set, use that; otherwise check all addresses taken from the following
+set of headers:
+
+	Envelope-Sender
+	Resent-Sender
+	X-Envelope-From
+	From
 
 e.g.
 
@@ -306,33 +369,15 @@ e.g.
 
 =cut
 
-    if (/^whitelist[-_]from\s+(.+)$/) {
+    if (/^whitelist_from\s+(.+)$/) {
       $self->add_to_addrlist ('whitelist_from', split (' ', $1)); next;
-    }
-
-=item whitelist_from_rcvd lists.sourceforge.net sourceforge.net
-
-Use this to supplement the whitelist_from addresses with a check against the
-Received headers. The first parameter is the address to whitelist, and the
-second is a domain to match in the received headers.
-
-e.g.
-
-  whitelist_from_rcvd joe@example.com  example.com
-  whitelist_from_rcvd axkit.org        sergeant.org
-
-=cut
-
-    if (/^whitelist[-_]from[-_]rcvd\s+(\S+)\s+(\S+)$/) {
-      $self->add_to_addrlist_rcvd ('whitelist_from_rcvd', $1, $2);
-      next;
     }
 
 =item unwhitelist_from add@ress.com
 
-Used to override a default whitelist_from entry, so for example a distribution whitelist_from
-can be overriden in a local.cf file, or an individual user can override a whitelist_from entry
-in their own C<user_prefs> file.
+Used to override a default whitelist_from entry, so for example a distribution
+whitelist_from can be overriden in a local.cf file, or an individual user can
+override a whitelist_from entry in their own C<user_prefs> file.
 
 e.g.
 
@@ -341,8 +386,46 @@ e.g.
 
 =cut
 
-    if (/^unwhitelist[-_]from\s+(.+)$/) {
+    if (/^unwhitelist_from\s+(.+)$/) {
       $self->remove_from_addrlist ('whitelist_from', split (' ', $1)); next;
+    }
+
+=item whitelist_from_rcvd lists.sourceforge.net sourceforge.net
+
+Use this to supplement the whitelist_from addresses with a check against the
+Received headers. The first parameter is the address to whitelist, and the
+second is a domain to match in the Received headers.  This does not
+allow globbing, and must be followed by a numeric IP address in brackets.
+
+e.g.
+
+  whitelist_from_rcvd joe@example.com  example.com
+  whitelist_from_rcvd axkit.org        sergeant.org
+
+=cut
+
+    if (/^whitelist_from_rcvd\s+(\S+)\s+(\S+)$/) {
+      $self->add_to_addrlist_rcvd ('whitelist_from_rcvd', $1, $2);
+      next;
+    }
+
+=item unwhitelist_from_rcvd add@ress.com
+
+Used to override a default whitelist_from_rcvd entry, so for example a
+distribution whitelist_from_rcvd can be overriden in a local.cf file,
+or an individual user can override a whitelist_from_rcvd entry in
+their own C<user_prefs> file.
+
+e.g.
+
+  unwhitelist_from_rcvd joe@example.com fred@example.com
+  unwhitelist_from_rcvd amazon.com
+
+=cut
+
+    if (/^unwhitelist_from\s+(.+)$/) {
+      $self->remove_from_addrlist_rcvd('whitelist_from_rcvd', split (' ', $1));
+      next;
     }
 
 =item blacklist_from add@ress.com
@@ -352,7 +435,7 @@ non-spam, but which the user doesn't want.  Same format as C<whitelist_from>.
 
 =cut
 
-    if (/^blacklist[-_]from\s+(.+)$/) {
+    if (/^blacklist_from\s+(.+)$/) {
       $self->add_to_addrlist ('blacklist_from', split (' ', $1)); next;
     }
 
@@ -369,7 +452,7 @@ e.g.
 
 =cut
 
-    if (/^unblacklist[-_]from\s+(.+)$/) {
+    if (/^unblacklist_from\s+(.+)$/) {
       $self->remove_from_addrlist ('blacklist_from', split (' ', $1)); next;
     }
 
@@ -394,13 +477,13 @@ See above.
 
 =cut
 
-    if (/^whitelist[-_]to\s+(.+)$/) {
+    if (/^whitelist_to\s+(.+)$/) {
       $self->add_to_addrlist ('whitelist_to', split (' ', $1)); next;
     }
-    if (/^more[-_]spam[-_]to\s+(.+)$/) {
+    if (/^more_spam_to\s+(.+)$/) {
       $self->add_to_addrlist ('more_spam_to', split (' ', $1)); next;
     }
-    if (/^all[-_]spam[-_]to\s+(.+)$/) {
+    if (/^all_spam_to\s+(.+)$/) {
       $self->add_to_addrlist ('all_spam_to', split (' ', $1)); next;
     }
 
@@ -409,51 +492,67 @@ See above.
 Set the number of hits required before a mail is considered spam.  C<n.nn> can
 be an integer or a real number.  5.0 is the default setting, and is quite
 aggressive; it would be suitable for a single-user setup, but if you're an ISP
-installing SpamAssassin, you should probably set the default to be something
-much more conservative, like 8.0 or 10.0.  Experience has shown that you
-B<will> get plenty of user complaints otherwise!
+installing SpamAssassin, you should probably set the default to be more
+conservative, like 8.0 or 10.0.  It is not recommended to automatically delete
+or discard messages marked as spam, as your users B<will> complain, but if you
+choose to do so, only delete messages with an exceptionally high score such as
+15.0 or higher.
 
 =cut
 
-    if (/^required[-_]hits\s+(\S+)$/) {
+    if (/^required_hits\s+(\S+)$/) {
       $self->{required_hits} = $1+0.0; next;
     }
 
-=item score SYMBOLIC_TEST_NAME n.nn
+=item score SYMBOLIC_TEST_NAME n.nn [ n.nn n.nn n.nn ]
 
-Assign a score to a given test.  Scores can be positive or negative real
-numbers or integers.  C<SYMBOLIC_TEST_NAME> is the symbolic name used by
-SpamAssassin as a handle for that test; for example, 'FROM_ENDS_IN_NUMS'.
+Assign scores (the number of points for a hit) to a given test. Scores can
+be positive or negative real numbers or integers. C<SYMBOLIC_TEST_NAME> is
+the symbolic name used by SpamAssassin for that test; for example,
+'FROM_ENDS_IN_NUMS'.
+
+If only one valid score is listed, then that score is always used for a
+test.
+
+If four valid scores are listed, then the score that is used depends on how
+SpamAssassin is being used. The first score is used when both Bayes and
+network tests are disabled. The second score is used when Bayes is disabled,
+but network tests are enabled. The third score is used when Bayes is enabled
+and network tests are disabled. The fourth score is used when Bayes is
+enabled and network tests are enabled.
 
 Note that test names which begin with '__' are reserved for meta-match
 sub-rules, and are not scored or listed in the 'tests hit' reports.
 
+If no score is given for a test, the default score is 1.0, or 0.01 for
+tests whose names begin with 'T_' (this is used to indicate a rule under
+test).
+
 =cut
 
-    if (/^score\s+(\S+)\s+(\-*[\d\.]+)$/) {
-      $self->{scores}->{$1} = $2+0.0; next;
+  if (my ($rule, $scores) = /^score\s+(\S+)\s+(.*)$/) {
+    my @scores = ($scores =~ /(\-*[\d\.]+)(?:\s+|$)/g);
+    if (scalar @scores == 4) {
+      for my $index (0..3) {
+	$self->{scoreset}->[$index]->{$rule} = $scores[$index] + 0.0;
+      }
     }
-
-=item detailed_phrase_score { 0 | 1 }        (default: 0)
-
-This option displays all matches for "contains phrases frequently found in spam"
-Note that this is disabled by default because it can output huge headers (800
-words and more than 8KB in some cases)
-
-=cut
-
-    if (/^detailed[-_]phrase[-_]score\s+(\d+)$/) {
-      $self->{detailed_phrase_score} = $1+0; next;
+    elsif (scalar @scores > 0) {
+      for my $index (0..3) {
+	$self->{scoreset}->[$index]->{$rule} = $scores[0] + 0.0;
+      }
     }
+    next;
+  }
 
-=item rewrite_subject { 0 | 1 }        (default: 1)
+=item rewrite_subject { 0 | 1 }        (default: 0)
 
-By default, the subject lines of suspected spam will be tagged.  This can be
-disabled here.
+By default, the subject lines of suspected spam will not be tagged.  This can
+be enabled here.
 
 =cut
 
-    if (/^rewrite[-_]subject\s+(\d+)$/) {
+    if (/^rewrite_subject\s+(\d+)$/) {
       $self->{rewrite_subject} = $1+0; next;
     }
 
@@ -465,8 +564,39 @@ This can be disabled here.
 
 =cut
 
-   if (/^fold[-_]headers\s+(\d+)$/) {
+   if (/^fold_headers\s+(\d+)$/) {
      $self->{fold_headers} = $1+0; next;
+   }
+
+=item always_add_headers { 0 | 1 }      (default: 1)
+
+By default, B<X-Spam-Status>, B<X-Spam-Checker-Version>, (and optionally
+B<X-Spam-Level>) will be added to all messages scanned by SpamAssassin.  If you
+don't want to add the headers to non-spam, set this value to 0.  See also
+B<always_add_report>.
+
+=cut
+
+   if (/^always_add_headers\s+(\d+)$/) {
+     $self->{always_add_headers} = $1+0; next;
+   }
+
+
+=item always_add_report { 0 | 1 }	(default: 0)
+
+By default, mail tagged as spam includes a report, either in the headers or in
+an attachment (report_safe). If you set this to option to C<1>, the report will
+be included in the B<X-Spam-Report> header, even if the message is not tagged
+as spam.  Note that the report text B<always> states that the mail is spam,
+since normally the report is only added if the mail B<is> spam.
+
+This can be useful if you want to know what rules the mail triggered, and why
+it was not tagged as spam.  See also B<always_add_headers>.
+
+=cut
+
+   if (/^always_add_report\s+(\d+)$/) {
+     $self->{always_add_report} = $1+0; next;
    }
 
 =item spam_level_stars { 0 | 1 }        (default: 1)
@@ -481,7 +611,7 @@ This can be useful for MUA rule creation.
 
 =cut
 
-   if(/^spam[-_]level[-_]stars\s+(\d+)$/) {
+   if(/^spam_level_stars\s+(\d+)$/) {
       $self->{spam_level_stars} = $1+0; next;
    }
 
@@ -497,7 +627,7 @@ X-Spam-Level: .......
 
 =cut
 
-   if(/^spam[-_]level[-_]char\s+(.)$/) {
+   if(/^spam_level_char\s+(.)$/) {
       $self->{spam_level_char} = $1; next;
    }
 
@@ -509,63 +639,37 @@ score for this message. _REQD_ will be replaced with the threshold.
 
 =cut
 
-    if (/^subject[-_]tag\s+(.+)$/) {
+    if (/^subject_tag\s+(.+)$/) {
       $self->{subject_tag} = $1; next;
     }
 
-=item report_header { 0 | 1 }	(default: 0)
+=item report_safe { 0 | 1 }	(default: 1)
 
-By default, SpamAssassin will include its report in the body of suspected spam.
-Enabling this causes the report to go in the headers instead. Using
-'use_terse_report' with this is recommended.
+if this option is set to 1, if an incoming message is tagged as spam,
+instead of modifying the original message, SpamAssassin will create a
+new report message and attach the original message as a message/rfc822
+MIME part (ensuring the original message is completely preserved, not
+easily opened, and easier to recover).
+
+If this option is set to 0, incoming spam is only modified by adding
+some headers and no changes will be made to the body.
 
 =cut
 
-    if (/^report[-_]header\s+(\d+)$/) {
-      $self->{report_header} = $1+0; next;
+    if (/^report_safe\s+(\d+)$/) {
+      $self->{report_safe} = $1+0; next;
     }
 
 =item use_terse_report { 0 | 1 }   (default: 0)
 
-By default, SpamAssassin uses a fairly long report format.  Enabling this uses
-a shorter format which includes all the information in the normal one, but
-without the superfluous explanations.
+By default, SpamAssassin uses a long report format, explaining what
+happened to the mail message, for newbie users.   If you would prefer
+shorter reports, set this to C<1>.
 
 =cut
 
-    if (/^use[-_]terse[-_]report\s+(\d+)$/) {
+    if (/^use_terse_report\s+(\d+)$/) {
       $self->{use_terse_report} = $1+0; next;
-    }
-
-=item defang_mime { 0 | 1 }   (default: 1)
-
-By default, SpamAssassin will change the Content-type: header of suspected spam
-to "text/plain". This is a safety feature. If you prefer to leave the
-Content-type header alone, set this to 0.
-
-=cut
-
-    if (/^defang[-_]mime\s+(\d+)$/) {
-      $self->{defang_mime} = $1+0; next;
-    }
-
-=item dns_available { yes | test[: name1 name2...] | no }   (default: test)
-
-By default, SpamAssassin will query some default hosts on the internet to
-attempt to check if DNS is working on not. The problem is that it can introduce
-some delay if your network connection is down, and in some cases it can wrongly
-guess that DNS is unavailable because the test connections failed.
-SpamAssassin includes a default set of 13 servers, among which 3 are picked
-randomly.
-
-You can however specify your own list by specifying
-
-dns_available test: server1.tld server2.tld server3.tld
-
-=cut
-
-    if (/^dns[-_]available\s+(yes|no|test|test:\s+.+)$/) {
-      $self->{dns_available} = ($1 or "test"); next;
     }
 
 =item skip_rbl_checks { 0 | 1 }   (default: 0)
@@ -575,41 +679,24 @@ for you, set this to 1.
 
 =cut
 
-    if (/^skip[-_]rbl[-_]checks\s+(\d+)$/) {
+    if (/^skip_rbl_checks\s+(\d+)$/) {
       $self->{skip_rbl_checks} = $1+0; next;
-    }
-
-=item check_mx_attempts n	(default: 2)
-
-By default, SpamAssassin checks the From: address for a valid MX this many
-times, waiting 5 seconds each time.
-
-=cut
-
-    if (/^check[-_]mx[-_]attempts\s+(\S+)$/) {
-      $self->{check_mx_attempts} = $1+0; next;
-    }
-
-=item check_mx_delay n		(default 5)
-
-How many seconds to wait before retrying an MX check.
-
-=cut
-
-    if (/^check[-_]mx[-_]delay\s+(\S+)$/) {
-      $self->{check_mx_delay} = $1+0; next;
     }
 
 =item ok_languages xx [ yy zz ... ]		(default: all)
 
-Which languages are considered OK to receive mail from.  Mail using
-character sets used by these languages will not be marked as possibly
-being spam in an undesired language.
+Which languages are considered OK to receive mail in.  SpamAssassin will try to
+detect the language used in the message text.
 
-The following languages are recognized.  In your configuration, you must
-use the language specifier located in the first column, not the English
-name for the language.  You may also specify "all" if your language is
-not listed or if you want to allow any language.
+Note that the language cannot always be recognized reliably.  In that case, no
+points will be assigned.
+
+The rule C<UNDESIRED_LANGUAGE_BODY> is triggered based on how this is set.
+
+The following languages are recognized.  In your configuration, you must use
+the language specifier located in the first column, not the English name for
+the language.  You may also specify C<all> if your language is not listed, or
+if you want to allow any language.  The default setting is C<all>.
 
 =over 4
 
@@ -742,42 +829,40 @@ not listed or if you want to allow any language.
 =item zh	chinese
 
 =back
+example:
 
-Note that the language cannot always be recognized.  In that case, no
-points will be assigned.
+  ok_languages all		(allow all languages)
+  ok_languages en		(only allow English)
+  ok_languages en ja zh		(English, Japanese and Chinese)
 
 =cut
 
-    if (/^ok[-_]languages\s+(.+)$/) {
+    if (/^ok_languages\s+(.+)$/) {
       $self->{ok_languages} = $1; next;
-    }
-
-=item rbl_timeout n		(default 30)
-
-All RBL queries are started at the beginning and we try to read the results
-at the end. In case some of them are hanging or not returning, you can specify
-here how long you're willing to wait for them before deciding that they timed
-out
-
-=cut
-
-    if (/^rbl[-_]timeout\s+(\d+)$/) {
-      $self->{rbl_timeout} = $1+0; next;
     }
 
 =item ok_locales xx [ yy zz ... ]		(default: all)
 
 Which locales (country codes) are considered OK to receive mail from.  Mail
-using character sets used by languages in these countries, will not be marked
-as possibly being spam in a foreign language.
+using B<character sets> used by languages in these countries, will not be
+marked as possibly being spam in a foreign language.
 
-Note that all ISO-8859-* character sets, and Windows code page character sets,
-are always permitted by default anyway.
+If you receive lots of spam in foreign languages, and never get any non-spam in
+these languages, this may help.  Note that all ISO-8859-* character sets, and
+Windows code page character sets, are always permitted by default.
 
-If you wish SpamAssassin to block spam in foreign languages, set this to
-the locale which matches your preference, from the list below:
+Set this to C<all> to allow all character sets.  This is the default.
+
+The rules C<CHARSET_FARAWAY>, C<CHARSET_FARAWAY_BODY>, and
+C<CHARSET_FARAWAY_HEADERS> are triggered based on how this is set.
+
+Select the locales to allow from the list below:
 
 =over 4
+
+=item en
+
+Western character sets in general
 
 =item ja
 
@@ -801,28 +886,15 @@ Chinese (both simplified and traditional)
 
 =back
 
+example:
+
+  ok_locales all		(allow all character sets)
+  ok_locales ja ru th zh	(penalise Chinese messages)
+
 =cut
 
-    if (/^ok[-_]locales\s+(.+)$/) {
+    if (/^ok_locales\s+(.+)$/) {
       $self->{ok_locales} = $1; next;
-    }
-
-=item auto_whitelist_factor n	(default: 0.5, range [0..1])
-
-How much towards the long-term mean for the sender to regress a message.  Basically,
-the algorithm is to track the long-term mean score of messages for the sender (C<mean>),
-and then once we have otherwise fully calculated the score for this message (C<score>),
-we calculate the final score for the message as:
-
-C<finalscore> = C<score> +  (C<mean> - C<score>) * C<factor>
-
-So if C<factor> = 0.5, then we'll move to half way between the calculated score and the mean.
-If C<factor> = 0.3, then we'll move about 1/3 of the way from the score toward the mean.
-C<factor> = 1 means just use the long-term mean; C<factor> = 0 mean just use the calculated score.
-
-=cut
-    if (/^auto[-_]whitelist[-_]factor\s+(.*)$/) {
-      $self->{auto_whitelist_factor} = $1; next;
     }
 
 =item describe SYMBOLIC_TEST_NAME description ...
@@ -838,10 +910,11 @@ sub-rules, and are not scored or listed in the 'tests hit' reports.
       $self->{descriptions}->{$1} = $2; next;
     }
 
-=item tflags SYMBOLIC_TEST_NAME [ { net | nice } ... ]
+=item tflags SYMBOLIC_TEST_NAME [ { net | nice | learn | userconf } ... ]
 
-Used to set flags on a test.  These flags are used in the score-determination back
-end system for details of the test's behaviour.  The following flags can be set:
+Used to set flags on a test.  These flags are used in the score-determination
+back end system for details of the test's behaviour.  The following flags can
+be set:
 
 =over 4
 
@@ -855,11 +928,21 @@ or if B<-L> is used, therefore its score should not be modified.
 The test is intended to compensate for common false positives, and should be
 assigned a negative score.
 
+=item  userconf
+
+The test requires user configuration before it can be used (like language-
+specific tests).
+
+=item  learn
+
+The test requires training before it can be used.
+
 =back
 
 =cut
 
-    if (/^tflags\s/) {
+    if (/^tflags\s+(\S+)\s+(.+)$/) {
+      $self->{tflags}->{$1} = $2; next;
       next;     # ignored in SpamAssassin modules
     }
 
@@ -906,8 +989,33 @@ Clear the report template.
 
 =cut
 
-    if (/^clear[-_]report[-_]template$/) {
+    if (/^clear_report_template$/) {
       $self->{report_template} = ''; next;
+    }
+
+=item unsafe_report ...some text for a report...
+
+Set the report template which is attached to spam mail messages which contain a
+non-text/plain part.  See the C<10_misc.cf> configuration file in
+C</usr/share/spamassassin> for an example.
+
+Each C<unsafe-report> line appends to the existing template, so use
+C<clear-report-template> to restart.
+
+=cut
+
+    if (/^unsafe_report\b\s*(.*?)$/) {
+      $self->{unsafe_report_template} .= $1."\n"; next;
+    }
+
+=item clear_unsafe_report_template
+
+Clear the unsafe_report template.
+
+=cut
+
+    if (/^clear_unsafe_report_template$/) {
+      $self->{unsafe_report_template} = ''; next;
     }
 
 =item terse_report ...some text for a report...
@@ -918,17 +1026,17 @@ C</usr/share/spamassassin> for an example.
 
 =cut
 
-    if (/^terse[-_]report\b\s*(.*?)$/) {
+    if (/^terse_report\b\s*(.*?)$/) {
       $self->{terse_report_template} .= $1."\n"; next;
     }
 
-=item clear-terse-report-template
+=item clear_terse_report_template
 
 Clear the terse-report template.
 
 =cut
 
-    if (/^clear[-_]terse[-_]report[-_]template$/) {
+    if (/^clear_terse_report_template$/) {
       $self->{terse_report_template} = ''; next;
     }
 
@@ -951,19 +1059,29 @@ Clear the spamtrap template.
 
 =cut
 
-    if (/^clear[-_]spamtrap[-_]template$/) {
+    if (/^clear_spamtrap_template$/) {
       $self->{spamtrap_template} = ''; next;
     }
 
-=item dcc_path STRING
+=item use_dcc ( 0 | 1 )		(default 1)
 
-This option tells SpamAssassin specifically where to find the pyzor client
-instead of relying on SpamAssassin to find it in the current PATH.
+Whether to use DCC, if it is available.
 
 =cut
 
-    if (/^dcc[-_]path\s+(.+)$/) {
-      $self->{dcc_path} = $1; next;
+    if (/^use_dcc\s+(\d+)$/) {
+      $self->{use_dcc} = $1; next;
+    }
+
+=item dcc_timeout n              (default: 10)
+
+How many seconds you wait for dcc to complete before you go on without 
+the results
+
+=cut
+
+    if (/^dcc_timeout\s+(\d+)$/) {
+      $self->{dcc_timeout} = $1+0; next;
     }
 
 =item dcc_body_max NUMBER
@@ -984,15 +1102,15 @@ The default is 999999 for all these options.
 
 =cut
 
-    if (/^dcc[-_]body[-_]max\s+(\d+)/) {
+    if (/^dcc_body_max\s+(\d+)/) {
       $self->{dcc_body_max} = $1+0; next;
     }
 
-    if (/^dcc[-_]fuz1[-_]max\s+(\d+)/) {
+    if (/^dcc_fuz1_max\s+(\d+)/) {
       $self->{dcc_fuz1_max} = $1+0; next;
     }
 
-    if (/^dcc[-_]fuz2[-_]max\s+(\d+)/) {
+    if (/^dcc_fuz2_max\s+(\d+)/) {
       $self->{dcc_fuz2_max} = $1+0; next;
     }
 
@@ -1006,30 +1124,29 @@ The default is to not add the header.
 
 =cut
 
-    if (/^dcc[-_]add[-_]header\s+(\d+)$/) {
+    if (/^dcc_add_header\s+(\d+)$/) {
       $self->{dcc_add_header} = $1+0; next;
     }
 
-=item dcc_timeout n              (default: 10)
+=item use_pyzor ( 0 | 1 )		(default 1)
 
-How many seconds you wait for dcc to complete before you go on without 
-the results
+Whether to use Pyzor, if it is available.
 
 =cut
 
-    if (/^dcc[-_]timeout\s+(\d+)$/) {
-      $self->{dcc_timeout} = $1+0; next;
+    if (/^use_pyzor\s+(\d+)$/) {
+      $self->{use_pyzor} = $1; next;
     }
 
-=item pyzor_path STRING
+=item pyzor_timeout n              (default: 10)
 
-This option tells SpamAssassin specifically where to find the pyzor client
-instead of relying on SpamAssassin to find it in the current PATH.
+How many seconds you wait for Pyzor to complete before you go on without 
+the results.
 
 =cut
 
-    if (/^pyzor[-_]path\s+(.+)$/) {
-      $self->{pyzor_path} = $1; next;
+    if (/^pyzor_timeout\s+(\d+)$/) {
+      $self->{pyzor_timeout} = $1+0; next;
     }
 
 =item pyzor_max NUMBER
@@ -1042,7 +1159,7 @@ The default is 5.
 
 =cut
 
-    if (/^pyzor[-_]max\s+(\d+)/) {
+    if (/^pyzor_max\s+(\d+)/) {
       $self->{pyzor_max} = $1+0; next;
     }
 
@@ -1056,34 +1173,22 @@ The default is to not add the header.
 
 =cut
 
-    if (/^pyzor[-_]add[-_]header\s+(\d+)$/) {
+    if (/^pyzor_add_header\s+(\d+)$/) {
       $self->{pyzor_add_header} = $1+0; next;
     }
 
-=item pyzor_timeout n              (default: 10)
-
-How many seconds you wait for pyzor to complete before you go on without 
-the results
-
-=cut
-
-    if (/^pyzor[-_]timeout\s+(\d+)$/) {
-      $self->{pyzor_timeout} = $1+0; next;
-    }
 
 
-=item razor_timeout n		(default 10)
+=item pyzor_options options
 
-How many seconds you wait for razor to complete before you go on without 
-the results
+Specify options to the pyzor command. Please note that only
+[A-Za-z0-9 -/] is allowed (security).
 
 =cut
 
-    if (/^razor[-_]timeout\s+(\d+)$/) {
-      $self->{razor_timeout} = $1; next;
+    if (/^pyzor_options\s+([A-Za-z0-9 -\/]+)/) {
+      $self->{pyzor_options} = $1; next;
     }
-
-
 
 =item num_check_received { integer }   (default: 2)
 
@@ -1098,9 +1203,189 @@ See dialup_codes for more details and an example
 
 =cut
 
-    if (/^num[-_]check[-_]received\s+(\d+)$/) {
+    if (/^num_check_received\s+(\d+)$/) {
       $self->{num_check_received} = $1+0; next;
     }
+
+
+=item use_razor1 ( 0 | 1 )		(default 1)
+
+Whether to use Razor version 1, if it is available.
+
+=cut
+
+    if (/^use_razor1\s+(\d+)$/) {
+      $self->{use_razor1} = $1; next;
+    }
+
+=item use_razor2 ( 0 | 1 )		(default 1)
+
+Whether to use Razor version 2, if it is available.
+
+=cut
+
+    if (/^use_razor2\s+(\d+)$/) {
+      $self->{use_razor2} = $1; next;
+    }
+
+=item razor_timeout n		(default 10)
+
+How many seconds you wait for razor to complete before you go on without 
+the results
+
+=cut
+
+    if (/^razor_timeout\s+(\d+)$/) {
+      $self->{razor_timeout} = $1; next;
+    }
+
+=item use_bayes ( 0 | 1 )		(default 1)
+
+Whether to use the naive-Bayesian-style classifier built into SpamAssassin.
+
+=cut
+
+    if (/^use_bayes\s+(\d+)$/) {
+      $self->{use_bayes} = $1; next;
+    }
+
+=item rbl_timeout n		(default 30)
+
+All RBL queries are started at the beginning and we try to read the results
+at the end. In case some of them are hanging or not returning, you can specify
+here how long you're willing to wait for them before deciding that they timed
+out
+
+=cut
+
+    if (/^rbl_timeout\s+(\d+)$/) {
+      $self->{rbl_timeout} = $1+0; next;
+    }
+
+=item check_mx_attempts n	(default: 2)
+
+By default, SpamAssassin checks the From: address for a valid MX this many
+times, waiting 5 seconds each time.
+
+=cut
+
+    if (/^check_mx_attempts\s+(\S+)$/) {
+      $self->{check_mx_attempts} = $1+0; next;
+    }
+
+=item check_mx_delay n		(default 5)
+
+How many seconds to wait before retrying an MX check.
+
+=cut
+
+    if (/^check_mx_delay\s+(\S+)$/) {
+      $self->{check_mx_delay} = $1+0; next;
+    }
+
+
+=item dns_available { yes | test[: name1 name2...] | no }   (default: test)
+
+By default, SpamAssassin will query some default hosts on the internet to
+attempt to check if DNS is working on not. The problem is that it can introduce
+some delay if your network connection is down, and in some cases it can wrongly
+guess that DNS is unavailable because the test connections failed.
+SpamAssassin includes a default set of 13 servers, among which 3 are picked
+randomly.
+
+You can however specify your own list by specifying
+
+dns_available test: server1.tld server2.tld server3.tld
+
+=cut
+
+    if (/^dns_available\s+(yes|no|test|test:\s+.+)$/) {
+      $self->{dns_available} = ($1 or "test"); next;
+    }
+
+=item auto_whitelist_factor n	(default: 0.5, range [0..1])
+
+How much towards the long-term mean for the sender to regress a message.
+Basically, the algorithm is to track the long-term mean score of messages for
+the sender (C<mean>), and then once we have otherwise fully calculated the
+score for this message (C<score>), we calculate the final score for the
+message as:
+
+C<finalscore> = C<score> +  (C<mean> - C<score>) * C<factor>
+
+So if C<factor> = 0.5, then we'll move to half way between the calculated
+score and the mean.  If C<factor> = 0.3, then we'll move about 1/3 of the way
+from the score toward the mean.  C<factor> = 1 means just use the long-term
+mean; C<factor> = 0 mean just use the calculated score.
+
+=cut
+    if (/^auto_whitelist_factor\s+(.*)$/) {
+      $self->{auto_whitelist_factor} = $1; next;
+    }
+
+=item auto_learn ( 0 | 1 )	(default: 1)
+
+Whether SpamAssassin should automatically feed high-scoring mails (or
+low-scoring mails, for non-spam) into its learning systems.  The only
+learning system supported currently is a naive-Bayesian-style classifier.
+
+Note that certain tests are ignored when determining whether a message
+should be trained upon:
+ - auto-whitelist (AWL)
+ - rules with tflags set to 'learn' (the Bayesian rules)
+ - rules with tflags set to 'userconf' (user white/black-listing rules, etc)
+
+Also note that auto-training occurs using scores from either scoreset
+0 or 1, depending on what scoreset is used during message check.  It is
+likely that the message check and auto-train scores will be different.
+
+=cut
+
+    if (/^auto_learn\s+(.*)$/) {
+      $self->{auto_learn} = $1+0; next;
+    }
+
+=item auto_learn_threshold_nonspam n.nn	(default -2.0)
+
+The score threshold below which a mail has to score, to be fed into
+SpamAssassin's learning systems automatically as a non-spam message.
+
+=cut
+
+    if (/^auto_learn_threshold_nonspam\s+(.*)$/) {
+      $self->{auto_learn_threshold_nonspam} = $1+0; next;
+    }
+
+=item auto_learn_threshold_spam n.nn	(default 15.0)
+
+The score threshold above which a mail has to score, to be fed into
+SpamAssassin's learning systems automatically as a spam message.
+
+=cut
+
+    if (/^auto_learn_threshold_spam\s+(.*)$/) {
+      $self->{auto_learn_threshold_spam} = $1+0; next;
+    }
+
+
+=item bayes_ignore_header	
+
+If you receive mail filtered by upstream mail systems, like
+a spam-filtering ISP or mailing list, and that service adds
+new headers (as most of them do), these headers may provide
+inappropriate cues to the Bayesian classifier, allowing it
+to take a "short cut". To avoid this, list the headers using this
+setting.  Example:
+
+	bayes_ignore_header X-Upstream-Spamfilter
+	bayes_ignore_header X-Upstream-SomethingElse
+
+=cut
+    if (/^bayes_ignore_header\s+(.*)$/) {
+      push (@{$self->{bayes_ignore_headers}}, $1); next;
+    }
+
+
 
 ###########################################################################
     # SECURITY: no eval'd code should be loaded before this line.
@@ -1136,12 +1421,10 @@ server load. It is not recommended.
 =cut
 
 
-    if (/^allow[-_]user[-_]rules\s+(\d+)$/) {
+    if (/^allow_user_rules\s+(\d+)$/) {
       $self->{allow_user_rules} = $1+0; 
-      dbg("Allowing user rules!"); next;
+      dbg( ($self->{allow_user_rules} ? "Allowing":"Not allowing") . " user rules!"); next;
     }
-
-
 
 # If you think, this is complex, you should have seen the four previous
 # implementations that I scratched :-)
@@ -1209,7 +1492,7 @@ score Z_FUDGE_DUL_OSIRU_FH	1.5
 
 =cut
 
-    if (/^dialup[-_]codes\s+(.*)$/) {
+    if (/^dialup_codes\s+(.*)$/) {
 	$self->{dialup_codes} = eval $1;
 	next;
     }
@@ -1224,8 +1507,13 @@ Define a test.  C<SYMBOLIC_TEST_NAME> is a symbolic test name, such as
 'FROM_ENDS_IN_NUMS'.  C<header> is the name of a mail header, such as
 'Subject', 'To', etc.
 
-'ALL' can be used to mean the text of all the message's headers.  'ToCc' can be
-used to mean the contents of both the 'To' and 'Cc' headers.
+'ALL' can be used to mean the text of all the message's headers.  'ToCc' can
+be used to mean the contents of both the 'To' and 'Cc' headers.
+
+'MESSAGEID' is a symbol meaning all Message-Id's found in the message; some
+mailing list software moves the I<real> Message-Id to 'Resent-Message-Id' or
+'X-Message-Id', then uses its own one in the 'Message-Id' header.  The value
+returned for this symbol is the text from all 3 headers, separated by newlines.
 
 C<op> is either C<=~> (contains regular expression) or C<!~> (does not contain
 regular expression), and C<pattern> is a valid Perl regular expression, with
@@ -1234,8 +1522,18 @@ C<modifiers> as regexp modifiers in the usual style.
 If the C<[if-unset: STRING]> tag is present, then C<STRING> will
 be used if the header is not found in the mail message.
 
+Test names should not start with a number, and must contain only alphanumerics
+and underscores.  It is suggested that lower-case characters not be used, as an
+informal convention.  Dashes are not allowed.
+
 Note that test names which begin with '__' are reserved for meta-match
 sub-rules, and are not scored or listed in the 'tests hit' reports.
+Test names which begin with 'T_' are reserved for tests which are
+undergoing QA, and these are given a very low score.
+
+If you add or modify a test, please be sure to run a sanity check afterwards
+by running C<spamassassin --lint>.  This will avoid confusing error
+messages, or other tests being skipped as a side-effect.
 
 
 =item header SYMBOLIC_TEST_NAME exists:name_of_header
@@ -1252,29 +1550,29 @@ are optional arguments to the function call.
 
 =cut
     if (/^header\s+(\S+)\s+rbleval:(.*)$/) {
-      $self->add_test ($1, $2, $type_rbl_evals); next;
+      $self->add_test ($1, $2, TYPE_RBL_EVALS); next;
     }
     if (/^header\s+(\S+)\s+rblreseval:(.*)$/) {
-      $self->add_test ($1, $2, $type_rbl_res_evals); next;
+      $self->add_test ($1, $2, TYPE_RBL_RES_EVALS); next;
     }
     if (/^header\s+(\S+)\s+eval:(.*)$/) {
       my ($name,$rule) = ($1, $2);
       # Backward compatibility with old rule names -- Marc
       if ($name =~ /^RCVD_IN/) {
-        $self->add_test ($name, $rule, $type_rbl_evals); next;
+        $self->add_test ($name, $rule, TYPE_RBL_EVALS); next;
       } else {
-       $self->add_test ($name, $rule, $type_head_evals); next;
+        $self->add_test ($name, $rule, TYPE_HEAD_EVALS); next;
       }
       $self->{user_rules_to_compile} = 1 if $scoresonly;
       next;
     }
     if (/^header\s+(\S+)\s+exists:(.*)$/) {
-      $self->add_test ($1, "$2 =~ /./", $type_head_tests);
+      $self->add_test ($1, "$2 =~ /./", TYPE_HEAD_TESTS);
       $self->{descriptions}->{$1} = "Found a $2 header";
       next;
     }
     if (/^header\s+(\S+)\s+(.*)$/) {
-      $self->add_test ($1, $2, $type_head_tests);
+      $self->add_test ($1, $2, TYPE_HEAD_TESTS);
       $self->{user_rules_to_compile} = 1 if $scoresonly;
       next;
     }
@@ -1294,12 +1592,12 @@ Define a body eval test.  See above.
 
 =cut
     if (/^body\s+(\S+)\s+eval:(.*)$/) {
-      $self->add_test ($1, $2, $type_body_evals);
+      $self->add_test ($1, $2, TYPE_BODY_EVALS);
       $self->{user_rules_to_compile} = 1 if $scoresonly;
       next;
     }
     if (/^body\s+(\S+)\s+(.*)$/) {
-      $self->add_test ($1, $2, $type_body_tests);
+      $self->add_test ($1, $2, TYPE_BODY_TESTS);
       $self->{user_rules_to_compile} = 1 if $scoresonly;
       next;
     }
@@ -1317,12 +1615,12 @@ points of the URI, and will also be faster.
 =cut
 # we don't do URI evals yet - maybe later
 #    if (/^uri\s+(\S+)\s+eval:(.*)$/) {
-#      $self->add_test ($1, $2, $type_uri_evals);
+#      $self->add_test ($1, $2, TYPE_URI_EVALS);
 #      $self->{user_rules_to_compile} = 1 if $scoresonly;
 #      next;
 #    }
     if (/^uri\s+(\S+)\s+(.*)$/) {
-      $self->add_test ($1, $2, $type_uri_tests);
+      $self->add_test ($1, $2, TYPE_URI_TESTS);
       $self->{user_rules_to_compile} = 1 if $scoresonly;
       next;
     }
@@ -1341,12 +1639,12 @@ Define a raw-body eval test.  See above.
 
 =cut
     if (/^rawbody\s+(\S+)\s+eval:(.*)$/) {
-      $self->add_test ($1, $2, $type_rawbody_evals);
+      $self->add_test ($1, $2, TYPE_RAWBODY_EVALS);
       $self->{user_rules_to_compile} = 1 if $scoresonly;
       next;
     }
     if (/^rawbody\s+(\S+)\s+(.*)$/) {
-      $self->add_test ($1, $2, $type_rawbody_tests);
+      $self->add_test ($1, $2, TYPE_RAWBODY_TESTS);
       $self->{user_rules_to_compile} = 1 if $scoresonly;
       next;
     }
@@ -1365,12 +1663,12 @@ Define a full-body eval test.  See above.
 
 =cut
     if (/^full\s+(\S+)\s+eval:(.*)$/) {
-      $self->add_test ($1, $2, $type_full_evals);
+      $self->add_test ($1, $2, TYPE_FULL_EVALS);
       $self->{user_rules_to_compile} = 1 if $scoresonly;
       next;
     }
     if (/^full\s+(\S+)\s+(.*)$/) {
-      $self->add_test ($1, $2, $type_full_tests);
+      $self->add_test ($1, $2, TYPE_FULL_TESTS);
       $self->{user_rules_to_compile} = 1 if $scoresonly;
       next;
     }
@@ -1383,7 +1681,18 @@ been hit or not hit.  For example:
 meta META1        TEST1 && !(TEST2 || TEST3)
 
 Note that English language operators ("and", "or") will be treated as
-rule names, and that there is no XOR operator.
+rule names, and that there is no C<XOR> operator.
+
+=item meta SYMBOLIC_TEST_NAME boolean arithmetic expression
+
+Can also define a boolean arithmetic expression in terms of other
+tests, with a hit test having the value "1" and an unhit test having
+the value "0".  For example:
+
+meta META2        (3 * TEST1 - 2 * TEST2) > 0
+
+Note that Perl builtins and functions, like C<abs()>, B<can't> be
+used, and will be treated as rule names.
 
 If you want to define a meta-rule, but do not want its individual sub-rules to
 count towards the final score unless the entire meta-rule matches, give the
@@ -1393,7 +1702,7 @@ ignore these for scoring.
 =cut
 
     if (/^meta\s+(\S+)\s+(.*)$/) {
-      $self->add_test ($1, $2, $type_meta_tests);
+      $self->add_test ($1, $2, TYPE_META_TESTS);
       $self->{user_rules_to_compile} = 1 if $scoresonly;
       next;
     }
@@ -1417,11 +1726,12 @@ C<user_prefs> file.
 
 =item test SYMBOLIC_TEST_NAME (ok|fail) Some string to test against
 
-Define a regression testing string. You can have more than one regression test string
-per symbolic test name. Simply specify a string that you wish the test to match.
+Define a regression testing string. You can have more than one regression test
+string per symbolic test name. Simply specify a string that you wish the test
+to match.
 
-These tests are only run as part of the test suite - they should not affect the general
-running of SpamAssassin.
+These tests are only run as part of the test suite - they should not affect the
+general running of SpamAssassin.
 
 =cut
 
@@ -1432,12 +1742,38 @@ running of SpamAssassin.
 =item razor_config filename
 
 Define the filename used to store Razor's configuration settings.
-Currently this is the same value Razor itself uses: C<~/razor.conf>.
+Currently this is left to Razor to decide.
 
 =cut
 
-    if (/^razor[-_]config\s+(.*)$/) {
+    if (/^razor_config\s+(.*)$/) {
       $self->{razor_config} = $1; next;
+    }
+
+=item pyzor_path STRING
+
+This option tells SpamAssassin specifically where to find the C<pyzor> client
+instead of relying on SpamAssassin to find it in the current PATH.
+Note that if I<taint mode> is enabled in the Perl interpreter, you should
+use this, as the current PATH will have been cleared.
+
+=cut
+
+    if (/^pyzor_path\s+(.+)$/) {
+      $self->{pyzor_path} = $1; next;
+    }
+
+=item dcc_path STRING
+
+This option tells SpamAssassin specifically where to find the C<dccproc>
+client instead of relying on SpamAssassin to find it in the current PATH.
+Note that if I<taint mode> is enabled in the Perl interpreter, you should
+use this, as the current PATH will have been cleared.
+
+=cut
+
+    if (/^dcc_path\s+(.+)$/) {
+      $self->{dcc_path} = $1; next;
     }
 
 =item dcc_options options
@@ -1449,7 +1785,7 @@ The default is C<-R>
 
 =cut
 
-    if (/^dcc[-_]options\s+[A-Z -]+/) {
+    if (/^dcc_options\s+([A-Z -]+)/) {
       $self->{dcc_options} = $1; next;
     }
 
@@ -1461,45 +1797,124 @@ SpamAssassin use, you may want to share this across all users.
 
 =cut
 
-    if (/^auto[-_]whitelist[-_]path\s+(.*)$/) {
+    if (/^auto_whitelist_path\s+(.*)$/) {
       $self->{auto_whitelist_path} = $1; next;
+    }
+
+=item bayes_path /path/to/file	(default: ~/.spamassassin/bayes)
+
+Path for Bayesian probabilities databases.  Several databases will be created,
+with this as the base, with C<_toks>, C<_seen> etc. appended to this filename;
+so the default setting results in files called C<~/.spamassassin/bayes_seen>,
+C<~/.spamassassin/bayes_toks> etc.
+
+By default, each user has their own, in their C<~/.spamassassin> directory with
+mode 0700/0600, but for system-wide SpamAssassin use, you may want to reduce
+disk space usage by sharing this across all users.  (However it should be noted
+that Bayesian filtering appears to be more effective with an individual
+database per user.)
+
+=cut
+
+    if (/^bayes_path\s+(.*)$/) {
+      $self->{bayes_path} = $1; next;
     }
 
 =item timelog_path /path/to/dir		(default: NULL)
 
-If you set this value, razor will try to create logfiles for each message I
-processes and dump information on how fast it ran, and in which parts of the
-code the time was spent.
-The files will be named: unixdate_mesgid (i.e 1023257504_chuvn31gdu@4ax.com)
+If you set this value, SpamAssassin will try to create logfiles for each
+message it processes and dump information on how fast it ran, and in which
+parts of the code the time was spent.  The files will be named:
+C<unixdate_messageid> (i.e 1023257504_chuvn31gdu@4ax.com)
 
-Make sure  SA can write  the log file, if  you're not sure  what permissions
-needed, make the log directory chmod'ed 1777, and adjust later.
+Make sure  SA can write the log file; if you're not sure what permissions are
+needed, chmod the log directory to 1777, and adjust later.
 
 =cut
 
-    if (/^timelog[-_]path\s+(.*)$/) {
+    if (/^timelog_path\s+(.*)$/) {
       $Mail::SpamAssassin::TIMELOG->{logpath}=$1; next;
     }
 
 =item auto_whitelist_file_mode		(default: 0700)
 
 The file mode bits used for the automatic-whitelist directory or file.
-Make sure this has the relevant execute-bits set (--x), otherwise
-things will go wrong.
+
+Make sure you specify this using the 'x' mode bits set, as it may also be used
+to create directories.  However, if a file is created, the resulting file will
+not have any execute bits set (the umask is set to 111).
 
 =cut
-    if (/^auto[-_]whitelist[-_]file[-_]mode\s+(.*)$/) {
+    if (/^auto_whitelist_file_mode\s+(.*)$/) {
       $self->{auto_whitelist_file_mode} = $1; next;
     }
 
-=item user-scores-dsn DBI:databasetype:databasename:hostname:port
+=item bayes_file_mode		(default: 0700)
+
+The file mode bits used for the Bayesian filtering database files.
+
+Make sure you specify this using the 'x' mode bits set, as it may also be used
+to create directories.  However, if a file is created, the resulting file will
+not have any execute bits set (the umask is set to 111).
+
+=cut
+    if (/^bayes_file_mode\s+(.*)$/) {
+      $self->{bayes_file_mode} = $1; next;
+    }
+
+=item bayes_use_hapaxes		(default: 1)
+
+Should the Bayesian classifier use hapaxes (words/tokens that occur only
+once) when classifying?  This produces significantly better hit-rates, but
+increases database size by about a factor of 8 to 10.
+
+=cut
+    if (/^bayes_use_hapaxes\s+(.*)$/) {
+      $self->{bayes_use_hapaxes} = $1; next;
+    }
+
+=item bayes_use_chi2_combining		(default: 0)
+
+Should the Bayesian classifier use chi-squared combining, instead of
+Robinson/Graham-style naive Bayesian combining?  Chi-squared produces
+more 'extreme' output results, but may be more resistant to changes
+in corpus size etc.
+
+=cut
+    if (/^bayes_use_chi2_combining\s+(.*)$/) {
+      $self->{bayes_use_chi2_combining} = $1; next;
+    }
+
+=item bayes_expiry_min_db_size		(default: 100000)
+
+What should be the minimum size of the Bayes tokens database?  The
+database will never be shrunk below this many entries. 100000 entries
+is roughly equivalent to a 5Mb database file.
+
+=cut
+    if (/^bayes_expiry_min_db_size\s+(\d+)$/) {
+      $self->{bayes_expiry_min_db_size} = $1; next;
+    }
+
+=item bayes_expiry_scan_count		(default: 5000)
+
+When expiring old entries from the Bayes databases, tokens which have not
+been read in this many messages will be removed (unless to do so would
+shrink the database below the C<bayes_expiry_min_db_size> size).
+
+=cut
+    if (/^bayes_expiry_scan_count\s+(.*)$/) {
+      $self->{bayes_expiry_scan_count} = $1; next;
+    }
+
+=item user_scores_dsn DBI:databasetype:databasename:hostname:port
 
 If you load user scores from an SQL database, this will set the DSN
 used to connect.  Example: C<DBI:mysql:spamassassin:localhost>
 
 =cut
 
-    if (/^user[-_]scores[-_]dsn\s+(\S+)$/) {
+    if (/^user_scores_dsn\s+(\S+)$/) {
       $self->{user_scores_dsn} = $1; next;
     }
 
@@ -1508,7 +1923,7 @@ used to connect.  Example: C<DBI:mysql:spamassassin:localhost>
 The authorized username to connect to the above DSN.
 
 =cut
-    if(/^user[-_]scores[-_]sql[-_]username\s+(\S+)$/) {
+    if(/^user_scores_sql_username\s+(\S+)$/) {
       $self->{user_scores_sql_username} = $1; next;
     }
 
@@ -1517,7 +1932,7 @@ The authorized username to connect to the above DSN.
 The password for the database username, for the above DSN.
 
 =cut
-    if(/^user[-_]scores[-_]sql[-_]password\s+(\S+)$/) {
+    if(/^user_scores_sql_password\s+(\S+)$/) {
       $self->{user_scores_sql_password} = $1; next;
     }
 
@@ -1526,26 +1941,51 @@ The password for the database username, for the above DSN.
 The table user preferences are stored in, for the above DSN.
 
 =cut
-    if(/^user[-_]scores[-_]sql[-_]table\s+(\S+)$/) {
+    if(/^user_scores_sql_table\s+(\S+)$/) {
       $self->{user_scores_sql_table} = $1; next;
     }
 
-=item spamphrase score phrase ...
+# Michael 'Moose' Dinn <dinn@twistedpair.ca>
+# For integration with horde preferences system
+# 20020831
 
-A 2-word spam phrase, for the FREQ_SPAM_PHRASE test.
+=item user_scores_sql_field_username field_username
+
+The field that the username whose preferences you're looking up is stored in.
+Default: C<username>.
 
 =cut
-    if(/^spamphrase\s+(\d+)\s+(\S+ \S+)$/) {
-      $self->{spamphrase}->{$2} = $1; next;
+    if(/^user_scores_sql_field_username\s+(\S+)$/) {
+      $self->{user_scores_sql_field_username} = $1; next;
     }
 
-=item spamphrase-highest-score nnnnn
+=item user_scores_sql_field_preference field_preference
 
-The highest score of any of the spamphrases.  Used for scaling.
+The name of the preference that you're looking for.  Default: C<preference>.
 
 =cut
-    if(/^spamphrase[-_]highest[-_]score\s+(\d+)$/) {
-      $self->{spamphrase_highest_score} = $1+0; next;
+    if(/^user_scores_sql_field_preference\s+(\S+)$/) {
+      $self->{user_scores_sql_field_preference} = $1; next;
+    }
+
+=item user_scores_sql_field_value field_value
+
+The name of the value you're looking for.  Default: C<value>.
+
+=cut
+    if(/^user_scores_sql_field_value\s+(\S+)$/) {
+      $self->{user_scores_sql_field_value} = $1; next;
+    }
+
+=item user_scores_sql_field_scope field_scope
+
+The 'scope' field. In Horde this makes the preference a single-module
+preference or a global preference. There's no real need to change it in other
+systems.  Default: C<spamassassin>.
+
+=cut
+    if(/^user_scores_sql_field_scope\s+(\S+)$/) {
+      $self->{user_scores_sql_field_scope} = $1; next;
     }
 
 ###########################################################################
@@ -1565,10 +2005,19 @@ failed_line:
 
 sub add_test {
   my ($self, $name, $text, $type) = @_;
-  if ($name eq '.') { $name = ($self->{_unnamed_counter}++); }
   $self->{tests}->{$name} = $text;
   $self->{test_types}->{$name} = $type;
-  $self->{scores}->{$name} ||= 1.0;
+  $self->{tflags}->{$name} ||= '';
+  $self->{source_file}->{$name} = $self->{currentfile};
+
+  # All scoresets should have a score defined, so if the one we're in doesn't, we need to set them all.
+  if ( ! exists $self->{scores}->{$name} ) {
+    # T_ rules (in a testing probationary period) get low, low scores
+    my $set_score = $name=~/^T_/ ? 0.01 : 1.0;
+    for my $index (0..3) {
+      $self->{scoreset}->[$index]->{$name} = $set_score;
+    }
+  }
 }
 
 sub add_regression_test {
@@ -1596,30 +2045,76 @@ sub regression_tests {
   }
 }
 
+# note: error 70 == SA_SOFTWARE
 sub finish_parsing {
   my ($self) = @_;
 
-  foreach my $name (keys %{$self->{tests}}) {
+  while (my ($name, $text) = each %{$self->{tests}}) {
     my $type = $self->{test_types}->{$name};
-    my $text = $self->{tests}->{$name};
 
-    if ($type == $type_body_tests) { $self->{body_tests}->{$name} = $text; }
-    elsif ($type == $type_rbl_evals) { $self->{rbl_evals}->{$name} = $text; }
-    elsif ($type == $type_rbl_res_evals) { $self->{rbl_res_evals}->{$name} = $text; }
-    elsif ($type == $type_head_tests) { $self->{head_tests}->{$name} = $text; }
-    elsif ($type == $type_head_evals) { $self->{head_evals}->{$name} = $text; }
-    elsif ($type == $type_body_evals) { $self->{body_evals}->{$name} = $text; }
-    elsif ($type == $type_rawbody_tests) { $self->{rawbody_tests}->{$name} = $text; }
-    elsif ($type == $type_rawbody_evals) { $self->{rawbody_evals}->{$name} = $text; }
-    elsif ($type == $type_full_tests) { $self->{full_tests}->{$name} = $text; }
-    elsif ($type == $type_full_evals) { $self->{full_evals}->{$name} = $text; }
-    elsif ($type == $type_uri_tests)  { $self->{uri_tests}->{$name} = $text; }
-    # elsif ($type == $type_uri_evals)  { $self->{uri_evals}->{$name} = $text; }
-    elsif ($type == $type_meta_tests) { $self->{meta_tests}->{$name} = $text; }
+    # eval type handling
+    if (($type & 1) == 1) {
+      my @args;
+      if (my ($function, $args) = ($text =~ m/(.*?)\s*\((.*?)\)\s*$/)) {
+	if ($args) {
+	  @args = ($args =~ m/['"](.*?)['"]\s*(?:,\s*|$)/g);
+        }
+	unshift(@args, $function);
+	if ($type == TYPE_BODY_EVALS) {
+	  $self->{body_evals}->{$name} = \@args;
+	}
+	elsif ($type == TYPE_HEAD_EVALS) {
+	  $self->{head_evals}->{$name} = \@args;
+	}
+	elsif ($type == TYPE_RBL_EVALS) {
+	  $self->{rbl_evals}->{$name} = \@args;
+	}
+	elsif ($type == TYPE_RBL_RES_EVALS) {
+	  $self->{rbl_res_evals}->{$name} = \@args;
+	}
+	elsif ($type == TYPE_RAWBODY_EVALS) {
+	  $self->{rawbody_evals}->{$name} = \@args;
+	}
+	elsif ($type == TYPE_FULL_EVALS) {
+	  $self->{full_evals}->{$name} = \@args;
+	}
+	#elsif ($type == TYPE_URI_EVALS) {
+	#  $self->{uri_evals}->{$name} = \@args;
+	#}
+	else {
+	  $self->{errors}++;
+	  sa_die(70, "unknown type $type for $name: $text");
+	}
+      }
+      else {
+	$self->{errors}++;
+	sa_die(70, "syntax error for $name: $text");
+      }
+    }
+    # non-eval tests
     else {
-      # 70 == SA_SOFTWARE
-      $self->{errors}++;
-      sa_die (70, "unknown type $type for $name: $text");
+      if ($type == TYPE_BODY_TESTS) {
+	$self->{body_tests}->{$name} = $text;
+      }
+      elsif ($type == TYPE_HEAD_TESTS) {
+	$self->{head_tests}->{$name} = $text;
+      }
+      elsif ($type == TYPE_META_TESTS) {
+	$self->{meta_tests}->{$name} = $text;
+      }
+      elsif ($type == TYPE_URI_TESTS) {
+	$self->{uri_tests}->{$name} = $text;
+      }
+      elsif ($type == TYPE_RAWBODY_TESTS) {
+	$self->{rawbody_tests}->{$name} = $text;
+      }
+      elsif ($type == TYPE_FULL_TESTS) {
+	$self->{full_tests}->{$name} = $text;
+      }
+      else {
+	$self->{errors}++;
+	sa_die(70, "unknown type $type for $name: $text");
+      }
     }
   }
 
@@ -1632,7 +2127,8 @@ sub add_to_addrlist {
   foreach my $addr (@addrs) {
     my $re = lc $addr;
     $re =~ s/[\000\\\(]/_/gs;			# paranoia
-    $re =~ s/([^\*_a-zA-Z0-9])/\\$1/g;		# escape any possible metachars
+    $re =~ s/([^\*\?_a-zA-Z0-9])/\\$1/g;	# escape any possible metachars
+    $re =~ tr/?/./;				# "?" -> "."
     $re =~ s/\*/\.\*/g;				# "*" -> "any string"
     $self->{$singlelist}->{$addr} = qr/^${re}$/;
   }
@@ -1643,7 +2139,8 @@ sub add_to_addrlist_rcvd {
   
   my $re = lc $addr;
   $re =~ s/[\000\\\(]/_/gs;			# paranoia
-  $re =~ s/([^\*_a-zA-Z0-9])/\\$1/g;		# escape any possible metachars
+  $re =~ s/([^\*\?_a-zA-Z0-9])/\\$1/g;		# escape any possible metachars
+  $re =~ tr/?/./;				# "?" -> "."
   $re =~ s/\*/\.\*/g;				# "*" -> "any string"
   $self->{$listname}->{$addr}{re} = qr/^${re}$/;
   $self->{$listname}->{$addr}{domain} = $domain;
@@ -1656,6 +2153,60 @@ sub remove_from_addrlist {
 	delete($self->{$singlelist}->{$addr});
   }
 }
+
+sub remove_from_addrlist_rcvd {
+  my ($self, $listname, @addrs) = @_;
+  foreach my $addr (@addrs) {
+    delete($self->{$listname}->{$addr});
+  }
+}
+
+###########################################################################
+
+sub maybe_header_only {
+  my($self,$rulename) = @_;
+  my $type = $self->{test_types}->{$rulename};
+  return 0 if (!defined ($type));
+
+  if (($type == TYPE_HEAD_TESTS) || ($type == TYPE_HEAD_EVALS)) {
+    return 1;
+
+  } elsif ($type == TYPE_META_TESTS) {
+    my $tflags = $self->{tflags}->{$rulename}; $tflags ||= '';
+    if ($tflags =~ m/\bnet\b/i) {
+      return 0;
+    } else {
+      return 1;
+    }
+  }
+
+  return 0;
+}
+
+sub maybe_body_only {
+  my($self,$rulename) = @_;
+  my $type = $self->{test_types}->{$rulename};
+  return 0 if (!defined ($type));
+
+  if (($type == TYPE_BODY_TESTS) || ($type == TYPE_BODY_EVALS)
+	|| ($type == TYPE_URI_TESTS) || ($type == TYPE_URI_EVALS))
+  {
+    # some rawbody go off of headers...
+    return 1;
+
+  } elsif ($type == TYPE_META_TESTS) {
+    my $tflags = $self->{tflags}->{$rulename}; $tflags ||= '';
+    if ($tflags =~ m/\bnet\b/i) {
+      return 0;
+    } else {
+      return 1;
+    }
+  }
+
+  return 0;
+}
+
+###########################################################################
 
 sub dbg { Mail::SpamAssassin::dbg (@_); }
 sub sa_die { Mail::SpamAssassin::sa_die (@_); }

@@ -19,6 +19,8 @@ SpamAssassin will call:
 All persistent address list implementations, used by the auto-whitelist
 code to track known-good email addresses, use this as a base class.
 
+See C<Mail::SpamAssassin::DBBasedAddrList> for an example.
+
 =head1 METHODS
 
 =over 4
@@ -28,7 +30,11 @@ code to track known-good email addresses, use this as a base class.
 package Mail::SpamAssassin::PersistentAddrList;
 
 use strict;
-use vars qw{ @ISA };
+use bytes;
+
+use vars qw{
+  @ISA
+};
 
 @ISA = qw();
 

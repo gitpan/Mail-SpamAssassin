@@ -2,15 +2,17 @@
 
 use lib '.'; use lib 't';
 use SATest; sa_t_init("razor2");
-use Test; BEGIN { plan tests => (-e 't/do_razor2' ? 2 : 0),
+
+use constant TEST_ENABLED => (-e 't/do_razor2' || -e 'do_razor2');
+
+use Test; BEGIN { plan tests => (TEST_ENABLED ? 2 : 0),
         onfail => sub {
-          warn "\n\nNote: this may not be an SpamAssassin bug, as Razor tests can\n
-".
+          warn "\n\nNote: this may not be an SpamAssassin bug, as Razor tests can\n".
                 "fail due to problems with the Razor servers.\n\n";
         }
 };
 
-exit unless -e 't/do_razor2';
+exit unless TEST_ENABLED;
 
 # ---------------------------------------------------------------------------
 
@@ -32,7 +34,7 @@ if (!-r $ident) {
 
 %patterns = (
 
-q{ Listed in Razor2 }, 'spam',
+q{ Listed in Razor v2 }, 'spam',
 
 );
 
@@ -49,7 +51,7 @@ skip_all_patterns($razor_not_available);
 %patterns = ();
 %anti_patterns = (
 
-q{ Listed in Razor2 }, 'nonspam',
+q{ Listed in Razor v2 }, 'nonspam',
 
 );
 

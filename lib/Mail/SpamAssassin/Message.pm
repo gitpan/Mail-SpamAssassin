@@ -2,11 +2,12 @@
 
 package Mail::SpamAssassin::Message;
 
-use Carp;
 use strict;
+use bytes;
+use Carp;
 
-use vars	qw{
-  	@ISA
+use vars qw{
+  @ISA
 };
 
 @ISA = qw();
@@ -36,6 +37,11 @@ sub get_mail_object {
 
 sub create_new {
   my ($self, @args) = @_;
+  die "unimplemented base method";
+}
+
+sub get_pristine_header {
+  my ($self, $hdr) = @_;
   die "unimplemented base method";
 }
 
@@ -69,7 +75,17 @@ sub get_body {
   die "unimplemented base method";
 }
 
+sub get_pristine {
+  my ($self) = @_;
+  die "unimplemented base method";
+}
+
 sub replace_body {
+  my ($self, $aryref) = @_;
+  die "unimplemented base method";
+}
+
+sub replace_original_message {
   my ($self, $aryref) = @_;
   die "unimplemented base method";
 }

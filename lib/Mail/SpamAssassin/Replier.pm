@@ -2,11 +2,12 @@
 
 package Mail::SpamAssassin::Replier;
 
-use Carp;
 use strict;
+use bytes;
+use Carp;
 
-use vars	qw{
-  	@ISA
+use vars qw{
+  @ISA
 };
 
 @ISA = qw();

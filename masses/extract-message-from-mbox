@@ -1,0 +1,62 @@
+#!/usr/bin/perl
+# Copyright (c) 2003  Malte S. Stretz <spamassassin at msquadrat dot de>
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of either the Artistic License or the GNU General
+# Public License as published by the Free Software Foundation; either
+# version 2 of the License, or (at your option) any later version.
+
+
+use strict;
+use bytes;
+
+use vars qw {
+  $opt_f $opt_h
+};
+
+use Getopt::Std;
+getopts("f:h");
+
+sub usage {
+  die "extract-message-from-mbox [-f=file] offset
+
+  Extracts the message starting at offset from file (or stdin). Very useful in
+  combination with mass-check logs and mboxes.
+";
+}
+
+usage() if($opt_h || !defined($ARGV[0]));
+my $offset = $ARGV[0];
+
+
+if($opt_f) {
+  do_file($opt_f, $offset);
+} else {
+  do_stdin($offset);
+}
+
+sub do_file {
+  my ($in, $offset) = @_;
+  open (STDIN, "<$in") or die "Cannot open '$in': $!";
+  do_stdin($offset);
+  close STDIN;
+}
+
+sub do_stdin {
+  my ($offset) = @_;
+  my $found = 0;
+
+  while(<STDIN>) {
+
+    unless($found) {
+      $offset -= length;
+      $found = $offset <= 0;
+    }
+    else {
+      $found++ if(/^From /);
+      last if($found == 3);
+      print;
+    }
+  }
+}
+

@@ -6,6 +6,7 @@ package main;
 use Cwd;
 use Config;
 use File::Path;
+use File::Copy;
 
 # Set up for testing. Exports (as global vars):
 # out: $home: $HOME env variable
@@ -27,10 +28,10 @@ sub sa_t_init {
     $perl_path =~ s|/[^/]*$|/$^X|;
   }
   $scr = $ENV{'SCRIPT'};
-  $scr ||= "$perl_path -w ../spamassassin";
+  $scr ||= "$perl_path -T -w ../spamassassin";
 
   $spamd = $ENV{'SPAMD_SCRIPT'};
-  $spamd ||= "$perl_path -w ../spamd/spamd -x";
+  $spamd ||= "$perl_path -T -w ../spamd/spamd -x";
 
   $spamc = $ENV{'SPAMC_SCRIPT'};
   $spamc ||= "../spamd/spamc";
@@ -38,13 +39,25 @@ sub sa_t_init {
   $spamdport = 48373;		# whatever
   $spamd_cf_args = "-C ../rules";
 
-  $scr_cf_args = "-C ../rules -p ../rules/user_prefs.template";
+  $scr_cf_args = "-C ../rules -p log/test_default.cf";
   $scr_pref_args = "";
   $scr_test_args = "";
 
   (-f "t/test_dir") && chdir("t");        # run from ..
   rmtree ("log");
   mkdir ("log", 0755);
+
+  copy ("../rules/user_prefs.template", "log/test_default.cf")
+	or die "user prefs copy failed";
+
+  open (PREFS, ">>log/test_default.cf");
+  print PREFS "
+    bayes_path ./log/user_state/bayes
+    auto_whitelist_path ./log/user_state/auto-whitelist
+    ";
+  close PREFS;
+
+  mkdir("log/user_state",0755);
 
   $home = $ENV{'HOME'};
   $home ||= $ENV{'WINDIR'} if (defined $ENV{'WINDIR'});
@@ -103,6 +116,11 @@ sub sarun {
   if ($sa_exitcode != 0) { return undef; }
   &checkfile ("$testname.${Test::ntest}", $read_sub);
   1;
+}
+
+sub scrun {
+  $spamd_never_started = 1;
+  spamcrun (@_);
 }
 
 sub spamcrun {
@@ -205,10 +223,13 @@ sub start_spamd {
   $spamd_pid = 0;
   my $retries = 20;
   while ($spamd_pid <= 0) {
+    my $spamdlog = '';
+
     if (open (IN, "<log/$testname.spamd")) {
       while (<IN>) {
 	/Address already in use/ and $retries = 0;
 	/server pid: (\d+)/ and $spamd_pid = $1;
+	$spamdlog .= $_;
       }
       close IN;
       last if ($spamd_pid);
@@ -216,7 +237,7 @@ sub start_spamd {
 
     sleep 2;
     if ($retries-- <= 0) {
-      warn "spamd start failed";
+      warn "spamd start failed: log: $spamdlog";
       warn "\n\nMaybe you need to kill a running spamd process?\n\n";
       return 0;
     }
@@ -226,6 +247,10 @@ sub start_spamd {
 }
 
 sub stop_spamd {
+  return 0 if defined($spamd_never_started);
+  return 0 if defined($spamd_already_killed);
+
+  $spamd_pid ||= 0;
   if ( $spamd_pid <= 1) {
     print ("Invalid spamd pid: $spamd_pid. Spamd not started/crashed?\n");
     return 0;
@@ -241,6 +266,8 @@ sub stop_spamd {
     }
 
     $spamd_pid = 0;
+    undef $spamd_never_started;
+    $spamd_already_killed = 1;
     return $killed;
   }
 }

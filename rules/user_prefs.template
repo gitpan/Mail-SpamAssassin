@@ -1,5 +1,5 @@
-# SpamAssassin user preferences file.  See 'man Mail::SpamAssassin::Conf' for
-# details of what can be tweaked.
+# SpamAssassin user preferences file.  See 'perldoc Mail::SpamAssassin::Conf'
+# for details of what can be tweaked.
 #* 
 #* Note: this file is not read by SpamAssassin until copied into the user
 #* directory. At runtime, if a user has no preferences in their home directory
@@ -21,4 +21,16 @@
 # http://spamassassin.org/tests.html .
 #
 # score SYMBOLIC_TEST_NAME n.nn
+
+# Speakers of Asian languages, like Chinese, Japanese and Korean, will almost
+# definitely want to uncomment the following lines.  They will switch off some
+# rules that detect 8-bit characters, which commonly trigger on mails using CJK
+# character sets, or that assume a western-style charset is in use. 
+# 
+# score HEADER_8BITS		0
+# score HTML_COMMENT_8BITS	0
+# score SUBJ_FULL_OF_8BITS	0
+# score UPPERCASE_25_50		0
+# score UPPERCASE_50_75		0
+# score UPPERCASE_75_100	0
 

@@ -1,5 +1,3 @@
-#
-
 package Mail::SpamAssassin::Dns;
 1;
 
@@ -11,30 +9,31 @@ use IO::Socket;
 use IPC::Open2;
 use POSIX ":sys_wait_h";        # sorry Craig ;)
 
-use Carp;
 use strict;
+use bytes;
+use Carp;
 
 use vars qw{
-	$KNOWN_BAD_DIALUP_RANGES $IP_IN_RESERVED_RANGE
-	@EXISTING_DOMAINS $IS_DNS_AVAILABLE $VERSION
+  $KNOWN_BAD_DIALUP_RANGES $IP_IN_RESERVED_RANGE
+  @EXISTING_DOMAINS $IS_DNS_AVAILABLE $VERSION
 };
 
 # don't lookup SpamAssassin.org -- use better-connected sites
 # instead ;)
 @EXISTING_DOMAINS = qw{
-                       kernel.org
-                       slashdot.org
-                       google.com
-                       google.de
-                       microsoft.com
-                       yahoo.com
-                       yahoo.de
-                       amazon.com
-                       amazon.de
-                       nytimes.com
-                       leo.org
-                       gwdg.de
-                    };
+  kernel.org
+  slashdot.org
+  google.com
+  google.de
+  microsoft.com
+  yahoo.com
+  yahoo.de
+  amazon.com
+  amazon.de
+  nytimes.com
+  leo.org
+  gwdg.de
+};
 
 # Initialize a regexp for reserved IPs, i.e. ones that could be
 # used inside a company and be the first or second relay hit by
@@ -137,20 +136,21 @@ sub do_rbl_lookup {
     return 0;
   } else {
     timelog("RBL -> Waiting for result on $dom", "rbl", 1);
-    $socket=$self->{dnscache}->{rbl}->{$dom}->{socket};
+    $socket=\$self->{dnscache}->{rbl}->{$dom}->{socket};
     
-    while (not $self->{res}->bgisready($socket)) {
+    while (not $self->{res}->bgisready($$socket)) {
       last if (time - $self->{dnscache}->{rbl}->{$dom}->{time} > $maxwait);
       sleep 1;
     }
 
-    if (not $self->{res}->bgisready($socket)) {
+    if (not $self->{res}->bgisready($$socket)) {
       timelog("RBL -> Timeout on $dom", "rbl", 2);
       dbg("Query for $dom timed out after $maxwait seconds", "rbl", -1);
+      undef($$socket);
       return 0;
     } else {
-      my $packet = $self->{res}->bgread($socket);
-      undef($socket);
+      my $packet = $self->{res}->bgread($$socket);
+      undef($$socket);
       foreach $_ ($packet->answer) {
 	dbg("Query for $dom yielded: ".$_->rdatastr, "rbl", -2);
 	if ($_->type eq "A") {
@@ -217,6 +217,7 @@ sub is_razor1_available {
     dbg ("local tests only, ignoring Razor1", "razor", -1);
     return 0;
   }
+  if (!$self->{conf}->{use_razor1}) { return 0; }
 
   eval { require Razor::Client; };
   
@@ -238,6 +239,7 @@ sub razor1_lookup {
     dbg ("local tests only, ignoring Razor1", "razor", -1);
     return 0;
   }
+  if (!$self->{conf}->{use_razor1}) { return 0; }
 
   timelog("Razor1 -> Starting razor test ($timeout secs max)", "razor", 1);
   
@@ -329,6 +331,7 @@ sub is_razor2_available {
     dbg ("local tests only, ignoring Razor2", "razor", -1);
     return 0;
   }
+  if (!$self->{conf}->{use_razor2}) { return 0; }
 
   # Use Razor2 if it's available, Razor1 otherwise
   eval { require Razor2::Client::Agent; };
@@ -346,15 +349,19 @@ sub razor2_lookup {
   my ($self, $fulltext) = @_;
   my $timeout=$self->{conf}->{razor_timeout};
 
+  # Set the score for the ranged checks
+  $self->{razor2_cf_score} = 0;
+  return $self->{razor2_result} if ( defined $self->{razor2_result} );
+  $self->{razor2_result} = 0;
+
   if ($self->{main}->{local_tests_only}) {
     dbg ("local tests only, ignoring Razor2", "razor", -1);
     return 0;
   }
+  if (!$self->{conf}->{use_razor2}) { return 0; }
 
   timelog("Razor2 -> Starting razor test ($timeout secs max)", "razor", 1);
   
-  my $response = undef;
-
   # razor also debugs to stdout. argh. fix it to stderr...
   if ($Mail::SpamAssassin::DEBUG->{enabled}) {
     open (OLDOUT, ">&STDOUT");
@@ -386,20 +393,25 @@ sub razor2_lookup {
         $rc->{opt} = \%opt;
         $rc->do_conf() or die $rc->errstr;
 
-        my @msg     = ($fulltext);
+	my $tmptext = $$fulltext;
+	my @msg = (\$tmptext);
+
         my $objects = $rc->prepare_objects( \@msg )
           or die "error in prepare_objects";
         $rc->get_server_info() or die $rc->errprefix("checkit");
+
+	# let's reset the alarm since get_server_info() calls
+	# nextserver() which calls discover() which very likely will
+	# reset the alarm for us ... how polite.  :(  
+	alarm $timeout;
+
         my $sigs = $rc->compute_sigs($objects)
           or die "error in compute_sigs";
 
         # 
-        # if mail is whitelisted, its not spam, so abort.
+        # if mail isn't whitelisted, check it out
         #   
-        if ( $rc->local_check( $objects->[0] ) ) {
-          $response = 0;
-        }
-        else {
+        if ( ! $rc->local_check( $objects->[0] ) ) {
           if (!$rc->connect()) {
             # provide a better error message when servers are unavailable,
             # than "Bad file descriptor Died".
@@ -407,7 +419,54 @@ sub razor2_lookup {
           }
           $rc->check($objects) or die $rc->errprefix("checkit");
           $rc->disconnect() or die $rc->errprefix("checkit");
-          $response = $objects->[0]->{spam};
+
+	  # if we got here, we're done doing remote stuff, abort the alert
+	  alarm 0;
+
+	  dbg("Using results from Razor v".$Razor2::Client::Version::VERSION);
+
+	  # so $objects->[0] is the first (only) message, and ->{spam} is a general yes/no
+          $self->{razor2_result} = $objects->[0]->{spam} || 0;
+
+	  # great for debugging, but leave this off!
+	  #use Data::Dumper;
+	  #print Dumper($objects),"\n";
+
+	  # ->{p} is for each part of the message
+	  # so go through each part, taking the highest cf we find
+	  # of any part that isn't contested (ct).  This helps avoid false
+	  # positives.  equals logic_method 4.
+	  #
+	  # razor-agents < 2.14 have a different object format, so we now support both.
+	  # $objects->[0]->{resp} vs $objects->[0]->{p}->[part #]->{resp}
+	  my $part = 0;
+	  my $arrayref = $objects->[0]->{p} || $objects;
+	  if ( defined $arrayref ) {
+	    foreach my $cf ( @{$arrayref} ) {
+	      if ( exists $cf->{resp} ) {
+	        for (my $response=0;$response<@{$cf->{resp}};$response++) {
+	          my $tmp = $cf->{resp}->[$response];
+	      	  my $tmpcf = $tmp->{cf} || 0; # Part confidence
+	      	  my $tmpct = $tmp->{ct} || 0; # Part contested?
+		  my $engine = $cf->{sent}->[$response]->{e};
+	          dbg("Found Razor2 part: part=$part engine=$engine ct=$tmpct cf=$tmpcf");
+	          $self->{razor2_cf_score} = $tmpcf if ( !$tmpct && $tmpcf > $self->{razor2_cf_score} );
+	        }
+	      }
+	      else {
+		my $text = "part=$part noresponse";
+		$text .= " skipme=1" if ( $cf->{skipme} );
+	        dbg("Found Razor2 part: $text");
+	      }
+	      $part++;
+	    }
+	  }
+	  else {
+	    # If we have some new $objects format that isn't close to
+	    # the current razor-agents 2.x version, we won't FP but we
+	    # should alert in debug.
+	    dbg("It looks like the internal Razor object has changed format!  Tell spamassassin-devel!");
+	  }
         }
       }
       else {
@@ -420,12 +479,15 @@ sub razor2_lookup {
     alarm 0;    # just in case
   
     if ($@) {
-      $response = undef;
       if ( $@ =~ /alarm/ ) {
-        dbg("razor2 check timed out after $timeout secs.");
-        }
-        else {
-        warn("razor2 check skipped: $! $@");
+          dbg("razor2 check timed out after $timeout secs.");
+        } elsif ($@ =~ /(?:could not connect|network is unreachable)/) {
+          # make this a dbg(); SpamAssassin will still continue,
+          # but without Razor checking.  otherwise there may be
+          # DSNs and errors in syslog etc., yuck
+          dbg("razor2 check could not connect to any servers");
+        } else {
+          warn("razor2 check skipped: $! $@");
         }
       }
 
@@ -437,7 +499,9 @@ sub razor2_lookup {
     close OLDOUT;
   }
 
-  if ((defined $response) && ($response+0)) {
+  dbg("Razor2 results: spam? ".$self->{razor2_result}."  highest cf score: ".$self->{razor2_cf_score});
+
+  if ($self->{razor2_result} > 0) {
       timelog("Razor2 -> Finished razor test: confirmed spam", "razor", 2);
       return 1;
   }
@@ -454,19 +518,14 @@ sub is_dcc_available {
     dbg ("local tests only, ignoring DCC");
     return 0;
   }
+  if (!$self->{conf}->{use_dcc}) { return 0; }
 
   my $dccproc = $self->{conf}->{dcc_path} || '';
   unless ($dccproc) {
-    foreach my $path (File::Spec->path()) {
-      $dccproc = File::Spec->catfile ($path, 'dccproc');
-      if (-x $dccproc) {
-        dbg ("DCC was found at $dccproc");
-        $self->{conf}->{dcc_path} = $dccproc;
-        last;
-      }
-    }
+    $dccproc = Mail::SpamAssassin::Util::find_executable_in_env_path('dccproc');
+    if ($dccproc) { $self->{conf}->{dcc_path} = $dccproc; }
   }
-  unless (-x $dccproc) {
+  unless ($dccproc && -x $dccproc) {
     dbg ("DCC is not available: dccproc not found");
     return 0;
   }
@@ -491,8 +550,9 @@ sub dcc_lookup {
     dbg ("local tests only, ignoring DCC");
     return 0;
   }
+  if (!$self->{conf}->{use_dcc}) { return 0; }
 
-  timelog("DCC -> Starting test ($timeout secs max)", "dcc", 1);
+  timelog("DCC -> Starting check ($timeout secs max)", "dcc", 1);
   $self->enter_helper_run_mode();
 
   # use a temp file here -- open2() is unreliable, buffering-wise,
@@ -500,16 +560,27 @@ sub dcc_lookup {
   my $tmpf = $self->create_fulltext_tmpfile($fulltext);
 
   eval {
-    local $SIG{ALRM} = sub { die "alarm\n" };
-    local $SIG{PIPE} = sub { die "brokenpipe\n" };
+    local $SIG{ALRM} = sub { die "__alarm__\n" };
+    local $SIG{PIPE} = sub { die "__brokenpipe__\n" };
 
     alarm($timeout);
 
-    my $pid = open(DCC, join(' ',
-                        $self->{conf}->{dcc_path}, '-H', 
-                        $self->{conf}->{dcc_options}, '< \''.$tmpf.'\' 2>&1 |'));
-    $response = <DCC>;
+    # Note: not really tainted, these both come from system conf file.
+    my $path = Mail::SpamAssassin::Util::untaint_file_path ($self->{conf}->{dcc_path});
+
+    my $opts = '';
+    if ( $self->{conf}->{dcc_options} =~ /^([^\;\'\"\0]+)$/ ) {
+      $opts = $1;
+    }
+
+    dbg("DCC command: ".join(' ', $path, "-H", $opts, "< '$tmpf'", "2>&1"),'dcc',-1);
+    my $pid = open(DCC, join(' ', $path, "-H", $opts, "< '$tmpf'", "2>&1", '|')) || die "$!\n";
+    chomp($response = <DCC>);
     close DCC;
+
+    unless (defined($response)) { # yes, this is possible
+      die ("no response\n");
+    }
 
     dbg("DCC: got response: $response");
 
@@ -517,28 +588,26 @@ sub dcc_lookup {
     waitpid ($pid, 0);
   };
 
+  alarm 0;
   $self->leave_helper_run_mode();
 
   if ($@) {
-    $response = undef;
-    if ($@ =~ /alarm/) {
-      dbg ("DCC check timed out after 10 secs.");
-      timelog("DCC -> interrupted after $timeout secs", "dcc", 2);
-      return 0;
-    } elsif ($@ =~ /brokenpipe/) {
-      dbg ("DCC -> check failed - Broken pipe.");
-      timelog("dcc check failed, broken pipe", "dcc", 2);
-      return 0;
+    if ($@ =~ /^__alarm__$/) {
+      dbg ("DCC -> check timed out after $timeout secs.");
+      timelog("DCC interrupted after $timeout secs", "dcc", 2);
+   } elsif ($@ =~ /^__brokenpipe__$/) {
+      dbg ("DCC -> check failed: Broken pipe.");
+      timelog("DCC check failed, broken pipe", "dcc", 2);
     } else {
-      warn ("DCC -> check skipped: $! $@");
-      timelog("dcc check skipped", "dcc", 2);
-      return 0;
+      warn ("DCC -> check failed: $@\n");
+      timelog("DCC check failed", "dcc", 2);
     }
+    return 0;
   }
 
-  if (!defined $response || $response !~ /^X-DCC/) {
-    dbg ("DCC -> check failed - no X-DCC returned (did you create a map file?): $response");
-    timelog("dcc check failed", "dcc", 2);
+  if (!defined($response) || $response !~ /^X-DCC/) {
+    dbg ("DCC -> check failed: no X-DCC returned (did you create a map file?): $response");
+    timelog("DCC check failed", "dcc", 2);
     return 0;
   }
 
@@ -546,7 +615,7 @@ sub dcc_lookup {
     if ($response =~ /^(X-DCC.*): (.*)$/) {
       $left  = $1;
       $right = $2;
-      $self->{msg}->put_header($left, $right);
+      $self->{headers_to_add}->{$left} = $right;
     }
   }
  
@@ -569,7 +638,7 @@ sub dcc_lookup {
     return 1;
   }
   
-  timelog("DCC -> no match", "dcc", 2);
+  timelog("DCC -> check had no match", "dcc", 2);
   return 0;
 }
 
@@ -580,19 +649,14 @@ sub is_pyzor_available {
     dbg ("local tests only, ignoring Pyzor");
     return 0;
   }
+  if (!$self->{conf}->{use_pyzor}) { return 0; }
 
   my $pyzor = $self->{conf}->{pyzor_path} || '';
   unless ($pyzor) {
-    foreach my $path (File::Spec->path()) {
-      $pyzor = File::Spec->catfile ($path, 'pyzor');
-      if (-x $pyzor) {
-        dbg ("Pyzor was found at $pyzor");
-        $self->{conf}->{pyzor_path} = $pyzor;
-        last;
-      }
-    }
+    $pyzor = Mail::SpamAssassin::Util::find_executable_in_env_path('pyzor');
+    if ($pyzor) { $self->{conf}->{pyzor_path} = $pyzor; }
   }
-  unless (-x $pyzor) {
+  unless ($pyzor && -x $pyzor) {
     dbg ("Pyzor is not available: pyzor not found");
     return 0;
   }
@@ -615,8 +679,9 @@ sub pyzor_lookup {
     dbg ("local tests only, ignoring Pyzor");
     return 0;
   }
+  if (!$self->{conf}->{use_pyzor}) { return 0; }
 
-  timelog("Pyzor -> Starting test ($timeout secs max)", "pyzor", 1);
+  timelog("Pyzor -> Starting check ($timeout secs max)", "pyzor", 1);
   $self->enter_helper_run_mode();
 
   # use a temp file here -- open2() is unreliable, buffering-wise,
@@ -624,38 +689,49 @@ sub pyzor_lookup {
   my $tmpf = $self->create_fulltext_tmpfile($fulltext);
 
   eval {
-    local $SIG{ALRM} = sub { die "alarm\n" };
-    local $SIG{PIPE} = sub { die "brokenpipe\n" };
+    local $SIG{ALRM} = sub { die "__alarm__\n" };
+    local $SIG{PIPE} = sub { die "__brokenpipe__\n" };
 
     alarm($timeout);
 
-    my $pid = open(PYZOR, join(' ',
-                    $self->{conf}->{pyzor_path}, 'check < \''.$tmpf.'\' 2>&1 |'));
-    $response = <PYZOR>;
+    # Note: not really tainted, this comes from system conf file.
+    my $path = Mail::SpamAssassin::Util::untaint_file_path ($self->{conf}->{pyzor_path});
+
+    my $opts = '';
+    if ( $self->{conf}->{pyzor_options} =~ /^([^\;\'\"\0]+)$/ ) {
+      $opts = $1;
+    }
+ 
+    dbg("Pyzor command: ".join(' ', $path, $opts, "check", "< '$tmpf'", "2>&1"),'pyzor',-1);
+    my $pid = open(PYZOR, join(' ', $path, $opts, "check", "< '$tmpf'", "2>&1", '|')) || die "$!\n";
+    chomp($response = <PYZOR>);
     close PYZOR;
+
+    unless (defined($response)) { # this is possible for DCC, let's be on the safe side
+      die ("no response\n");
+    }
+
     dbg("Pyzor: got response: $response");
 
     alarm(0);
     waitpid ($pid, 0);
   };
 
+  alarm 0;
   $self->leave_helper_run_mode();
 
   if ($@) {
-    $response = undef;
-    if ($@ =~ /alarm/) {
-      dbg ("Pyzor check timed out after 10 secs.");
-      timelog("Pyzor -> interrupted after $timeout secs", "pyzor", 2);
-      return 0;
-    } elsif ($@ =~ /brokenpipe/) {
-      dbg ("Pyzor -> check failed - Broken pipe.");
+    if ($@ =~ /^__alarm__$/) {
+      dbg ("Pyzor -> check timed out after $timeout secs.");
+      timelog("Pyzor interrupted after $timeout secs", "pyzor", 2);
+    } elsif ($@ =~ /^__brokenpipe__$/) {
+      dbg ("Pyzor -> check failed: Broken pipe.");
       timelog("Pyzor check failed, broken pipe", "pyzor", 2);
-      return 0;
     } else {
-      warn ("Pyzor -> check skipped: $! $@");
-      timelog("Pyzor check skipped", "pyzor", 2);
-      return 0;
+      warn ("Pyzor -> check failed: $@\n");
+      timelog("Pyzor check failed", "pyzor", 2);
     }
+    return 0;
   }
 
   # made regexp a little more forgiving (jm)
@@ -673,9 +749,9 @@ sub pyzor_lookup {
   # moved this around a bit; no point in testing RE twice (jm)
   if ($self->{conf}->{pyzor_add_header}) {
     if ($pyzor_whitelisted) {
-      $self->{msg}->put_header("X-Pyzor", "Whitelisted.");
+      $self->{headers_to_add}->{'X-Pyzor'} = "Whitelisted.";
     } else {
-      $self->{msg}->put_header("X-Pyzor", "Reported $pyzor_count times.");
+      $self->{headers_to_add}->{'X-Pyzor'} = "Reported $pyzor_count times.";
     }
   }
 
@@ -708,7 +784,8 @@ sub load_resolver {
     1;
   };   #  or warn "eval failed: $@ $!\n";
 
-  dbg ("is Net::DNS::Resolver unavailable? $self->{no_resolver}");
+  dbg ("is Net::DNS::Resolver available? " .
+       ($self->{no_resolver} ? "no" : "yes"));
 
   return (!$self->{no_resolver});
 }
@@ -726,8 +803,8 @@ sub lookup_mx {
     $ret = 1 if @mxrecords;
   };
   if ($@) {
-    # 71 == EX_OSERR.  MX lookups are not supposed to crash and burn!
-    sa_die (71, "MX lookup died: $@ $!\n");
+    dbg ("MX lookup failed horribly, perhaps bad resolv.conf setting?");
+    return undef;
   }
 
   dbg ("MX for '$dom' exists? $ret");
@@ -758,8 +835,8 @@ sub lookup_ptr {
 
   };
   if ($@) {
-    # 71 == EX_OSERR.  PTR lookups are not supposed to crash and burn!
-    sa_die (71, "PTR lookup died: $@ $!\n");
+    dbg ("PTR lookup failed horribly, perhaps bad resolv.conf setting?");
+    return undef;
   }
 
   dbg ("PTR for '$dom': '$name'");
@@ -804,10 +881,18 @@ sub is_dns_available {
   for(my $retry = 3; $retry > 0 and $#domains>-1; $retry--) {
     my $domain = splice(@domains, rand(@domains), 1);
     dbg ("trying ($retry) $domain...", "dnsavailable", -2);
-    if($self->lookup_mx($domain)) {
-      dbg ("MX lookup of $domain succeeded => Dns available (set dns_available to hardcode)", "dnsavailable", -1);
-      $IS_DNS_AVAILABLE = 1;
-      last;
+    my $result = $self->lookup_mx($domain);
+    if(defined $result) {
+      if ( $result ) {
+        dbg ("MX lookup of $domain succeeded => Dns available (set dns_available to hardcode)", "dnsavailable", -1);
+        $IS_DNS_AVAILABLE = 1;
+        last;
+      }
+    }
+    else {
+      dbg ("MX lookup of $domain failed horribly => Perhaps your resolv.conf isn't pointing at a valid server?", "dnsavailable", -1);
+      $IS_DNS_AVAILABLE = 0; # should already be 0, but let's be sure.
+      last; 
     }
   }
 
@@ -828,15 +913,18 @@ sub enter_helper_run_mode {
   $self->{old_slash} = $/;              # Razor pollutes this
   $self->{old_env_home} = $ENV{'HOME'}; # can be 'undef', e.g. spamd has no HOME
 
-  if (defined $self->{main}->{home_dir_for_helpers}
-             && $self->{main}->{home_dir_for_helpers})
-  {
-    $ENV{'HOME'} = $self->{main}->{home_dir_for_helpers};
-  }
-  else {
+  Mail::SpamAssassin::Util::clean_path_in_taint_mode();
+
+  my $newhome;
+  if ($self->{main}->{home_dir_for_helpers}) {
+    $newhome = $self->{main}->{home_dir_for_helpers};
+  } else {
     # use spamd -u user's home dir
-    my $hd = (getpwuid($>))[7];
-    $ENV{'HOME'} = $hd if defined $hd;
+    $newhome = (Mail::SpamAssassin::Util::portable_getpwuid ($>))[7];
+  }
+
+  if ($newhome) {
+    $ENV{'HOME'} = Mail::SpamAssassin::Util::untaint_file_path ($newhome);
   }
 }
 

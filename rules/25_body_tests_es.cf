@@ -6,18 +6,21 @@
 # the next update. Use @@LOCAL_RULES_DIR@@/local.cf instead.
 # See 'perldoc Mail::SpamAssassin::Conf' for details.
 #
+# See the file "License" in the top level of the SpamAssassin distribution
+# for usage terms.
+#
 # Leaving some of these without "lang es" because they show up in English
 # language inboxes.
 #
 ###########################################################################
 
-lang es body REMOVE_ES_01             /(?:Para no|Si (?:U(?:ste)?d\. )?no (?:deseas?|qui?er[ée]s)) (?:seguir )?recibi(?:r|endo) (?:en el futuro )?(?:ninguna otra|m.s|estos)?\s?(?:correos?|mensajes?|publicidad|informaci.n|ofertas?|(?:e-?)?mails? promocional(?:es)?)/
+lang es body REMOVE_ES_01             /(?:Para (?:no|dejar de)|[sS]i (?:U(?:ste)?d\. )?no (?:deseas?|qui?er[ée]s)) (?:seguir )?reci[vb]i(?:r|endo) (?:en el futuro |m.s )?(?:ninguna otra|nuestr[ao]s?|est[ao]s?)?\s?(?:correos?|mensajes?|publicidad|informaci.n|ofertas?|(?:promoci.n|bolet.n)(?:es)?|(?:e-?)?mails? promocional(?:es)?|avisos)/i
 lang es describe REMOVE_ES_01         Claims you can be removed in Spanish
 
-lang es body REMOVE_ES_02             /(?:Para ser (?:elimina|removi)do|Si quieres? salir) de (?:nuestra|esta) lista,? (?:sera removido|responda el mail|solo tienes? que marcar)/i
+lang es body REMOVE_ES_02             /(?:Para ser (?:elimina|removi)do|Si quieres? salir|Para eliminarse) del? (?:nuestra|esta|mailing) ?lista?,? (?:sera removido|responda el mail|solo tienes? que marcar|enviar un ?e-?mail)/i
 lang es describe REMOVE_ES_02           Claims you can be removed in Spanish
 
-lang es body REMOVE_ES_03             /(?:Si|o)(?: U(?:ste)?d\.?)? deseas? (?:que le (?:borre|remova|elimine)mos|ser (?:borra|removi|elimina)do) (?:por favor |de (?:cualquier listado futuro,?|(?:la|nuestra) (?:lista(?: de (?:(?:e-?)?mail|correo))?|base de datos)) )?(?:s.lo )?(?:por favor|responda|env.(?:ar|e(?:nos)?|a) (?:un )?(?:e-?)?mail|haga)/i
+lang es body REMOVE_ES_03             /(?:Si|o)(?: U(?:ste)?d\.?)? deseas? (?:que le (?:borre|remova|elimine)mos|ser (?:borra|removi|elimina)do|recalcar tus ganas de eliminarte) (?:por favor |de (?:cualquier listado futuro,?|(?:la|nuestra|esta) (?:lista(?: de (?:(?:e-?)?mail|correo))?|base de datos)),? )?(?:s.lo )?(?:por favor|responda|env.(?:ar?|e(?:nos)?).? (?:(?:simplemente|un) )?(?:e-?)?mail|haga|solicit[ae]|envi[ae])/i
 lang es describe REMOVE_ES_03           Claims you can be removed in Spanish
 
 lang es body REMOVE_ES_04             /(?:si desea|para) no recibir mas (?:nuestras promocione|mensaje)s/i
@@ -32,10 +35,13 @@ lang es describe REMOVE_ES_06		Claims you can opt-out
 lang es body REMOVE_ES_07		/Si (?:este mensaje|esta publicidad) no es de su inter.s,? (?:(?:te|le) pedimos disculpas|por favor env.e un (?:e-?)?mail)/i
 lang es describe REMOVE_ES_07		Claims you can opt-out
 
+lang es body REMOVE_ES_08		/(?:Para|Si desea) (?:removerse|borrarse),? (?:debe hacerlo en|solo env.e un (?:mail|\"remove\"))/
+lang es describe REMOVE_ES_08		Claims you can opt-out
+
 lang es body SUBSCRIBE_ES_01		/Si usted desea Agregarse a nuestra base de datos/i
 lang es describe SUBSCRIBE_ES_01	If you want to subscribe...
 
-lang es body EXCUSE_ES_01             /est(?:o|e (?:mensaje|(?:e-?)mail)|a carta) no (?:es|(?:puede ser|se) considera(?:d[oa])?) .?SPAM.?,? (?:(?:puesto|ya) que|mientras)/i
+lang es body EXCUSE_ES_01             /est(?:o|e (?:correo|mensaje|(?:e-?)mail)|a carta) no (?:es|(?:puede se.|se(?: puede)?) considera(?:d[oa]|r)?) .?S[Pp][Aa][Mm].?,?(?:\(correo no deseado\))? (?:(?:puesto|ya) que|mientras|si)/i
 lang es describe EXCUSE_ES_01         Claims not to be spam in Spanish
 
 lang es body EXCUSE_ES_02             /Me he tomado la libertad de enviarle este mail por/i
@@ -58,11 +64,11 @@ lang es describe DEJAR_DE_FUMAR_ES	Para dejar de fumar
 
 ## This ones most likelly will appear only in spanish mails
 #
-lang es body GRATIS_ES	/(?:TOTALMENTE|ABSOLUTAMENTE|ES).{1,14}GRATIS/
-lang es describe GRATIS_ES	NOS CHILLAN PARA DECIR QUE ES GRATIS
+lang es body GRATIS_ES			/(?:llame|totalmente|TOTALMENTE|ABSOLUTAMENTE|ES).{1,14}GRAT(?:UITO|IS)/
+lang es describe GRATIS_ES		NOS CHILLAN PARA DECIR QUE ES GRATIS
 lang es score GRATIS_ES	1.4
 
-lang es body INTERESADO_ES		/Si le interesa (?:contratar el servicio|el tema),? (?:haga .{1,5}click|(?:debe enviarnos un|contesteme (?:solamente )?a este) (?:e-?)?mail)/i
+lang es body INTERESADO_ES		/Si (?:Ud\.? )?(?:considera [uú]til|le interesa) (?:(?:nuestro|contratar el) servicio|el tema),? (?:haga .{1,5}click|(?:debe enviarnos un|contesteme (?:solamente )?a este) (?:e-?)?mail|l[oe] invitamos a SUBSCRIBIRSE)/i
 lang es describe INTERESADO_ES		Nos animan a contestar si estamos interesados
 
 ## Recursos generales de spammers
@@ -75,6 +81,12 @@ lang es body NORMATIVA_SPAM_ES		/(?:Bajo el Decreto .{2,3}S\.1618 titulo (?:III|
 lang es describe NORMATIVA_SPAM_ES	Clama cumplir con la normativa SPAM
 lang es score NORMATIVA_SPAM_ES	2.0
 
+lang es body LEY_CHILE_ES_01		/la legislaci.n chilena no contempla el env.o de publicidad por correo electr.nico/i
+lang es describe LEY_CHILE_ES_01	No existe legislación en Chile contra el SPAM
+
+lang es body LEY_CHILE_ES_02		/Este mensaje se env.a bajo la ley 19.628 de la Costituci.n de la Rep.blica de Chile/i
+lang es describe LEY_CHILE_ES_02	Clama cumplir con la legislación chilena
+
 lang es body TARJETA_VERDE_ES		/Consiga un permiso de residencia.{0,30}Tarjeta Verde/i
 lang es describe TARJETA_VERDE_ES	Inmigración legal (?) a los Estados Unidos
 
@@ -84,19 +96,22 @@ lang es describe PROMOCION_ES		Promocion especial.
 lang es body ALTA_BUSCADORES_ES		/alta en (?:mas de )?\d{2,4} buscadores hispanos/i
 lang es describe ALTA_BUSCADORES_ES	Alta en buscadores hispanos.
 
-lang es body EXCLAMACION_ES		/INFORMESE|LLAME(?:NOS)?|RESPOND[AE]|ENVI[AE]|PID[AE]|COMPRE|SOLICITE|CONSULTE|ESCRIBA|VISIT[AE]NOS/
-lang es describe EXCLAMACION_ES		IMPERATIVOS EN MAYUSCULAS.
+lang es body EXCLAMACION_ES		/INF[OÓ]RMESE|(?:CONTACT|VISIT|RESPOND|ENVI|PID|COMPR|SOLICIT|CONSULT|ESCRIB|LLAM)[AE](?:NOS)?|PROMOCI[OÓ]N(?:ES)?|OFERTAS?|SIN COMPROMISO/
+lang es describe EXCLAMACION_ES		IMPERATIVOS/EXCLAMACIONES EN MAYUSCULAS.
 
-lang es body PRESENTAMOS_ES		/[tl]e (?:ofrece|presenta|informa|informare)mos/i
+lang es body PRESENTAMOS_ES		/[tl]e (?:ofrece|presenta|informa(?:re)?)mos/i
 lang es describe PRESENTAMOS_ES		Presentación de un nuevo producto.
 
 lang es body CONTRA_REEMBOLSO_ES	/(?:envios|pago) contra[r -]?reembolso/i
 lang es describe CONTRA_REEMBOLSO_ES	Pago contra reembolso.
 
-lang es body CLICK_ES			/ha(?:ga|z) click aqu. para/i
+lang es body PEDIDO_ES			/haga su pedido/i
+lang es describe PEDIDO_ES		Para hacer su pedido.
+
+lang es body CLICK_ES			/(?:ha(?:ga|z|ciendo|cer) click|oprim[ae]) (?:aqu.|en el bot.n)/i
 lang es describe CLICK_ES		Haga click aqui.
 
-lang es body REGALO_ES			/[lt]e (?:regal|obsequi)amos/i
+lang es body REGALO_ES			/[lt]e (?:regal|obsequi)amos|ll.vate tu regalo/i
 lang es describe REGALO_ES		Los regalos no existen, salvo de nuestros amigos.
 
 lang es body GANADORES_ES_01		/Usted y su familia podr.an tener suerte y ser los ganadores/i
@@ -108,7 +123,7 @@ lang es describe GANADORES_ES_02	Ha sido ganador.
 lang es body PORNO_GRATIS_ES		/porno .{3,5} gratis/i
 lang es describe PORNO_GRATIS_ES	Porno gratis.
 
-lang es body MAS_INFORMACION_ES		/para (?:m.s|mayor) informaci.n/i
+lang es body MAS_INFORMACION_ES		/(?:si qu?ier[ée]s|para|por) (?:solo )?(?:solicitar )?(?:m.s|mayor) informaci.n/i
 lang es describe MAS_INFORMACION_ES	Mas informacion.
 
 lang es body INFORMACION_RESERVA_ES	/Informaci.n y reserva/i
@@ -117,5 +132,13 @@ lang es describe INFORMACION_RESERVA_ES	Informacion y reserva
 lang es body REENVIA_ES			/Ayuda a difundir esta informaci.n/
 lang es describe REENVIA_ES		Conviertete en Spammer.
 
-# vim: set ai! tw=255:
+lang es body NO_MAS_MAIL_1_ES		/NO VOLVEREMOS A ENVIARLE MAS E?-?MAIL|ESTE MAIL SE ENVIA POR UNICA VEZ|no volverá a recibir ningún otro email de nosotros/
+lang es describe NO_MAS_MAIL_1_ES	No nos envían más spam... seguro que no.
+
+lang es body NO_MAS_MAIL_2_ES		/Usted recibirá este mensaje por única vez/
+lang es describe NO_MAS_MAIL_2_ES	No recibirá este spam otra vez... seguro que no.
+
+lang es body COLECTOR_DE_MAILS_ES	/Las direcciones electronicas han sido tomadas de lugares publicos/
+lang es describe COLECTOR_DE_MAILS_ES	Las direcciones fueron obtenidas de internet.
+# vim: set ai! tw=1000:
 

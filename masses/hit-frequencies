@@ -1,26 +1,37 @@
 #!/usr/bin/perl -w
 
+use FindBin;
 use Getopt::Std;
-getopts("fm:l:L:pxh");
+getopts("fm:M:X:l:L:pxhc:at:s:");
 
 use vars qw {
-  $opt_f $opt_m $opt_p $opt_x $opt_h $opt_l $opt_L
+  $opt_f $opt_m $opt_M $opt_X $opt_p $opt_x $opt_h $opt_l $opt_L $opt_c
+  $opt_a $opt_t $opt_s
 };
 
 sub usage {
-  die "hit-frequencies [-f] [-m RE] [-l LC] [-p] [-x] [spam log] [nonspam log]
+  die "hit-frequencies [-c rules dir] [-f] [-m RE] [-M RE] [-X RE] [-l LC]
+                [-s SC] [-a] [-p] [-x] [spam log] [ham log]
 
+    -c p   use p as the rules directory
     -f     falses. count only false-negative or false-positive matches
     -m RE  print rules matching regular expression
+    -t RE  print rules with tflags matching regular expression
+    -M RE  only consider log entries matching regular expression
+    -X RE  don't consider log entries matching regular expression
     -l LC  also print language specific rules for lang code LC (or 'all')
     -L LC  only print language specific rules for lang code LC (or 'all')
+    -a     display all tests
     -p     percentages. implies -x
     -x     extended output, with S/O ratio and scores
+    -s SC  which scoreset to use
 
     options -l and -L are mutually exclusive.
 
-    if either the spam or and nonspam logs are unspecified, the defaults
-    are \"spam.log\" and \"nonspam.log\" in the cwd.
+    options -M and -X are *not* mutually exclusive.
+
+    if either the spam or and ham logs are unspecified, the defaults
+    are \"spam.log\" and \"ham.log\" in the cwd.
 
 ";
 }
@@ -31,14 +42,18 @@ if ($opt_p) {
   $opt_x = 1;
 }
 
+$opt_s = 0 if ( !defined $opt_s );
+
+my $cffile = $opt_c || "$FindBin::Bin/../rules";
+
 my %freq_spam = ();
-my %freq_nonspam = ();
+my %freq_ham = ();
 my $num_spam = 0;
-my $num_nonspam = 0;
+my $num_ham = 0;
 my %ranking = ();
 my $ok_lang = '';
 
-readscores();
+readscores($cffile);
 
 $ok_lang = lc ($opt_l || $opt_L || '');
 if ($ok_lang eq 'all') { $ok_lang = '.'; }
@@ -53,53 +68,53 @@ foreach my $key (keys %rules) {
   }
 
   $freq_spam{$key} = 0;
-  $freq_nonspam{$key} = 0;
+  $freq_ham{$key} = 0;
 }
 
 readlogs();
 
-my $hdr_all = $num_spam + $num_nonspam;
+my $hdr_all = $num_spam + $num_ham;
 my $hdr_spam = $num_spam;
-my $hdr_nonspam = $num_nonspam;
+my $hdr_ham = $num_ham;
 
 if ($opt_p) {
   if ($opt_f) {
     printf "%7s %7s %7s  %6s  %6s  %6s  %s\n",
   	"OVERALL%", "FNEG%", "FPOS%", "S/O", "RANK", "SCORE", "NAME";
   } else {
-    printf "%7s %7s %7s  %6s  %6s  %6s  %s\n",
-  	"OVERALL%", "SPAM%", "NONSPAM%", "S/O", "RANK", "SCORE", "NAME";
+    printf "%7s %7s  %7s  %6s  %6s  %6s  %s\n",
+  	"OVERALL%", "SPAM%", "HAM%", "S/O", "RANK", "SCORE", "NAME";
   }
-  printf "%7d  %7d  %7d  %6.2f  %6.2f  %6.2f  (all messages)\n",
-  	$hdr_all, $hdr_spam, $hdr_nonspam,
-        soratio ($num_spam,$num_nonspam), 0, 0;
+  printf "%7d  %7d  %7d  %7.3f %6.2f  %6.2f  (all messages)\n",
+  	$hdr_all, $hdr_spam, $hdr_ham,
+        soratio ($num_spam,$num_ham), 0, 0;
 
   $hdr_spam = ($num_spam / $hdr_all) * 100.0;
-  $hdr_nonspam = ($num_nonspam / $hdr_all) * 100.0;
+  $hdr_ham = ($num_ham / $hdr_all) * 100.0;
   $hdr_all = 100.0;             # this is obvious
-  printf "%7.3f  %7.3f  %7.3f  %6.2f  %6.2f  %6.2f  (all messages as %%)\n",
-  	$hdr_all, $hdr_spam, $hdr_nonspam,
-        soratio ($num_spam,$num_nonspam), 0, 0;
+  printf "%7.3f  %7.4f  %7.4f  %7.3f %6.2f  %6.2f  (all messages as %%)\n",
+  	$hdr_all, $hdr_spam, $hdr_ham,
+        soratio ($num_spam,$num_ham), 0, 0;
 
 } elsif ($opt_x) {
   printf "%7s  %7s  %7s  %6s  %6s  %s\n",
-  	"OVERALL", "SPAM", "NONSPAM", "S/O", "SCORE", "NAME";
-  printf "%7d  %7d  %7d  %6.2f  %6.2f  %6.2f  (all messages)\n",
-  	$hdr_all, $hdr_spam, $hdr_nonspam,
-        soratio ($num_spam,$num_nonspam), 0, 0;
+  	"OVERALL", "SPAM", "HAM", "S/O", "SCORE", "NAME";
+  printf "%7d  %7d  %7d  %7.3f %6.2f  %6.2f  (all messages)\n",
+  	$hdr_all, $hdr_spam, $hdr_ham,
+        soratio ($num_spam,$num_ham), 0, 0;
 
 } else {
   printf "%10s  %10s  %10s  %s\n",
-  	"OVERALL", "SPAM", "NONSPAM", "NAME";
+  	"OVERALL", "SPAM", "HAM", "NAME";
   printf "%10d  %10d  %10d  (all messages)\n",
-  	$hdr_all, $hdr_spam, $hdr_nonspam;
+  	$hdr_all, $hdr_spam, $hdr_ham;
 }
 
 my %done = ();
 my @tests = ();
 my $rank_hi = 0;
 my $rank_lo = 9999999;
-foreach my $test (keys %freq_spam, keys %freq_nonspam) {
+foreach my $test (keys %freq_spam, keys %freq_ham) {
   next unless (exists $rules{$test});           # only valid tests
   next if ($rules{$test}->{issubrule});
 
@@ -110,9 +125,9 @@ foreach my $test (keys %freq_spam, keys %freq_nonspam) {
   if ($rules{$test}->{tflags} =~ /nice/) { $isnice = 1; }
 
   my $fs = $freq_spam{$test}; $fs ||= 0;
-  my $fn = $freq_nonspam{$test}; $fn ||= 0;
+  my $fn = $freq_ham{$test}; $fn ||= 0;
   my $fsadj = $num_spam == 0 ? 0 : ($fs / ($num_spam)) * 100.0;
-  my $fnadj = $num_nonspam == 0 ? 0 : ($fn / ($num_nonspam)) * 100.0;
+  my $fnadj = $num_ham == 0 ? 0 : ($fn / ($num_ham)) * 100.0;
 
   my $soratio = $soratio{$test} = soratio ($fsadj, $fnadj);
 
@@ -123,9 +138,13 @@ foreach my $test (keys %freq_spam, keys %freq_nonspam) {
 
   # now, given the S/O ratio (0.0 to 1.0) and match%s (0.0 to 100.0),
   # come up with a ranking.
-  #
-  my $rank = $soratio * ($fsadj / (($fnadj || 0.0008) * 10));
-  $rank = log($rank+0.001);
+
+  # old system
+  #my $rank = $soratio * ($fsadj / (($fnadj || 0.0008) * 10));
+  #$rank = log($rank+0.001);
+
+  # new system: allows a few more 99% hitters into the first page
+  my $rank = (($soratio**3) * 2000) + ($fsadj*3);
 
   $ranking{$test} = $rank;
   $rank_hi = $rank if ($rank > $rank_hi);
@@ -135,7 +154,7 @@ foreach my $test (keys %freq_spam, keys %freq_nonspam) {
 # now normalise the rankings to [0, 1]
 $rank_hi -= $rank_lo;
 foreach $test (@tests) {
-  $ranking{$test} = ($ranking{$test} - $rank_lo) / $rank_hi;
+  $ranking{$test} = $rank_hi == 0 ? 0.001 : ($ranking{$test} - $rank_lo) / $rank_hi;
 }
 
 foreach $test (sort { $ranking{$b} <=> $ranking{$a} } @tests) {
@@ -143,21 +162,25 @@ foreach $test (sort { $ranking{$b} <=> $ranking{$a} } @tests) {
   next if ($rules{$test}->{issubrule});
 
   my $fs = $freq_spam{$test}; $fs ||= 0;
-  my $fn = $freq_nonspam{$test}; $fn ||= 0;
+  my $fn = $freq_ham{$test}; $fn ||= 0;
   my $fa = $fs+$fn;
 
   next if ($opt_m && $test !~ m/$opt_m/);	# match certain tests
-  next if ($rules{$test}->{tflags} =~ /net/);   # not net tests
-  next if ($rules{$test}->{tflags} =~ /userconf/); # or userconf
+  next if ($opt_t && $rules{$test}->{tflags} !~ /$opt_t/); # match tflags
+
+  if (!$opt_a && !$opt_t) {
+    next if ($rules{$test}->{tflags} =~ /net/ && ($opt_s % 2 == 0));   # not net tests
+    next if ($rules{$test}->{tflags} =~ /userconf/); # or userconf
+  }
 
   # adjust based on corpora sizes (and cvt to % while we're at it)
   my $fsadj = $num_spam == 0 ? 0 : ($fs / ($num_spam)) * 100.0;
-  my $fnadj = $num_nonspam == 0 ? 0 : ($fn / ($num_nonspam)) * 100.0;
+  my $fnadj = $num_ham == 0 ? 0 : ($fn / ($num_ham)) * 100.0;
 
   if ($opt_f && $fsadj == 0 && $fnadj == 0) { next; }
 
   if ($opt_p) {
-    $fa = ($fa / ($num_spam + $num_nonspam)) * 100.0;
+    $fa = ($fa / ($num_spam + $num_ham)) * 100.0;
     $fs = $fsadj;
     $fn = $fnadj;
   }
@@ -168,11 +191,11 @@ foreach $test (sort { $ranking{$b} <=> $ranking{$a} } @tests) {
   }
 
   if ($opt_p) {
-    printf "%7.3f  %7.3f  %7.3f  %6.2f  %6.2f  %6.2f  %s\n",
+    printf "%7.3f  %7.4f  %7.4f  %7.3f %6.2f  %6.2f  %s\n",
   	$fa, $fs, $fn, $soratio, $ranking{$test}, $scores{$test}, $test;
 
   } elsif ($opt_x) {
-    printf "%7d  %7d  %7d  %6.2f  %6.2f  %6.2f  %s\n",
+    printf "%7d  %7d  %7d  %7.3f %6.2f %6.2f  %s\n",
   	$fa, $fs, $fn, $soratio, $ranking{$test}, $scores{$test}, $test;
 
   } else {
@@ -185,15 +208,18 @@ exit;
 
 sub readlogs {
   my $spam = $ARGV[0] || "spam.log";
-  my $nonspam = $ARGV[1] || (-f "good.log" ? "good.log" : "nonspam.log");
+  my $ham = $ARGV[1] || (-f "good.log" ? "good.log" : "ham.log");
 
-  foreach my $file ($spam, $nonspam) {
+  foreach my $file ($spam, $ham) {
     open (IN, "<$file") || die "Could not open file '$file': $!";
 
     my $isspam = 0; ($file eq $spam) and $isspam = 1;
 
     while (<IN>) {
       next if (/^#/);
+      next unless (!$opt_M || /$opt_M/o);
+      next if ($opt_X && /$opt_X/o);
+
       /^(.)\s+(-?\d+)\s+(\S+)\s*(\S*)/ or next;
       my $caught = ($1 eq 'Y');
       my $hits = $2;
@@ -207,9 +233,9 @@ sub readlogs {
         }
       } else {
         if ($opt_f) {
-          if ($caught) { $num_nonspam++; }
+          if ($caught) { $num_ham++; }
         } else {
-          $num_nonspam++;
+          $num_ham++;
         }
       }
 
@@ -224,20 +250,21 @@ sub readlogs {
           }
 	} else {
           if ($opt_f) {
-            if ($caught) { $freq_nonspam{$t}++; }
+            if ($caught) { $freq_ham{$t}++; }
           } else {
-            $freq_nonspam{$t}++;
+            $freq_ham{$t}++;
           }
 	}
       }
-    } 
+    }
     close IN;
   }
 }
 
 
 sub readscores {
-  system ("./parse-rules-for-masses") and die;
+  my($cffile) = @_;
+  system ("$FindBin::Bin/parse-rules-for-masses -d \"$cffile\" -s $opt_s") and die;
   require "./tmp/rules.pl";
 }
 
@@ -250,7 +277,7 @@ sub soratio {
   if ($s + $n > 0) {
       return $s / ($s + $n);
   } else {
-      return 0;
+      return 0.5;		# no results -> not effective
   }
 }
 
@@ -271,4 +298,3 @@ sub tcr {
   my $tcr = $werr_base / $werr;
   return $tcr;
 }
-

@@ -1,10 +1,11 @@
 #!/usr/bin/perl
 
 use lib '.'; use lib 't';
-use SATest; sa_t_init("spam");
-use Test; BEGIN { plan tests => -e 't/do_razor' ? 2 : 0 };
+use SATest; sa_t_init("razor");
 
-exit unless -e 't/do_razor';
+use constant TEST_ENABLED => (-e 't/do_razor1' || -e 'do_razor1');
+use Test; BEGIN { plan tests => TEST_ENABLED ? 2 : 0 };
+exit unless TEST_ENABLED;
 
 # ---------------------------------------------------------------------------
 
@@ -19,10 +20,9 @@ if ($@) {
 }
 
 
-
 %patterns = (
 
-q{ Listed in Razor1 }, 'spam',
+q{ Listed in Razor v1 }, 'spam',
 
 );
 
@@ -32,7 +32,7 @@ skip_all_patterns($razor_not_available);
 %patterns = ();
 %anti_patterns = (
 
-q{ Listed in Razor1 }, 'nonspam',
+q{ Listed in Razor v1 }, 'nonspam',
 
 );
 

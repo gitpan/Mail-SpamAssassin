@@ -35,10 +35,15 @@ package Mail::SpamAssassin::SHA1;
 
 require 5.002;
 use strict;
+use bytes;
 use integer;
 
-use vars qw(@ISA @EXPORT);
+use vars qw(
+  @ISA @EXPORT
+);
+
 require Exporter;
+
 @ISA = qw(Exporter);
 @EXPORT = qw(sha1);
 

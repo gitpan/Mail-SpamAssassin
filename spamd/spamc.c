@@ -1,9 +1,11 @@
 /*
  * This code is copyright 2001 by Craig Hughes
- * It is licensed for use with SpamAssassin according to the terms of the Perl Artistic License
- * The text of this license is included in the SpamAssassin distribution in the file named "License"
+ * It is licensed under the same license as Perl itself.  The text of this
+ * license is included in the SpamAssassin distribution in the file named
+ * "License".
  */
 
+#include "../config.h"
 #include "libspamc.h"
 #include "utils.h"
 
@@ -57,18 +59,26 @@ int flags = SPAMC_RAW_MODE | SPAMC_SAFE_FALLBACK;
 /* Aug 14, 2002 bj: global to hold -e command */
 char **exec_argv;
 
+static int timeout = 600;
+
 void print_usage(void)
 {
-  printf("Usage: spamc [-d host] [-p port] [-B] [-c] [-f] [-h] [-e command [args]]\n");
+  printf("Usage: spamc [options] < message\n\n");
   printf("-B: BSMTP mode - expect input to be a single SMTP-formatted message\n");
   printf("-c: check only - print score/threshold and exit code set to 0 if message is not spam, 1 if spam\n");
+  printf("-r: report if spam - print report for spam messages\n");
+  printf("-R: report - print report for all messages\n");
+  printf("-y: symbols - print only the names of the tests hit\n");
   printf("-d host: specify host to connect to  [default: localhost]\n");
   printf("-e command [args]: Command to output to instead of stdout. MUST BE THE LAST OPTION.\n");
   printf("-f: fallback safely - in case of comms error, dump original message unchanges instead of setting exitcode\n");
   printf("-h: print this help message\n");
   printf("-p port: specify port for connection [default: 783]\n");
   printf("-s size: specify max message size, any bigger and it will be returned w/out processing [default: 250k]\n");
+  printf("-S: use SSL to talk to spamd\n");
   printf("-u username: specify the username for spamd to process this message under\n");
+  printf("-x: don't fallback safely - in a comms error, exit with an error code\n");
+  printf("-t: timeout in seconds to read from spamd. 0 disables. [default: 600]\n\n");
 }
 
 int
@@ -76,7 +86,7 @@ read_args(int argc, char **argv, char **hostname, int *port, int *max_size, char
 {
   int opt, i, j;
 
-  while(-1 != (opt = getopt(argc,argv,"-Bcd:e:fhp:t:s:u:")))
+  while(-1 != (opt = getopt(argc,argv,"-BcrRd:e:fhyp:t:s:u:xS")))
   {
     switch(opt)
     {
@@ -88,6 +98,21 @@ read_args(int argc, char **argv, char **hostname, int *port, int *max_size, char
     case 'c':
       {
         flags |= SPAMC_CHECK_ONLY;
+	break;
+      }
+    case 'r':
+      {
+        flags |= SPAMC_REPORT_IFSPAM;
+	break;
+      }
+    case 'R':
+      {
+        flags |= SPAMC_REPORT;
+	break;
+      }
+    case 'y':
+      {
+        flags |= SPAMC_SYMBOLS;
 	break;
       }
     case 'd':
@@ -102,7 +127,7 @@ read_args(int argc, char **argv, char **hostname, int *port, int *max_size, char
         for(i=0, j=optind-1; j<argc; i++, j++){
             exec_argv[i]=argv[j];
         }
-        argv[opt]=NULL;
+        exec_argv[i]=NULL;
         return EX_OK;
       }
     case 'p':
@@ -115,6 +140,11 @@ read_args(int argc, char **argv, char **hostname, int *port, int *max_size, char
         flags |= SPAMC_SAFE_FALLBACK;
 	break;
       }
+    case 'x':
+      {
+	flags &= (~SPAMC_SAFE_FALLBACK);
+	break;
+      }
     case 'u':
       {
 	*username = optarg;
@@ -123,6 +153,16 @@ read_args(int argc, char **argv, char **hostname, int *port, int *max_size, char
     case 's':
       {
 	*max_size = atoi(optarg);
+	break;
+      }
+    case 'S':
+      {
+	flags |= SPAMC_USE_SSL;
+	break;
+      }
+    case 't':
+      {
+	timeout = atoi(optarg);
 	break;
       }
     case '?': {
@@ -182,10 +222,10 @@ void get_output_fd(int *fd){
 int main(int argc, char **argv){
   int port = 783;
   int max_size = 250*1024;
-  char *hostname = "127.0.0.1";
+  char *hostname = (char *) "127.0.0.1";
   char *username = NULL;
   struct passwd *curr_user;
-  struct sockaddr addr;
+  struct hostent hent;
   int ret;
   struct message m;
   int out_fd;
@@ -208,29 +248,36 @@ int main(int argc, char **argv){
     out_fd=-1;
     m.type=MESSAGE_NONE;
 
-    ret=lookup_host(hostname, port, &addr);
+    ret=lookup_host_for_failover (hostname, &hent);
     if(ret!=EX_OK) goto FAIL;
 
-    m.max_len=max_size;
+    m.max_len = max_size;
+    m.timeout = timeout;
+
     ret=message_read(STDIN_FILENO, flags, &m);
     if(ret!=EX_OK) goto FAIL;
-    ret=message_filter(&addr, username, flags, &m);
+    ret=message_filter_with_failover(&hent, port, username, flags, &m);
     if(ret!=EX_OK) goto FAIL;
     get_output_fd(&out_fd);
     if(message_write(out_fd, &m)<0) goto FAIL;
-    if(m.is_spam!=EX_TOOBIG) return m.is_spam;
+
+    if((flags&SPAMC_CHECK_ONLY) && m.is_spam!=EX_TOOBIG) return m.is_spam;
+
     return ret;
 
 FAIL:
     get_output_fd(&out_fd);
-    if(flags&SPAMC_CHECK_ONLY){
-        full_write(out_fd, "0/0\n", 4);
+    if(flags&SPAMC_CHECK_ONLY || flags&SPAMC_REPORT || flags&SPAMC_REPORT_IFSPAM){
+        full_write(out_fd, (unsigned char *) "0/0\n", 4);
         return EX_NOTSPAM;
     } else {
         message_dump(STDIN_FILENO, out_fd, &m);
         if (ret == EX_TOOBIG) {
           return 0;
-        }
-        return ret;
+        } else if (flags & SPAMC_SAFE_FALLBACK) {
+	  return EX_OK;
+	} else {
+	  return ret;
+	}
     }
 }

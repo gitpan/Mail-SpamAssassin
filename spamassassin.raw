@@ -1,4 +1,6 @@
-#!/usr/bin/perl -w
+#!/usr/bin/perl -w -T
+
+use strict;
 
 use File::Spec;
 
@@ -22,13 +24,23 @@ BEGIN {
   if (-e $bin.'/lib/Mail/SpamAssassin.pm'
         || !-e '@@INSTALLSITELIB@@/Mail/SpamAssassin.pm')
   {
-    # These are common paths where the SA libs might be found.
-    foreach (qw(lib ../lib/site_perl
-                ../lib/spamassassin ../share/spamassassin/lib))
-    {
-      my $dir = File::Spec->catdir($bin, split('/', $_));
-      if(-f File::Spec->catfile($dir, "Mail", "SpamAssassin.pm")) {
-        unshift(@INC, $dir); last;
+    # Firstly, are we running "make test" in the "t" dir?  the test files
+    # *need* to use 'blib', so that 'use bytes' is removed for pre-5.6 perls
+    # beforehand by the preproc.  However, ./spamassassin does not, as the
+    # preproc will have stripped out the "use rule files from cwd" code from
+    # Mail::SpamAssassin.  So we want to use blib just for the t scripts.
+    if ( $bin eq '../' && -e '../blib/lib/Mail/SpamAssassin.pm' ) {
+      unshift(@INC, '../blib/lib');
+    }
+    else {
+      # These are common paths where the SA libs might be found.
+      foreach (qw(lib ../lib/site_perl
+                  ../lib/spamassassin ../share/spamassassin/lib))
+      {
+        my $dir = File::Spec->catdir($bin, split('/', $_));
+        if(-f File::Spec->catfile($dir, "Mail", "SpamAssassin.pm")) {
+          unshift(@INC, $dir); last;
+        }
       }
     }
   }
@@ -68,8 +80,8 @@ eval {
 	     'add-addr-to-blacklist=s'           => \$opt{'add-addr-to-blacklist'},
 	     'warning-from|w=s'                  => \$opt{'warning-from'},
 	     'local-only|local|L'                => \$opt{'local'},
-	     'stop-at-threshold|S'               => \$opt{'stop-at-threshold'},
 	     'remove-markup|despamassassinify|d' => \$opt{'remove-markup'},
+             'revoke|k'                          => \$opt{'revoke'},
 	     'report|r'                          => \$opt{'report'},
 	     'config-file|config-dir|c|C=s'      => \$opt{'config-file'},
 	     'prefs-file|p=s'                    => \$opt{'prefs-file'},
@@ -83,12 +95,12 @@ eval {
 	     'version|V'                         => \$opt{'version'},
 	     'help|h|?'                          => \$opt{'help'},
 
-
              # NOTE: ignored for backwards compatibility. will be stripped
              # in a future release.
 	     'pipe|P'    => sub { warn "The -P option has been removed.\n" },
 	     'F=i'       => sub { warn "The -F option has been removed.\n" },
 	     'add-from!' => sub { warn "The --add-from option has been removed.\n" },
+	     'stop-at-threshold|S' => sub { warn "The -S option has been removed.\n" },
   ) or usage(0, "Unknown option!");
   if (defined $opt{'help'}) { usage(0, "For more information read the spamassassin man page"); }
   if (defined $opt{'version'}) {
@@ -148,9 +160,6 @@ eval {
     LOCAL_RULES_DIR   => $LOCAL_RULES_DIR,
   });
 
-# currently offline:
-#stop_at_threshold => $opt{'stop-at-threshold'},
-
 # set debug levels, if any specified (only useful for this command-line
 # tool really)
   if (defined $opt{'debug-level'} && $opt{'debug-level'} ne '') {
@@ -182,11 +191,21 @@ eval {
 
 # handle unconditional reportage
   if ($opt{'report'}) {
-    $spamtest->report_as_spam ($mail);
+    if ( $spamtest->report_as_spam ($mail) ) {
+      warn "Warning, unable to report spam\n";
+    }
     if ($opt{'warning-from'}) {
       $spamtest->reply_with_warning ($mail, $opt{'warning-from'});
     }
     $mail->ignore();		# will exit
+  }
+
+# handle revoke
+  if ($opt{'revoke'}) {
+      if ( $spamtest->revoke_as_spam ($mail) ) {
+          warn "Warning, unable to revoke spam\n";
+      }
+      $mail->ignore();          # will exit
   }
 
   if ($opt{'auto-whitelist'} || $doing_whitelist_operation) {
@@ -197,9 +216,12 @@ eval {
 
     my $addrlistfactory;
     if ($opt{'whitelist-factory'}) {
+      $opt{'whitelist-factory'} =~ /^([_A-Za-z0-9:]+)$/;
+      my $factory = $1;
+
       eval '
-        require '.$opt{'whitelist-factory'}.';
-        $addrlistfactory = '.$opt{'whitelist-factory'}.'->new();
+        require '.$factory.';
+        $addrlistfactory = '.$factory.'->new();
       ';
       if ($@) { warn $@; undef $addrlistfactory; }
 
@@ -274,12 +296,6 @@ sub NEVERCALLED {
 
 # ---------------------------------------------------------------------------
 
-# currently offline:
-# -S, --stop-at-threshold           Stop tests when the threshold is reached
-# =item B<-S>, B<--stop-at-threshold>
-# Stop spam checking as soon as the spam threshold is reached, to increase
-# performance. This option also turns off Razor reporting.
-
 =head1 NAME
 
 spamassassin - mail filter to identify spam using text analysis
@@ -299,9 +315,10 @@ Options:
  -P, --pipe                        Deliver to STDOUT (now default)
  -L, --local                       Local tests only (no online tests)
  -r, --report                      Report message as spam
+ -k, --revoke                      Revoke message as spam
  -w addr, --warning-from=addr      Send a warning mail to sender from addr
  -d, --remove-markup               Remove spam reports from a message
- -C file, --config-file=file       Set configuration file
+ -C file, --config-file=file       Path to standard configuration dir
  -p prefs, --prefs-file=file       Set user preferences file
  -x, --nouser-config               Disable user config files
  -e, --exit-code                   Exit with a non-zero exit code if the
@@ -362,13 +379,35 @@ This may not be what you want to do.  If it is not, then don't use B<-a -t>.
 =item B<-r>, B<--report>
 
 Report this message as verified spam.  This will submit the mail message read
-from STDIN to various spam-blocker databases.  Currently, these are Vipul's Razor (
-http://razor.sourceforge.net/ ) and the Distributed Checksum Clearinghouse (
-http://www.rhyolite.com/anti-spam/dcc/ ).
+from STDIN to various spam-blocker databases.  Currently, these are Vipul's
+Razor ( http://razor.sourceforge.net/ ), the Distributed Checksum
+Clearinghouse ( http://www.rhyolite.com/anti-spam/dcc/ ), and Pyzor.
 
 If the message contains SpamAssassin markup, this will be stripped out
-automatically before submission.  The support modules for DCC and Razor
-must be installed for spam to be reported to each service.
+automatically before submission.  The support modules for DCC, Razor
+and/or Pyzor must be installed for spam to be reported to each service.
+
+The message will also be submitted to SpamAssassin's learning systems;
+currently this is the internal Bayesian statistical-filtering system
+(the BAYES rules).
+
+=item B<-k>, B<--revoke>
+
+Revoke this message.  This will revoke the mail message read
+from STDIN from various spam-blocker databases.  Currently, these are Vipul's
+Razor ( http://razor.sourceforge.net/ ).
+
+Support for the Distributed Checksum Clearinghouse 
+( http://www.rhyolite.com/anti-spam/dcc/ ), and Pyzor is not currently
+available.
+
+If the message contains SpamAssassin markup, this will be stripped out
+automatically before submission.  The support modules for Razor must be
+installed for spam to be revoked from the service.
+
+The message will also be submitted to SpamAssassin's learning systems;
+currently this is the internal Bayesian statistical-filtering system
+(the BAYES rules).
 
 =item B<--lint>
 
@@ -518,14 +557,34 @@ as if they are spam messages.
 
 =head2 TAGGING FOR SPAM MAILS
 
-The modifications made are as follows:
+If an incoming message is tagged as spam, instead of modifying the
+original message, SpamAssassin will create a new report message and
+attach the original message as a message/rfc822 MIME part (ensuring
+the original message is completely preserved and easier to recover).
+
+The new report message inherits the following headers (if they are
+present) from the original spam message:
 
 =over 4
 
 =item Subject: header
 
-The string C<*****SPAM*****> is prepended to the subject,
+The string C<*****SPAM*****> is also prepended to the subject,
 unless the C<rewrite_subject 0> configuration option is given.
+
+=item From: header
+
+=item To: header
+
+=item Cc: header
+
+=item Date: header
+
+=back
+
+And these headers are added:
+
+=over 4
 
 =item X-Spam-Status: header
 
@@ -541,16 +600,10 @@ Set to C<YES>.
 The SpamAssassin report is added to the mail header if
 the C<report_header 1> configuration option is given.
 
-=item Content-Type: header
-
-Set to C<text/plain>, in order to defang HTML mail or other active
-content that could "call back" to the spammer.
-
 =item spam mail body text
 
 The SpamAssassin report is added to top of the mail message body,
-unless the C<report_header 1> configuration option is given.
-
+if the message is marked as spam.
 
 =back
 
@@ -605,6 +658,9 @@ The B<spamassassin> command is part of the B<Mail::SpamAssassin> Perl module.
 Install this as a normal Perl module, using C<perl -MCPAN -e shell>, or by
 hand.
 
+For further details on how to install, please read the C<INSTALL> file
+from the SpamAssassin distribution.
+
 =head1 ENVIRONMENT
 
 No environment variables, aside from those used by perl, are required to
@@ -616,6 +672,10 @@ Mail::SpamAssassin(3)
 Mail::SpamAssassin::Conf(3)
 Mail::Audit(3)
 Razor(3)
+
+=head1 BUGS
+
+http://bugzilla.spamassassin.org/
 
 =head1 AUTHOR
 

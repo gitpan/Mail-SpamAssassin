@@ -1,7 +1,31 @@
+=head1 NAME
+
+Mail::SpamAssassin::AutoWhitelist - auto-whitelist handler for SpamAssassin
+
+=head1 SYNOPSIS
+
+  (see Mail::SpamAssassin)
+
+
+=head1 DESCRIPTION
+
+Mail::SpamAssassin is a module to identify spam using text analysis and
+several internet-based realtime blacklists.
+
+This class is used internally by SpamAssassin to manage the automatic
+whitelisting functionality.  Please refer to the C<Mail::SpamAssassin>
+documentation for public interfaces.
+
+=head1 METHODS
+
+=over 4
+
+=cut
 
 package Mail::SpamAssassin::AutoWhitelist;
 
 use strict;
+use bytes;
 
 use Mail::SpamAssassin;
 
@@ -53,29 +77,28 @@ sub check_address {
     return undef;		# no factory defined; we can't check
   }
 
-  $addr = lc $addr;
-  $addr =~ s/[\000\;\'\"\!\|]/_/gs;	# paranoia
-
   $self->{entry} = undef;
 
-  if (defined $origip) {
-    $origip =~ s/\.\d{1,3}\.\d{1,3}$//gs;
-    $origip =~ s/[\000\;\'\"\!\|]/_/gs;	# paranoia
-    $self->{entry} = $self->{checker}->get_addr_entry ($addr."|ip=".$origip);
-  }
+  my $fulladdr = $self->pack_addr ($addr, $origip);
+  $self->{entry} = $self->{checker}->get_addr_entry ($fulladdr);
 
-  if (!defined $self->{entry} || $self->{entry}->{count} == 0) {
-    # fall back to more general style, no IP address
-    my $noip = $self->{checker}->get_addr_entry ($addr);
+  if (!defined $self->{entry}->{count} || $self->{entry}->{count} == 0) {
+    # no entry found
+    if (defined $origip) {
+      # try upgrading a default entry (probably from "add-addr-to-foo")
+      my $noipaddr = $self->pack_addr ($addr, undef);
+      my $noipent = $self->{checker}->get_addr_entry ($noipaddr);
 
-    if (defined $noip && $noip->{count} != 0) {
-      # it's defined and it has entries, use that
-      $self->{entry} = $noip;
+      if (defined $noipent->{count} && $noipent->{count} > 0) {
+	dbg ("AWL: found entry w/o IP address for $addr: replacing with $origip");
+	$self->{checker}->remove_entry($noipent);
+	$self->{entry} = $noipent;
+	$self->{entry}->{addr} = $fulladdr;
+      }
     }
   }
 
-  if(!defined $self->{entry}->{count}) { return undef; }
-  if($self->{entry}->{count} == 0) { return undef; }
+  if ($self->{entry}->{count} == 0) { return undef; }
 
   return $self->{entry}->{totscore}/$self->{entry}->{count};
 }
@@ -84,7 +107,9 @@ sub check_address {
 
 =item awl->add_score($score);
 
-This method will add the score to the current entry
+This method will add half the score to the current entry.  Half the
+score is used, so that repeated use of the same From and IP address
+combination will gradually reduce the score.
 
 =cut
 
@@ -96,7 +121,7 @@ sub add_score {
   }
 
   $self->{entry}->{count} ||= 0;
-  $self->{checker}->add_score($self->{entry},$score);
+  $self->{checker}->add_score($self->{entry}, $score);
 }
 
 ###########################################################################
@@ -143,12 +168,11 @@ sub modify_address {
   my ($self, $addr, $score) = @_;
 
   if (!defined $self->{checker}) {
-    return undef;               # no factory defined; we can't check
+    return undef;		# no factory defined; we can't check
   }
 
-  $addr = lc $addr;
-  $addr =~ s/[\000\;\'\"\!\|]/_/gs;     # paranoia
-  my $entry = $self->{checker}->get_addr_entry ($addr);
+  my $fulladdr = $self->pack_addr ($addr, undef);
+  my $entry = $self->{checker}->get_addr_entry ($fulladdr);
 
   # remove any old entries (will remove per-ip entries as well)
   # always call this regardless, as the current entry may have 0
@@ -159,7 +183,7 @@ sub modify_address {
   if (!defined($score)) { return 1; }
 
   # else add score. get a new entry first
-  $entry = $self->{checker}->get_addr_entry ($addr);
+  $entry = $self->{checker}->get_addr_entry ($fulladdr);
   $self->{checker}->add_score($entry, $score);
 
   return 0;
@@ -172,6 +196,26 @@ sub finish {
 
   if (!defined $self->{checker}) { return undef; }
   $self->{checker}->finish();
+}
+
+###########################################################################
+
+sub pack_addr {
+  my ($self, $addr, $origip) = @_;
+
+  $addr = lc $addr;
+  $addr =~ s/[\000\;\'\"\!\|]/_/gs;	# paranoia
+
+  if (!defined $origip) {
+    # could not find an IP address to use, could be localhost mail or from
+    # the user running "add-addr-to-*".
+    $origip = 'none';
+  } else {
+    $origip =~ s/\.\d{1,3}\.\d{1,3}$//gs;
+  }
+
+  $origip =~ s/[^0-9\.noe]/_/gs;	# paranoia
+  $addr."|ip=".$origip;
 }
 
 ###########################################################################

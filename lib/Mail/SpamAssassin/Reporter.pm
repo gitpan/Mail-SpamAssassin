@@ -2,11 +2,12 @@
 
 package Mail::SpamAssassin::Reporter;
 
-use Carp;
 use strict;
+use bytes;
+use Carp;
 
-use vars	qw{
-  	@ISA $VERSION
+use vars qw{
+  @ISA $VERSION
 };
 
 @ISA = qw();
@@ -25,6 +26,8 @@ sub new {
     'options'		=> $options,
   };
 
+  $self->{conf} = $self->{main}->{conf};
+
   bless ($self, $class);
   $self;
 }
@@ -33,37 +36,56 @@ sub new {
 
 sub report {
   my ($self) = @_;
+  my $return = 1;
+
+  my $text = $self->{main}->remove_spamassassin_markup ($self->{msg});
+
+  if (!$self->{options}->{dont_report_to_razor} && $self->is_razor_available()) {
+    if ($self->razor_report($text)) {
+      dbg ("SpamAssassin: spam reported to Razor.");
+      $return = 0;
+    }
+  }
+  if (!$self->{options}->{dont_report_to_dcc} && $self->is_dcc_available()) {
+    if ($self->dcc_report($text)) {
+      dbg ("SpamAssassin: spam reported to DCC.");
+      $return = 0;
+    }
+  }
+  if (!$self->{options}->{dont_report_to_pyzor} && $self->is_pyzor_available()) {
+    if ($self->pyzor_report($text)) {
+      dbg ("SpamAssassin: spam reported to Pyzor.");
+      $return = 0;
+    }
+  }
+
+  $self->delete_fulltext_tmpfile();
+
+  return $return;
+}
+
+###########################################################################
+
+sub revoke {
+  my ($self) = @_;
+  my $return = 1;
 
   my $text = $self->{main}->remove_spamassassin_markup ($self->{msg});
 
   if (!$self->{main}->{local_tests_only}
-  	&& !$self->{options}->{dont_report_to_razor}
-    && !$self->{main}->{stop_at_threshold}
-	&& $self->is_razor_available())
+      && !$self->{options}->{dont_report_to_razor}
+      && $self->is_razor_available()) # we only work with Razor2
   {
-    if ($self->razor_report($text)) {
-      dbg ("SpamAssassin: spam reported to Razor.");
-    }
-  }
-  if (!$self->{main}->{local_tests_only}
-  	&& !$self->{options}->{dont_report_to_dcc}
-    && !$self->{main}->{stop_at_threshold}
-	&& $self->is_dcc_available())
-  {
-    if ($self->dcc_report($text)) {
-      dbg ("SpamAssassin: spam reported to DCC.");
-    }
-  }
-  if (!$self->{main}->{local_tests_only}
-  	&& !$self->{options}->{dont_report_to_pyzor}
-    && !$self->{main}->{stop_at_threshold}
-	&& $self->is_pyzor_available())
-  {
-    if ($self->pyzor_report($text)) {
-      dbg ("SpamAssassin: spam reported to Pyzor.");
+    if ($self->razor_revoke($text)) {
+      dbg ("SpamAssassin: spam revoked from Razor.");
+      $return = 0;
     }
   }
 
+  # This is where you would revoke from DCC and Pyzor but I was unable
+  # to find where they supported revoke
+
+  return $return;
 }
 
 ###########################################################################
@@ -77,41 +99,13 @@ sub adie {
   die $msg;
 }
 
-sub is_razor_available {
-  my ($self) = @_;
-
-  if ($self->{main}->{local_tests_only}) {
-    dbg ("local tests only, ignoring Razor");
-    return 0;
-  }
-  
-  # Use Razor2 if it's available, Razor1 otherwise
-  eval { require Razor2::Client::Agent; };
-  if ($@) {
-    dbg("Razor2 is not available");
-  }
-  else {
-    dbg("Razor2 is available");
-    return 1;
-  }
-
-  eval {
-    require Razor::Client;
-  };
-
-  if ($@) {
-    dbg ( "Razor is not available" );
-    return 0;
-  } else {
-    dbg ("Razor is available");
-    return 1;
-  }
-}
-
 sub razor_report {
-  my ($self, $fulltext) = @_;
-  my $timeout=$self->{main}->{conf}->{razor_timeout};
+  my ($self, $fulltext, $revoke) = @_;
+  my $timeout=$self->{conf}->{razor_timeout};
   my $response;
+
+  # If we passed in a true value for $revoke then we must be revoking
+  my $type = (defined($revoke) && $revoke) ? 'revoke' : 'report';
 
   # razor also debugs to stdout. argh. fix it to stderr...
   if ($Mail::SpamAssassin::DEBUG->{enabled}) {
@@ -119,7 +113,7 @@ sub razor_report {
     open (STDOUT, ">&STDERR");
   }
 
-  my $oldslash = $/;
+  $self->enter_helper_run_mode();
 
   # Use Razor2 if it's available
   eval { require Razor2::Client::Agent; };
@@ -132,26 +126,32 @@ sub razor_report {
       alarm $timeout;
 
       my $rc =
-        Razor2::Client::Agent->new('razor-report')
-        ;                 # everything's in the module!
+          Razor2::Client::Agent->new("razor-$type")
+          ;                 # everything's in the module!
 
       if ($rc) {
         my %opt = (
           debug      => $Mail::SpamAssassin::DEBUG->{enabled},
           foreground => 1,
-          config     => $self->{main}->{conf}->{razor_config}
+          config     => $self->{conf}->{razor_config}
         );
         $rc->{opt} = \%opt;
         $rc->do_conf() or adie($rc->errstr);
 
         # Razor2 requires authentication for reporting
         my $ident = $rc->get_ident
-          or adie ("Razor2 reporting requires authentication");
+          or adie ("Razor2 $type requires authentication");
 
-        my @msg     = ( \$fulltext );
+	my @msg = (\$fulltext);
         my $objects = $rc->prepare_objects( \@msg )
           or adie ("error in prepare_objects");
         $rc->get_server_info() or adie $rc->errprefix("reportit");
+
+	# let's reset the alarm since get_server_info() calls
+	# nextserver() which calls discover() which very likely will
+	# reset the alarm for us ... how polite.  :(  
+	alarm $timeout;
+
         my $sigs = $rc->compute_sigs($objects)
           or adie ("error in compute_sigs");
 
@@ -159,31 +159,34 @@ sub razor_report {
         $rc->authenticate($ident) or adie ($rc->errprefix("reportit"));
         $rc->report($objects)     or adie ($rc->errprefix("reportit"));
         $rc->disconnect() or adie ($rc->errprefix("reportit"));
-        $response = 1; # razor 2.14 says that if we get here, we did ok.
+        $response = 1; # Razor 2.14 says that if we get here, we did ok.
       }
       else {
         warn "undefined Razor2::Client::Agent\n";
       }
 
       alarm 0;
-      dbg("Razor2: spam reported, response is \"$response\".");
+      dbg("Razor2: spam $type, response is \"$response\".");
     };
 
     alarm 0;
 
     if ($@) {
       if ( $@ =~ /alarm/ ) {
-        dbg("razor2 report timed out after $timeout secs.");
-      }
-      else {
-        warn "razor2 report failed: $! $@";
+        dbg("razor2 $type timed out after $timeout secs.");
+      } elsif ($@ =~ /could not connect/) {
+        dbg("razor2 $type could not connect to any servers");
+      } elsif ($@ =~ /timeout/i) {
+        dbg("razor2 $type timed out connecting to razor servers");
+      } else {
+        warn "razor2 $type failed: $! $@";
       }
       undef $response;
     }
   }
-  else {
+  elsif ($type eq 'report') { # fall back to Razor1 but only if we are reporting spam
     my @msg = split (/^/m, $fulltext);
-    my $config = $self->{main}->{conf}->{razor_config};
+    my $config = $self->{conf}->{razor_config};
     $config ||= $self->{main}->sed_path ("~/razor.conf");
     my %options = (
       'debug'     => $Mail::SpamAssassin::DEBUG->{enabled}
@@ -222,7 +225,7 @@ sub razor_report {
     }
   }
 
-  $/ = $oldslash;
+  $self->leave_helper_run_mode();
 
   if ($Mail::SpamAssassin::DEBUG->{enabled}) {
     open (STDOUT, ">&OLDOUT");
@@ -236,133 +239,133 @@ sub razor_report {
   }
 }
 
-sub is_dcc_available {
-  my ($self) = @_;
+sub razor_revoke {
+  my ($self, $fulltext) = @_;
 
-  if ($self->{main}->{local_tests_only}) {
-    dbg ("local tests only, ignoring DCC");
-    return 0;
-  }
-
-  my $dccproc = $self->{main}->{conf}->{dcc_path} || '';
-  unless ($dccproc) {
-    foreach my $path (File::Spec->path()) {
-      $dccproc = File::Spec->catfile ($path, 'dccproc');
-      if (-x $dccproc) {
-        dbg ("DCC was found at $dccproc");
-        $self->{main}->{conf}->{dcc_path} = $dccproc;
-        last;
-      }
-    }
-  }
-  unless (-x $dccproc) {
-    dbg ("DCC is not available: dccproc not found");
-    return 0;
-  }
-
-  dbg ("DCC is available: ".$self->{main}->{conf}->{dcc_path});
-  return 1;
+  return $self->razor_report($fulltext, 1);
 }
 
 sub dcc_report {
   my ($self, $fulltext) = @_;
-  my $timeout=$self->{main}->{conf}->{dcc_timeout};
+  my $timeout=$self->{conf}->{dcc_timeout};
+
+  timelog("DCC -> Starting report ($timeout secs max)", "dcc", 1);
+  $self->enter_helper_run_mode();
+
+  # use a temp file here -- open2() is unreliable, buffering-wise,
+  # under spamd. :(
+  my $tmpf = $self->create_fulltext_tmpfile(\$fulltext);
 
   eval {
-    local $SIG{ALRM} = sub { die "alarm\n" };
-    local $SIG{PIPE} = sub { die "brokenpipe\n" };
+    local $SIG{ALRM} = sub { die "__alarm__\n" };
+    local $SIG{PIPE} = sub { die "__brokenpipe__\n" };
 
     alarm $timeout;
 
-    my $cmd = join(" ", $self->{main}->{conf}->{dcc_path},'-t many',$self->{main}->{conf}->{dcc_options});
-    open(DCC, "| $cmd > /dev/null 2>&1") || die "Couldn't fork \"$cmd\"";
-    print DCC $fulltext;
-    close(DCC) || die "Received error code $? from \"$cmd\"";
+    # Note: not really tainted, these both come from system conf file.
+    my $path = Mail::SpamAssassin::Util::untaint_file_path ($self->{conf}->{dcc_path});
+
+    my $opts = '';
+    if ( $self->{conf}->{dcc_options} =~ /^([^\;\'\"\0]+)$/ ) {
+      $opts = $1;
+    }
+
+    my $pid = open(DCC, join(' ', $path, "-t many", $opts, "< '$tmpf'", ">/dev/null 2>&1", '|')) || die "$!\n";
+    close(DCC) || die "Received error code $?";
 
     alarm(0);
+    waitpid ($pid, 0);
   };
 
   alarm 0;
-
+  $self->leave_helper_run_mode();
+ 
   if ($@) {
-    if ($@ =~ /alarm/) {
-      dbg ("DCC report timed out after 10 secs.");
-      return 0;
-    } elsif ($@ =~ /brokenpipe/) {
-      dbg ("DCC report failed - Broken pipe.");
-      return 0;
+    if ($@ =~ /^__alarm__$/) {
+      dbg ("DCC -> report timed out after $timeout secs.");
+      timelog("DCC interrupted after $timeout secs", "dcc", 2);
+   } elsif ($@ =~ /^__brokenpipe__$/) {
+      dbg ("DCC -> report failed: Broken pipe.");
+      timelog("DCC report failed, broken pipe", "dcc", 2);
     } else {
-      warn ("DCC report skipped: $! $@");
-      return 0;
+      warn ("DCC -> report failed: $@\n");
+      timelog("DCC report failed", "dcc", 2);
     }
-  }
-  return 1;
-}
-
-sub is_pyzor_available {
-  my ($self) = @_;
-
-  if ($self->{main}->{local_tests_only}) {
-    dbg ("local tests only, ignoring Pyzor");
     return 0;
   }
 
-  my $pyzor = $self->{main}->{conf}->{pyzor_path} || '';
-  unless ($pyzor) {
-    foreach my $path (File::Spec->path()) {
-      $pyzor = File::Spec->catfile ($path, 'pyzor');
-      if (-x $pyzor) {
-        dbg ("Pyzor was found at $pyzor");
-        $self->{main}->{conf}->{pyzor_path} = $pyzor;
-        last;
-      }
-    }
-  }
-  unless (-x $pyzor) {
-    dbg ("Pyzor is not available: pyzor not found");
-    return 0;
-  }
-  
-  dbg ("Pyzor is available: ".$self->{main}->{conf}->{pyzor_path});
+  timelog("DCC -> report finished", "dcc", 2);
   return 1;
 }
 
 sub pyzor_report {
   my ($self, $fulltext) = @_;
-  my $timeout=$self->{main}->{conf}->{pyzor_timeout};
+  my $timeout=$self->{conf}->{pyzor_timeout};
+
+  timelog("Pyzor -> Starting report ($timeout secs max)", "pyzor", 1);
+  $self->enter_helper_run_mode();
+
+  # use a temp file here -- open2() is unreliable, buffering-wise,
+  # under spamd. :(
+  my $tmpf = $self->create_fulltext_tmpfile(\$fulltext);
 
   eval {
-    local $SIG{ALRM} = sub { die "alarm\n" };
-    local $SIG{PIPE} = sub { die "brokenpipe\n" };
+    local $SIG{ALRM} = sub { die "__alarm__\n" };
+    local $SIG{PIPE} = sub { die "__brokenpipe__\n" };
 
     alarm $timeout;
 
-    my $cmd = join(" ", $self->{main}->{conf}->{pyzor_path},'report');
-    open(PYZ, "| $cmd > /dev/null 2>&1") || die "Couldn't fork \"$cmd\"";
-    print PYZ $fulltext;
-    close(PYZ) || die "Received error code $? from \"$cmd\"";
+    # Note: not really tainted, this comes from system conf file.
+    my $path = Mail::SpamAssassin::Util::untaint_file_path ($self->{conf}->{pyzor_path});
+
+    my $opts = '';
+    if ( $self->{conf}->{pyzor_options} =~ /^([^\;\'\"\0]+)$/ ) {
+      $opts = $1;
+    }
+
+    my $pid = open(PYZ, join(' ', $path, $opts, "report", "< '$tmpf'", ">/dev/null 2>&1", '|')) || die "$!\n";
+    close(PYZ) || die "Received error code $?";
 
     alarm(0);
+    waitpid ($pid, 0);
   };
 
   alarm 0;
+  $self->leave_helper_run_mode();
 
   if ($@) {
-    if ($@ =~ /alarm/) {
-      dbg ("Pyzor report timed out after 10 secs.");
-      return 0;
-    } elsif ($@ =~ /brokenpipe/) {
-      dbg ("Pyzor report failed - Broken pipe.");
-      return 0;
+    if ($@ =~ /^__alarm__$/) {
+      dbg ("Pyzor -> report timed out after $timeout secs.");
+      timelog("Pyzor interrupted after $timeout secs", "pyzor", 2);
+    } elsif ($@ =~ /^__brokenpipe__$/) {
+      dbg ("Pyzor -> report failed: Broken pipe.");
+      timelog("Pyzor report failed, broken pipe", "pyzor", 2);
     } else {
-      warn ("Pyzor report skipped: $! $@");
-      return 0;
+      warn ("Pyzor -> report failed: $@\n");
+      timelog("Pyzor report failed", "pyzor", 2);
     }
+    return 0;
   }
+
+  timelog("Pyzor -> report finished", "pyzor", 2);
   return 1;
 }
 ###########################################################################
 
 sub dbg { Mail::SpamAssassin::dbg (@_); }
+sub timelog { Mail::SpamAssassin::timelog (@_); }
+sub create_fulltext_tmpfile { Mail::SpamAssassin::PerMsgStatus::create_fulltext_tmpfile(@_) }
+sub delete_fulltext_tmpfile { Mail::SpamAssassin::PerMsgStatus::delete_fulltext_tmpfile(@_) }
+
+# Use the Dns versions ...  At least something only needs 1 copy of code ...
+sub is_pyzor_available { Mail::SpamAssassin::PerMsgStatus::is_pyzor_available(@_); }
+sub is_dcc_available { Mail::SpamAssassin::PerMsgStatus::is_dcc_available(@_); }
+sub is_razor_available {
+  Mail::SpamAssassin::PerMsgStatus::is_razor2_available(@_) ||
+  Mail::SpamAssassin::PerMsgStatus::is_razor1_available(@_);
+}
+
+sub enter_helper_run_mode { Mail::SpamAssassin::PerMsgStatus::enter_helper_run_mode(@_); }
+sub leave_helper_run_mode { Mail::SpamAssassin::PerMsgStatus::leave_helper_run_mode(@_); }
 
 1;

@@ -15,11 +15,14 @@
 #
 package Mail::SpamAssassin::NoMailAudit;
 
-use Mail::SpamAssassin::Message;
+use strict;
+use bytes;
 use Fcntl qw(:DEFAULT :flock);
 
+use Mail::SpamAssassin::Message;
+
 @Mail::SpamAssassin::NoMailAudit::ISA = (
-        'Mail::SpamAssassin::Message'
+  'Mail::SpamAssassin::Message'
 );
 
 # ---------------------------------------------------------------------------
@@ -32,6 +35,7 @@ sub new {
 
   $self->{is_spamassassin_wrapper_object} = 1;
   $self->{has_spamassassin_methods} = 1;
+  $self->{headers_pristine} = '';
   $self->{headers} = { };
   $self->{header_order} = [ ];
 
@@ -72,12 +76,16 @@ sub parse_headers {
   my ($self) = @_;
   local ($_);
 
+  $self->{headers_pristine} = '';
   $self->{headers} = { };
   $self->{header_order} = [ ];
   my ($prevhdr, $hdr, $val, $entry);
 
   while (defined ($_ = shift @{$self->{textarray}})) {
-    # warn "JMD $_";
+    # absolutely unmodified!
+    $self->{headers_pristine} .= $_;
+
+    # warn "parse_headers $_";
     if (/^\r*$/) { last; }
 
     $entry = $hdr = $val = undef;
@@ -146,15 +154,23 @@ sub _get_or_create_header_object {
 # ---------------------------------------------------------------------------
 
 sub _get_header_list {
-    my ($self, $hdr) = @_;
+  my ($self, $hdr) = @_;
+
   # OK, we want to do a case-insensitive match here on the header name
   # So, first I'm going to pick up an array of the actual capitalizations used:
-  my @cap_hdrs = grep(/^$hdr$/i, keys(%{$self->{headers}}));
+  my $lchdr = lc $hdr;
+  my @cap_hdrs = grep(lc($_) eq $lchdr, keys(%{$self->{headers}}));
 
   # And now pick up all the entries into a list
   my @entries = map($self->{headers}->{$_},@cap_hdrs);
 
   return @entries;
+}
+
+sub get_pristine_header {
+  my ($self, $hdr) = @_;
+  my($ret) = $self->{headers_pristine} =~ /^(?:$hdr:[ ]+(.*\n(?:\s+\S.*\n)*))/mi;
+  return ( $ret || $self->get_header($hdr) );
 }
 
 sub get_header {
@@ -237,13 +253,9 @@ sub replace_header {
   # Get all the headers that might match
   my @entries = $self->_get_header_list($hdr);
 
-  if (scalar(@entries) < 1) {
-    return $self->put_header($hdr, $text);
-  }
-
-  foreach my $entry (@entries)
-  {
-      if($entry->{count} > 0) { $entry->{0} = $text; return; }
+  # remove all of them if there's more than 1 line
+  if (scalar(@entries) >= 1) {
+    $self->delete_header ($hdr);
   }
 
   return $self->put_header($hdr, $text);
@@ -277,10 +289,29 @@ sub replace_body {
 # ---------------------------------------------------------------------------
 # bonus, not-provided-in-Mail::Audit methods.
 
+sub get_pristine {
+  my ($self) = @_;
+  return join ('', $self->{headers_pristine}, @{ $self->{textarray} });
+}
+
 sub as_string {
   my ($self) = @_;
   return join ('', $self->get_all_headers(), "\n",
                 @{$self->get_body()});
+}
+
+sub replace_original_message {
+  my ($self, $data) = @_;
+
+  if (ref $data eq 'ARRAY') {
+    $self->{textarray} = $data;
+  } elsif (ref $data eq 'GLOB') {
+    if (defined fileno $data) {
+      $self->{textarray} = [ <$data> ];
+    }
+  }
+
+  $self->parse_headers();
 }
 
 # ---------------------------------------------------------------------------
@@ -337,9 +368,12 @@ sub accept {
     local $SIG{INT} = sub { $self->dotlock_unlock (); die "killed"; };
 
     if ($gotlock || $nodotlocking) {
+      my $umask = umask 077;
       if (!open (MBOX, ">>$file")) {
+	umask $umask;
         die "Couldn't open $file: $!";
       }
+      umask $umask;
 
       flock(MBOX, LOCK_EX) or warn "failed to lock $file: $!";
       print MBOX $self->as_string()."\n";
@@ -367,16 +401,19 @@ sub dotlock_lock {
   my $gotlock = 0;
   my $retrylimit = 30;
 
+  my $umask = 0;
   if (!sysopen (LOCK, $locktmp, O_WRONLY | O_CREAT | O_EXCL, 0644)) {
+    umask $umask;
     #die "lock $file failed: create $locktmp: $!";
     $self->{dotlock_not_supported} = 1;
     return;
   }
+  umask $umask;
 
   print LOCK "$$\n";
   close LOCK or die "lock $file failed: write to $locktmp: $!";
 
-  for ($retries = 0; $retries < $retrylimit; $retries++) {
+  for (my $retries = 0; $retries < $retrylimit; $retries++) {
     if ($retries > 0) {
       my $sleeptime = 2*$retries;
       if ($sleeptime > 60) { $sleeptime = 60; }         # max 1 min
@@ -390,7 +427,7 @@ sub dotlock_lock {
     if (!defined $tmpstat[3]) { die "lstat $locktmp failed"; }
 
     # sanity: see if the link() succeeded
-    @lkstat = lstat ($lockfile);
+    my @lkstat = lstat ($lockfile);
     if (!defined $lkstat[3]) { next; }	# link() failed
 
     # sanity: if the lock succeeded, the dev/ino numbers will match
@@ -469,6 +506,7 @@ sub _proxy_to_mail_audit {
 # emergency.
 sub finish {
   my $self = shift;
+  delete $self->{headers_pristine};
   delete $self->{textarray};
   foreach my $key (keys %{$self->{headers}}) {
     delete $self->{headers}->{$key};
