@@ -111,14 +111,14 @@ sub parse_received_headers {
   while (defined ($relay = shift @{$self->{relays}}))
   {
     # trusted_networks matches?
-    if ($in_trusted && $did_user_specify_trust && !$trusted->contains_ip ($relay->{ip}))
+    if ($in_trusted && $did_user_specify_trust && !$relay->{auth} && !$trusted->contains_ip ($relay->{ip}))
     {
       $in_trusted = 0;		# we're in deep water now
     }
 
     # internal_networks matches?
     if ($did_user_specify_internal) {
-      if (!$internal->contains_ip ($relay->{ip})) {
+      if (!$relay->{auth} && !$internal->contains_ip ($relay->{ip})) {
 	$in_internal = 0;
       }
     } else {
@@ -370,6 +370,7 @@ sub parse_received_line {
   my $IP_ADDRESS = IP_ADDRESS;
   my $IP_IN_RESERVED_RANGE = IP_IN_RESERVED_RANGE;
   my $LOCALHOST = LOCALHOST;
+  my $auth = '';
 
   # Received: (qmail 27981 invoked by uid 225); 14 Mar 2003 07:24:34 -0000
   # Received: (qmail 84907 invoked from network); 13 Feb 2003 20:59:28 -0000
@@ -385,6 +386,17 @@ sub parse_received_line {
   # try to catch unique message identifier
   if (/\sid\s+<?([^\s<>;]{3,})/) {
     $id = $1;
+  }
+
+  # try to catch authenticated message identifier
+  # the first one works for Sendmail, MDaemon, some webmail servers, and others
+  # with ESMTPA, ESMTPSA, LMTPA, LMTPSA should cover RFC 3848 compliant MTAs
+  # with ASMTP (Authenticated SMTP) is used by Earthlink, Exim 4.34, and others
+  # with HTTP should only be authenticated webmail sessions
+  if (/^from .*?(\]\)|\)\]) .*?\(.*?authenticated.*?\).*? by/) {
+    $auth = 'Sendmail';
+  } elsif (/ by .*? with (ESMTPA|ESMTPSA|LMTPA|LMTPSA|ASMTP|HTTP) /i) {
+    $auth = $1;
   }
 
   if (/^from /) {
@@ -439,7 +451,7 @@ sub parse_received_line {
 
     if (/Exim/) {
       # one of the HUGE number of Exim formats :(
-      # This must be scriptable.
+      # This must be scriptable.  (update: it is. cf bug 3950, 3582)
 
       # Received: from [61.174.163.26] (helo=host) by sc8-sf-list1.sourceforge.net with smtp (Exim 3.31-VA-mm2 #1 (Debian)) id 18t2z0-0001NX-00 for <razor-users@lists.sourceforge.net>; Wed, 12 Mar 2003 01:57:10 -0800
       # Received: from [218.19.142.229] (helo=hotmail.com ident=yiuhyotp) by yzordderrex with smtp (Exim 3.35 #1 (Debian)) id 194BE5-0005Zh-00; Sat, 12 Apr 2003 03:58:53 +0100
@@ -477,6 +489,27 @@ sub parse_received_line {
       # 2002 18:57:06 +1300
       if (/^from (\S+) \[(${IP_ADDRESS})\](:\d+)? by (\S+) /) {
 	$rdns= $1; $ip = $2; $helo = $1; $by = $4; goto enough;
+      }
+
+      # attempt to deal with other odd Exim formats; just match little bits
+      # of the header.
+      # Received: from helene8.i.pinwand.net (helene.cats.ms) [10.0.8.6.13219]
+      # (mail) by lisbeth.i.pinwand.net with esmtp (Exim 3.35 #1 (Debian)) id
+      # 1CO5y7-0001vC-00; Sun, 31 Oct 2004 04:01:23 +0100
+      if (/^from (\S+) /) {
+        $rdns= $1;      # assume this is the rDNS, not HELO.  is this appropriate?
+      }
+      if (/ \((\S+)\) /) {
+        $helo = $1;
+      }
+      if (/ \[(${IP_ADDRESS})(?:\.\d+)?\] /) {
+        $ip = $1;
+      }
+      if (/by (\S+) /) {
+        $by = $1;
+        # now, if we have a "by" and an IP, that's enough for most uses;
+        # we have to make do with that.
+        if ($ip) { goto enough; }
       }
 
       # else it's probably forged. fall through
@@ -1066,7 +1099,8 @@ enough:
     ident => $ident,
     envfrom => $envfrom,
     lc_by => (lc $by),
-    lc_helo => (lc $helo)
+    lc_helo => (lc $helo),
+    auth => $auth
   };
 
   # perform rDNS check if MTA has not done it for us.
@@ -1106,7 +1140,7 @@ enough:
   # of entries must be preserved, so that regexps that assume that
   # e.g. "ip" comes before "helo" will still work.
   #
-  my $asstr = "[ ip=$ip rdns=$rdns helo=$helo by=$by ident=$ident envfrom=$envfrom intl=0 id=$id ]";
+  my $asstr = "[ ip=$ip rdns=$rdns helo=$helo by=$by ident=$ident envfrom=$envfrom intl=0 id=$id auth=$auth ]";
   dbg ("received-header: parsed as $asstr");
   $relay->{as_string} = $asstr;
 

@@ -98,19 +98,19 @@ use vars qw{
   @site_rules_path
 };
 
-$VERSION = "3.000001";      # update after release (same format as perl $])
-# $IS_DEVEL_BUILD = 1;        # change for release versions
+$VERSION = "3.000002";      # update after release (same format as perl $])
+$IS_DEVEL_BUILD = 0;        # change for release versions
 
 @ISA = qw();
 
 # SUB_VERSION is now just <yyyy>-<mm>-<dd>
-$SUB_VERSION = (split(/\s+/,'$LastChangedDate: 2004-10-22 18:40:58 -0700 (Fri, 22 Oct 2004) $ updated by SVN'))[1];
+$SUB_VERSION = (split(/\s+/,'$LastChangedDate: 2004-11-16 16:50:46 -0800 (Tue, 16 Nov 2004) $ updated by SVN'))[1];
 
 # If you hacked up your SA, you should add a version_tag to you .cf files.
 # This variable should not be modified directly.
 @EXTRA_VERSION = qw();
 if (defined $IS_DEVEL_BUILD && $IS_DEVEL_BUILD) {
-  push(@EXTRA_VERSION, ( 'r' . qw{$LastChangedRevision: 55343 $ updated by SVN}[1] ));
+  push(@EXTRA_VERSION, ( 'r' . qw{$LastChangedRevision: 76069 $ updated by SVN}[1] ));
 }
 
 sub Version { $VERSION=~/^(\d+)\.(\d\d\d)(\d\d\d)$/; join('-', sprintf("%d.%d.%d",$1,$2,$3), @EXTRA_VERSION) }
@@ -943,6 +943,16 @@ sub remove_spamassassin_markup {
   1 while ($body =~ s/^\n?SPAM: ----.+\n(?:SPAM:.*\n)*SPAM: ----.+\n\n//);
 ###########################################################################
 
+  # 3.0 version -- support for previously-nonexistent Subject hdr.
+  # ensure the Subject line didn't *really* contain "(nonexistent)" in
+  # the original message!
+  if ($hdrs =~ /^X-Spam-Prev-Subject:\s*\(nonexistent\)$/m
+        && $hdrs !~ /^Subject:.*\(nonexistent\).*$/m)
+  {
+    $hdrs =~ s/(^|\n)X-Spam-Prev-Subject:\s*\(nonexistent\)\n/$1\n/s;
+    $hdrs =~ s/(^|\n)Subject:\s*[ \t]*.*\n(?:\s+\S.*\n)*/$1\n/s;
+  }
+
   # 3.0 version -- revert from X-Spam-Prev to original ...
   while ($hdrs =~ s/^X-Spam-Prev-(([^:]+:)[ \t]*.*\n(?:\s+\S.*\n)*)//m) {
     my($hdr, $name) = ($1,$2);
@@ -1407,7 +1417,8 @@ sub read_cf {
     if (open (IN, "<".$path)) {
       $txt .= "file start $path\n";
       $txt = join ('', <IN>);
-      $txt .= "file end $path\n";
+      # add an extra \n in case file did not end in one.
+      $txt .= "\nfile end $path\n";
       close IN;
       dbg("config: read file $path");
     }
