@@ -7,42 +7,89 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 #include <fcntl.h>
 #include <syslog.h>
 #include <sysexits.h>
 #include <errno.h>
+#include <time.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <netdb.h>
 #include <arpa/inet.h>
-
+#include <pwd.h>
 
 #ifndef INADDR_NONE
 #define       INADDR_NONE             ((in_addr_t) 0xffffffff)
 #endif
 
+/* jm: turned off for now, it should not be necessary. */
+#undef USE_TCP_NODELAY
+
+int SAFE_FALLBACK=0;
+
+const int ESC_MSGTOOBIG = 666;
+
+char *msg_buf;
+int amount_read;
 
 void print_usage(void)
 {
-  printf("Usage: spamc [-d host] [-p port] [-h]\n");
+  printf("Usage: spamc [-d host] [-p port] [-f] [-h]\n");
   printf("-d host: specify host to connect to  [default: localhost]\n");
   printf("-p port: specify port for connection [default: 22874]\n");
+  printf("-f: fallback safely - in case of comms error, dump original message unchanges instead of setting exitcode\n");
+  printf("-s size: specify max message size, any bigger and it will be returned w/out processing [default: 250k]\n");
   printf("-h: print this help message\n");
 }
 
-int send_message(int in,int out)
+int dump_message(int in,int out)
 {
   size_t bytes;
   char buf[8192];
 
-  bytes = snprintf(buf,8192,"PROCESS SPAMC/1.0\r\n");
+  while((bytes=read(in,buf,8192)) > 0)
+  {
+    if(bytes != write(out,buf,bytes))
+    {
+      return EX_IOERR;
+    }
+  }
+
+  return (0==bytes)?EX_OK:EX_IOERR;
+}
+
+int send_message(int in,int out,char *username, int max_size)
+{
+  size_t bytes;
+
+  if(NULL != username)
+  {
+    bytes = snprintf(msg_buf,1024,"PROCESS SPAMC/1.1\r\nUser: %s\r\n\r\n",username);
+  }
+  else
+  {
+    bytes = snprintf(msg_buf,1024,"PROCESS SPAMC/1.1\r\n\r\n");
+  }
+
+  write(out,msg_buf,bytes);
+
+  /* Ok, now we'll read the message into the buffer up to the limit */
+  /* Hmm, wonder if this'll just work ;) */
+  if((bytes = read(in,msg_buf,max_size+1024)) > max_size)
+  {
+     /* Message is too big, so return so we can dump the message back out */
+     amount_read = bytes;
+     shutdown(out,SHUT_WR);
+     return ESC_MSGTOOBIG;
+  }
 
   do
   {
-    write(out,buf,bytes);
-  } while((bytes=read(in,buf,8192)) > 0);
+    write(out,msg_buf,bytes);
+  } while((bytes=read(in,msg_buf,8192)) > 0);
 
   shutdown(out,SHUT_WR);
 
@@ -71,7 +118,7 @@ int read_message(int in, int out)
       if(2 != sscanf(buf,"SPAMD/%f %d %*s",&version,&response))
       {
 	syslog (LOG_ERR, "spamd responded with bad string '%s'", buf);
-	exit(EX_PROTOCOL);
+	return EX_PROTOCOL;
       }
       flag = -1; /* Set flag to show we found a header */
       break;
@@ -101,7 +148,9 @@ int read_message(int in, int out)
 int
 try_to_connect (const struct sockaddr *addr, int *sockptr)
 {
+#ifdef USE_TCP_NODELAY
   int value;
+#endif
   int mysock;
   int origerr;
 
@@ -126,6 +175,7 @@ try_to_connect (const struct sockaddr *addr, int *sockptr)
     }
   }
   
+#ifdef USE_TCP_NODELAY
   value = 1;		/* make this explicit! */
   if(-1 == setsockopt(mysock,0,TCP_NODELAY,&value,sizeof(value)))
   {
@@ -142,6 +192,7 @@ try_to_connect (const struct sockaddr *addr, int *sockptr)
       break;		/* ignored */
     }
   }
+#endif
 
   if(connect(mysock,(const struct sockaddr *) addr, sizeof(*addr)) < 0)
   {
@@ -170,10 +221,11 @@ try_to_connect (const struct sockaddr *addr, int *sockptr)
   }
 
   *sockptr = mysock;
-  return 0;
+
+  return EX_OK;
 }
 
-int process_message(const char *hostname, int port)
+int process_message(const char *hostname, int port, char *username, int max_size)
 {
   int exstatus;
   int mysock;
@@ -201,9 +253,9 @@ int process_message(const char *hostname, int port)
       case HOST_NOT_FOUND:
       case NO_ADDRESS:
       case NO_RECOVERY:
-	exit(EX_NOHOST);
+	return EX_NOHOST;
       case TRY_AGAIN:
-	exit(EX_TEMPFAIL);
+	return EX_TEMPFAIL;
       }
     }
 
@@ -211,21 +263,36 @@ int process_message(const char *hostname, int port)
   }
 
   exstatus = try_to_connect ((const struct sockaddr *) &addr, &mysock);
-  if (0 == exstatus) {
-    exstatus = send_message(STDIN_FILENO,mysock);
-    if (0 == exstatus) {
+  if (0 == exstatus)
+  {
+    msg_buf = malloc(max_size);
+    exstatus = send_message(STDIN_FILENO,mysock,username,max_size);
+    if (0 == exstatus)
+    {
       exstatus = read_message(mysock,STDOUT_FILENO);
     }
+    else if(ESC_MSGTOOBIG == exstatus)
+    {
+      /* Message was too big, so dump the buffer then bail */
+      write(STDOUT_FILENO,msg_buf,amount_read);
+      dump_message(STDIN_FILENO,STDOUT_FILENO);
+      exstatus = 0;
+    }
+    free(msg_buf);
+  }
+  else if(SAFE_FALLBACK) // If connection failed but SAFE_FALLBACK set then dump original message
+  {
+    return dump_message(STDIN_FILENO,STDOUT_FILENO);
   }
 
   return exstatus;	/* return the last failure code */
 }
 
-void read_args(int argc, char **argv, char **hostname, int *port)
+void read_args(int argc, char **argv, char **hostname, int *port, int *max_size)
 {
   int opt;
 
-  while(-1 != (opt = getopt(argc,argv,"d:p:h")))
+  while(-1 != (opt = getopt(argc,argv,"d:p:u:hfs:")))
   {
     switch(opt)
     {
@@ -237,6 +304,21 @@ void read_args(int argc, char **argv, char **hostname, int *port)
     case 'p':
       {
 	*port = atoi(optarg);
+	break;
+      }
+    case 'f':
+      {
+	SAFE_FALLBACK = -1;
+	break;
+      }
+    case 'u':
+      {
+	syslog (LOG_WARNING, "usage: -u arg obsolete, ignored");
+	break;
+      }
+    case 's':
+      {
+	*max_size = atoi(optarg);
 	break;
       }
     case '?': {
@@ -255,15 +337,21 @@ void read_args(int argc, char **argv, char **hostname, int *port)
 int main(int argc,char **argv)
 {
   int port = 22874;
-  char *hostname = "localhost";
+  int max_size = 250*1024;
+  char *hostname = "127.0.0.1";
+  char *username = NULL;
+  struct passwd *curr_user;
 
-  srand(time(NULL));
   openlog ("spamc", LOG_CONS|LOG_PID, LOG_MAIL);
 
-  read_args(argc,argv,&hostname,&port);
-    
-  return process_message(hostname,port);
-}
+  curr_user = getpwuid(getuid());
+  if (curr_user == NULL) {
+    perror ("getpwuid failed");
+    return EX_OSERR;
+  }
+  username = curr_user->pw_name;
 
-  
-  
+  read_args(argc,argv,&hostname,&port,&max_size);
+
+  return process_message(hostname,port,username,max_size);
+}

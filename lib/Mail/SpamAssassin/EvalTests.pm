@@ -7,6 +7,7 @@ package Mail::SpamAssassin::PerMsgStatus;
 
 use Mail::SpamAssassin::Conf;
 use Mail::SpamAssassin::Dns;
+use Mail::SpamAssassin::Locales;
 use IO::Socket;
 use Carp;
 use strict;
@@ -33,20 +34,21 @@ $IS_DNS_AVAILABLE = undef;
 
 sub check_for_from_mx {
   my ($self) = @_;
-  local ($_);
 
-  $_ = $self->get ('From');
-  return 0 unless (/\@(\S+)/);
-  $_ = $1;
+  my $from = $self->get ('From:addr');
+  return 0 unless ($from =~ /\@(\S+)/);
+  $from = $1;
 
   # First check that DNS is available, if not do not perform this check
   return 0 unless $self->is_dns_available();
+  $self->load_resolver();
 
-  # Try 5 times to protect against temporary outages.  sleep between checks
+  # Try 3 times to protect against temporary outages.  sleep between checks
   # to give the DNS a chance to recover.
-  for my $i (1..5) {
-    my @mx = mx ($self->{res}, $_);
-    if (scalar @mx >= 0) { return 0; }
+  for my $i (1..3) {
+    my @mx = Net::DNS::mx ($self->{res}, $from);
+    dbg ("DNS MX records found: ".scalar (@mx));
+    if (scalar @mx > 0) { return 0; }
     sleep 5;
   }
 
@@ -129,15 +131,55 @@ sub check_subject_for_lotsa_8bit_chars {
 
 ###########################################################################
 
+sub check_for_missing_headers {
+  my ($self) = @_;
+
+  my $hdr = $self->get ('From');
+  return 1 if ($hdr eq '');
+
+  $hdr = $self->get ('To');
+  $hdr ||= $self->get ('Apparently-To');
+  return 1 if ($hdr eq '');
+
+  $hdr = $self->get ('Date');
+  return 1 if ($hdr eq '');
+
+  return 0;
+}
+
+###########################################################################
+
 sub check_from_in_whitelist {
   my ($self) = @_;
   local ($_);
-  $_ = $self->get ('From:addr');
+  $_ = lc $self->get ('From:addr');
 
   foreach my $addr (@{$self->{conf}->{whitelist_from}}) {
-    if ($_ eq $addr) {
-      return 1;
-    }
+    if ($_ eq lc $addr) { return 1; }
+  }
+
+  s/[^\@]+\@//gs;	# jm@jmason.org => jmason.org
+  foreach my $addr (@{$self->{conf}->{whitelist_from_doms}}) {
+    if ($_ eq lc $addr) { return 1; }
+  }
+
+  return 0;
+}
+
+###########################################################################
+
+sub check_from_in_blacklist {
+  my ($self) = @_;
+  local ($_);
+  $_ = lc $self->get ('From:addr');
+
+  foreach my $addr (@{$self->{conf}->{blacklist_from}}) {
+    if ($_ eq lc $addr) { return 1; }
+  }
+
+  s/[^\@]+\@//gs;	# jm@jmason.org => jmason.org
+  foreach my $addr (@{$self->{conf}->{blacklist_from_doms}}) {
+    if ($_ eq lc $addr) { return 1; }
   }
 
   return 0;
@@ -169,37 +211,40 @@ sub check_from_name_eq_from_address {
 ###########################################################################
 
 sub check_rbl {
-  my ($self, $rbl_domain) = @_;
+  my ($self, $set, $rbl_domain) = @_;
   local ($_);
-  my $rcv = $self->get ('Received');
+  dbg ("checking RBL $rbl_domain, set $set");
 
+  my $rcv = $self->get ('Received');
   my @ips = ($rcv =~ /\[(\d+\.\d+\.\d+\.\d+)\]/g);
   return 0 unless ($#ips >= 0);
 
   # First check that DNS is available, if not do not perform this check
+  return 0 if $self->{conf}->{skip_rbl_checks};
   return 0 unless $self->is_dns_available();
+  $self->load_resolver();
 
   if ($#ips > 1) {
     @ips = @ips[$#ips-1 .. $#ips];        # only check the originating 2
   }
 
-  if (!defined $self->{rbl_IN_As_found}) {
-    $self->{rbl_IN_As_found} = ' ';
-    $self->{rbl_matches_found} = ' ';
+  if (!defined $self->{$set}->{rbl_IN_As_found}) {
+    $self->{$set}->{rbl_IN_As_found} = ' ';
+    $self->{$set}->{rbl_matches_found} = ' ';
   }
 
   init_rbl_check_reserved_ips();
-  my $already_matched_in_other_zones = ' '.$self->{rbl_matches_found}.' ';
+  my $already_matched_in_other_zones = ' '.$self->{$set}->{rbl_matches_found}.' ';
   my $found = 0;
 
   # First check that DNS is available, if not do not perform this check.
   # Stop after the first positive.
-  eval q{
+  eval {
     foreach my $ip (@ips) {
       next if ($ip =~ /${IP_IN_RESERVED_RANGE}/o);
       next if ($already_matched_in_other_zones =~ / ${ip} /);
       next unless ($ip =~ /(\d+)\.(\d+)\.(\d+)\.(\d+)/);
-      $found = $self->do_rbl_lookup ("$4.$3.$2.$1.".$rbl_domain, $ip, $found);
+      $found = $self->do_rbl_lookup ($set, "$4.$3.$2.$1.".$rbl_domain, $ip, $found);
     }
   };
 
@@ -209,12 +254,15 @@ sub check_rbl {
 ###########################################################################
 
 sub check_rbl_results_for {
-  my ($self, $addr) = @_;
+  my ($self, $set, $addr) = @_;
 
+  dbg ("checking RBL results in set $set for $addr");
+  return 0 if $self->{conf}->{skip_rbl_checks};
   return 0 unless $self->is_dns_available();
-  return 0 unless defined ($self->{rbl_IN_As_found});
+  return 0 unless defined ($self->{$set});
+  return 0 unless defined ($self->{$set}->{rbl_IN_As_found});
 
-  my $inas = ' '.$self->{rbl_IN_As_found}.' ';
+  my $inas = ' '.$self->{$set}->{rbl_IN_As_found}.' ';
   if ($inas =~ / ${addr} /) { return 1; }
 
   return 0;
@@ -225,12 +273,13 @@ sub check_rbl_results_for {
 sub check_for_unique_subject_id {
   my ($self) = @_;
   local ($_);
-  $_ = $self->get ('Subject');
+  $_ = lc $self->get ('Subject');
+  study;
 
   my $id = undef;
   if (/[-_\.\s]{7,}([-a-z0-9]{4,})$/
-	|| /\s+[-:\#\(\[]+([-a-zA-Z0-9]{4,})[\]\)]+$/
-	|| /\s+[-:\#]([-a-zA-Z0-9]{4,})$/)
+	|| /\s+[-:\#\(\[]+([-a-z0-9]{4,})[\]\)]+$/
+	|| /\s+[-:\#]([-a-z0-9]{4,})$/)
   {
     $id = $1;
   }
@@ -246,10 +295,13 @@ sub word_is_in_dictionary {
   my ($self, $word) = @_;
   local ($_);
 
-  $word =~ tr/A-Z/a-z/;
+  # $word =~ tr/A-Z/a-z/;
   $word =~ s/^\s+//;
   $word =~ s/\s+$//;
   return 0 if ($word =~ /[^a-z]/);
+
+  return 0 if ($word =~ /ing$/);	# amusing
+  return 0 if ($word =~ /nny$/);	# funny
 
   if (!open (DICT, "</usr/dict/words") &&
   	!open (DICT, "</usr/share/dict/words"))
@@ -270,6 +322,120 @@ sub word_is_in_dictionary {
 }
 
 ###########################################################################
+
+sub get_address_commonality_ratio {
+  my ($self, $addr1, $addr2) = @_;
+
+  my %counts = ();
+  map { $counts{$_}++; } split (//, lc $addr1);
+  map { $counts{$_}++; } split (//, lc $addr2);
+
+  my $foundonce = 0;
+  my $foundtwice = 0;
+  foreach my $char (keys %counts) {
+    if ($counts{$char} == 1) { $foundonce++; next; }
+    if ($counts{$char} == 2) { $foundtwice++; next; }
+  }
+
+  $foundtwice ||= 1.0;
+  my $ratio = ($foundonce / $foundtwice);
+
+  #print "addrcommonality: $foundonce $foundtwice $addr1/$addr2 $ratio\n";
+
+  return $ratio;
+}
+
+sub check_for_spam_reply_to {
+  my ($self) = @_;
+
+  my $rpto = $self->get ('Reply-To:addr');
+  return 0 if ($rpto eq '');
+
+  my $ratio1 = $self->get_address_commonality_ratio
+  				($rpto, $self->get ('From:addr'));
+  my $ratio2 = $self->get_address_commonality_ratio
+  				($rpto, $self->get ('To:addr'));
+
+  # 2.0 means twice as many chars different as the same
+  if ($ratio1 > 2.0 && $ratio2 > 2.0) { return 1; }
+
+  return 0;
+}
+
+###########################################################################
+
+sub check_for_forged_gw05_received_headers {
+  my ($self) = @_;
+  local ($_);
+
+  my $rcv = $self->get ('Received');
+
+  # e.g.
+  # Received: from mail3.icytundra.com by gw05 with ESMTP; Thu, 21 Jun 2001 02:28:32 -0400
+  my ($h1, $h2) = ($rcv =~ 
+  	m/\nfrom\s(\S+)\sby\s(\S+)\swith\sESMTP\;\s+\S\S\S,\s+\d+\s+\S\S\S\s+
+			\d\d\d\d\s+\d\d:\d\d:\d\d\s+[-+]*\d\d\d\d\n$/xs);
+
+  if (defined ($h1) && defined ($h2) && $h2 !~ /\./) {
+    return 1;
+  }
+
+  0;
+}
+
+###########################################################################
+
+sub check_for_faraway_charset {
+  my ($self) = @_;
+
+  my $type = $self->get ('Content-Type');
+  $type ||= $self->get ('Content-type');
+
+  my @locales = split (' ', $self->{conf}->{ok_locales});
+  push (@locales, $ENV{'LANG'});
+
+  $type = get_charset_from_ct_line ($type);
+  if (defined $type &&
+    !Mail::SpamAssassin::Locales::is_charset_ok_for_locales
+		    ($type, @locales))
+  {
+    return 1;
+  }
+
+  0;
+}
+
+sub check_for_faraway_charset_in_body {
+  my ($self, $fulltext) = @_;
+
+  if ($$fulltext =~ /\n\n.*\n
+  		Content-Type:\s(.{0,100}charset=[^\n]+)\n
+		/isx)
+  {
+    my $type = $1;
+    my @locales = split (' ', $self->{conf}->{ok_locales});
+    push (@locales, $ENV{'LANG'});
+
+    $type = get_charset_from_ct_line ($type);
+    if (defined $type &&
+      !Mail::SpamAssassin::Locales::is_charset_ok_for_locales
+		      ($type, @locales))
+    {
+      return 1;
+    }
+  }
+
+  0;
+}
+
+sub get_charset_from_ct_line {
+  my $type = shift;
+  if ($type =~ /charset="([^"]+)"/i) { return $1; }
+  if ($type =~ /charset=(\S+)/i) { return $1; }
+  return undef;
+}
+
+###########################################################################
 # BODY TESTS:
 ###########################################################################
 
@@ -286,6 +452,9 @@ sub check_razor {
   my ($self, $fulltext) = @_;
 
   return 0 unless ($self->is_razor_available());
+  return 0 if ($self->{already_checked_razor});
+
+  $self->{already_checked_razor} = 1;
   return $self->razor_lookup ($fulltext);
 }
 

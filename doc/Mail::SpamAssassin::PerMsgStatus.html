@@ -31,7 +31,7 @@
     'rules_filename'      =&gt; '/etc/spamassassin.rules',
     'userprefs_filename'  =&gt; $ENV{HOME}.'/.spamassassin.cf'
   });
-  my $mail = Mail::Audit-&gt;new();</PRE>
+  my $mail = Mail::SpamAssassin::MyMailAudit-&gt;new();</PRE>
 <PRE>
   my $status = $spamtest-&gt;check ($mail);
   if ($status-&gt;is_spam()) {
@@ -80,17 +80,23 @@ how many spam detection rules it triggered.
 <DT><STRONG><A NAME="item_rewrite_mail">$status-&gt;rewrite_mail ()</A></STRONG><BR>
 <DD>
 Rewrite the mail message.  This will add headers, and possibly body text, to
-reflect it's spam or not-spam status.
+reflect its spam or not-spam status.
 <P>The modifications made are as follows:</P>
 <DL>
 <DT><STRONG><A NAME="item_Subject%3A_header_for_spam_mails">Subject: header for spam mails</A></STRONG><BR>
 <DD>
-The string <CODE>*****SPAM*****</CODE> is prepended to the subject.
+The string <CODE>*****SPAM*****</CODE> is prepended to the subject,
+unless the <CODE>rewrite_subject 0</CODE> configuration option is given.
 <P></P>
 <DT><STRONG><A NAME="item_X%2DSpam%2DStatus%3A_header_for_spam_mails">X-Spam-Status: header for spam mails</A></STRONG><BR>
 <DD>
 A string, <CODE>Yes, hits=nn required=nn tests=...</CODE> is set in this header to
 reflect the filter status.  The keys in this string are as follows:
+<P></P>
+<DT><STRONG><A NAME="item_X%2DSpam%2DReport%3A_header_for_spam_mails">X-Spam-Report: header for spam mails</A></STRONG><BR>
+<DD>
+The SpamAssassin report is added to the mail header if
+the <CODE>report_header = 1</CODE> configuration option is given.
 <DL>
 <DT><STRONG><A NAME="item_hits%3Dnn_The_number_of_hits_the_message_triggered">hits=nn The number of hits the message triggered.</A></STRONG><BR>
 <DD>
@@ -110,7 +116,8 @@ content that could ``call back'' to the spammer.
 <P></P>
 <DT><STRONG><A NAME="item_spam_mail_body_text">spam mail body text</A></STRONG><BR>
 <DD>
-The SpamAssassin report is added to top of the mail message body.
+The SpamAssassin report is added to top of the mail message body,
+unless the <CODE>report_header 1</CODE> configuration option is given.
 <P></P>
 <DT><STRONG><A NAME="item_X%2DSpam%2DStatus%3A_header_for_non%2Dspam_mails">X-Spam-Status: header for non-spam mails</A></STRONG><BR>
 <DD>
@@ -118,6 +125,16 @@ A string, <CODE>No, hits=nn required=nn tests=...</CODE> is set in this header t
 the filter status.  The keys in this string are the same as for spam mails (see
 above).
 <P></P></DL>
+<DT><STRONG><A NAME="item_get_full_message_as_text">$messagestring = $status-&gt;get_full_message_as_text ()</A></STRONG><BR>
+<DD>
+Returns the mail message as a string, including headers and raw body text.
+<P>If the message has been rewritten using <A HREF="#item_rewrite_mail"><CODE>rewrite_mail()</CODE></A>, these changes
+will be reflected in the string.</P>
+<P>Note: this is simply a helper method which calls methods on the mail message
+object.  It is provided because Mail::Audit uses an unusual (ie. not quite
+intuitive) interface to do this, and it has been a common stumbling block for
+authors of scripts which use SpamAssassin.</P>
+<P></P>
 <DT><STRONG><A NAME="item_handle_auto_report">$status-&gt;handle_auto_report ()</A></STRONG><BR>
 <DD>
 If this mail message has a high enough hit score, report it to spam-tracking

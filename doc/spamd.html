@@ -28,14 +28,57 @@
 <P>
 <HR>
 <H1><A NAME="synopsis">SYNOPSIS</A></H1>
-<P>spamd [port]</P>
+<P>spamd [options]</P>
 <P>
 <HR>
 <H1><A NAME="options">OPTIONS</A></H1>
 <DL>
-<DT><STRONG><A NAME="item_port"><EM>port</EM></A></STRONG><BR>
+<DT><STRONG><A NAME="item_%2Dc"><STRONG>-c</STRONG></A></STRONG><BR>
 <DD>
-Optionally specifies the port number for the server to listen on
+Create user preferences files if they don't exist (default: don't)
+<P></P>
+<DT><STRONG><A NAME="item_%2Dd"><STRONG>-d</STRONG></A></STRONG><BR>
+<DD>
+Detach from starting process and run in background (daemonize)
+<P></P>
+<DT><STRONG><A NAME="item_%2DD"><STRONG>-D</STRONG></A></STRONG><BR>
+<DD>
+Print debugging messages
+<P></P>
+<DT><STRONG><A NAME="item_%2Dh"><STRONG>-h</STRONG></A></STRONG><BR>
+<DD>
+Print a brief help message, then exit without further action
+<P></P>
+<DT><STRONG><A NAME="item_%2DL"><STRONG>-L</STRONG></A></STRONG><BR>
+<DD>
+Perform only local tests on all mail.  In other words, skip DNS and other
+network tests.  Works the same as the <A HREF="#item_%2DL"><CODE>-L</CODE></A> flag to <CODE>spamassassin(1)</CODE>
+<P></P>
+<DT><STRONG><A NAME="item_%2DA_host%2C%2E%2E%2E"><STRONG>-A</STRONG> <EM>host,...</EM></A></STRONG><BR>
+<DD>
+Specify a list of authorized hosts which can connect to this spamd instance.
+The list is one of valid IP addresses, separated by commas.  By default, connections are only accepted from localhost
+<P></P>
+<DT><STRONG><A NAME="item_%2Dp_port"><STRONG>-p</STRONG> <EM>port</EM></A></STRONG><BR>
+<DD>
+Optionally specifies the port number for the server to listen on.
+<P></P>
+<DT><STRONG><A NAME="item_%2DP"><STRONG>-P</STRONG></A></STRONG><BR>
+<DD>
+Die on user errors (for the user passed from spamc) instead of falling back to user <EM>nobody</EM> and using the default configuration
+<P></P>
+<DT><STRONG><A NAME="item_%2Ds_facility"><STRONG>-s</STRONG> <EM>facility</EM></A></STRONG><BR>
+<DD>
+Specify the syslog facility to use (default: mail)
+<P></P>
+<DT><STRONG><A NAME="item_%2Du_username"><STRONG>-u</STRONG> <EM>username</EM></A></STRONG><BR>
+<DD>
+Run as the named user.  The alternative, default behaviour is to <CODE>setuid()</CODE> to
+the user running <CODE>spamc</CODE>, if <CODE>spamd</CODE> is running as root
+<P></P>
+<DT><STRONG><A NAME="item_%2Dx"><STRONG>-x</STRONG></A></STRONG><BR>
+<DD>
+Turn off per-user config files.  All users will just get the default configuration
 <P></P></DL>
 <P>
 <HR>

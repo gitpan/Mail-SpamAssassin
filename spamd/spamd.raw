@@ -1,5 +1,4 @@
 #!/usr/bin/perl -w
-
 ############################################################
 # The code in this file is copyright 2001 by Craig Hughes  #
 # It is licensed for use with the SpamAssassin distribution#
@@ -15,11 +14,7 @@ use Mail::Audit;
 use Mail::SpamAssassin;
 use Sys::Syslog qw(:DEFAULT setlogsock);
 use POSIX qw(setsid);
-
-my $spamtest = Mail::SpamAssassin->new({
-  # maybe turned on by a command-line arg?
-  #	local_tests_only=>1
-});
+use Getopt::Std;
 
 my %resphash = (
     EX_OK => 0,
@@ -40,11 +35,98 @@ my %resphash = (
     EX_CONFIG => 78, # configuration error
 );
 
+sub usage
+{
+    warn <<EOUSAGE;
+
+Usage: spamd [options]
+
+Options:
+
+    -h            Print this usage message and exit
+    -L            Use local tests only (no DNS or other network lookups)
+    -A host,...   Set list of authorized ip addresses which can connect to this server
+                    (defaults to 127.0.0.1 only)
+    -p port       Listen on the specific port (otherwise default is port 22874)
+    -u username   Run as named user, instead of running setuid to spamc user
+    -d		  Daemonize, detach from parent process
+    -x            Disable user config files
+    -P            Die upon user errors (does not exist or user = root) instead of
+                  running as 'nobody' with defaults.
+    -s            Specify the syslog facility (default: mail)
+    -D            Print debugging messages
+    -c            Create user preferences files if they do not already exist
+
+EOUSAGE
+    exit $resphash{EX_USAGE};
+}
+
+use POSIX 'setsid';
+sub daemonize
+{
+	chdir '/' or die "Can't chdir to '/': $!";
+	open STDIN,'/dev/null' or die "Can't read '/dev/null': $!";
+	open STDOUT,'>/dev/null' or die "Can't write '/dev/null': $!";
+   defined(my $pid=fork) or die "Can't fork: $!";
+   exit if $pid;
+   setsid or die "Can't start new session: $!";
+   open STDERR,'>&STDOUT' or die "Can't duplicate stdout: $!";
+}
+
+use vars qw{
+  	$opt_d $opt_h $opt_L $opt_p $opt_A $opt_x $opt_s $opt_D $opt_u
+	$opt_P $opt_c
+};
+
+getopts('hdLxp:A:s:Du:Pc') or usage();
+
+$opt_h and usage();
+
+# These can be changed on command line with -A flag
+my @allowed_clients;
+if($opt_A)
+{
+    @allowed_clients = split /,/,$opt_A;
+}
+else
+{
+    @allowed_clients = qw (127.0.0.1);
+}
+
+# This can be changed on the command line with the -s flag
+my $log_facility;
+if($opt_s)
+{
+    $log_facility = $opt_s;
+}
+else
+{
+    $log_facility = 'mail';
+}
+
+my $dontcopy = 1;
+if ($opt_c) { $dontcopy = 0; }
+
+my $spamtest = Mail::SpamAssassin->new({
+  dont_copy_prefs => $dontcopy,
+  local_tests_only => $opt_L,
+  debug => $opt_D,
+  paranoid => ($opt_P || 0),
+});
+
+$spamtest->compile_now();	# ensure all modules etc. are loaded
+$/ = "\n";			# argh, Razor resets this!  Bad Razor!
+
 sub spawn;  # forward declaration
 setlogsock('unix');
-sub logmsg { openlog('spamd','cons,pid','mail'); syslog('info',"@_"); closelog(); }
 
-my $port = shift || 22874;
+# jm: NOTE: this should probably just openlog() once, in parent pid, for
+# efficiency (TODO)
+sub logmsg {
+  openlog('spamd','cons,pid',$log_facility); syslog('info',"@_"); closelog();
+}
+
+my $port = $opt_p || 22874;
 my $proto = getprotobyname('tcp');
 
 ($port) = $port =~ /^(\d+)$/ or die "invalid port";
@@ -53,24 +135,43 @@ my $proto = getprotobyname('tcp');
 chdir '/'               or die "Can't chdir to /: $!";
 open STDIN, '/dev/null' or die "Can't read /dev/null: $!";
 open STDOUT, '>/dev/null' or die "Can't write to /dev/null: $!";
-open STDERR, '>/dev/null' or die "Can't write to /dev/null: $!";
+# open STDERR, '>/dev/null' or die "Can't write to /dev/null: $!";
 
 socket(Server, PF_INET, SOCK_STREAM, $proto)        || die "socket: $!";
 setsockopt(Server,SOL_SOCKET,SO_REUSEADDR,pack("l", 1)) || die "setsockopt: $!";
 bind(Server, sockaddr_in($port, INADDR_ANY))        || die "bind: $!";
 listen(Server,SOMAXCONN)                            || die "listen: $!";
 
-logmsg "server started on port $port";
+$opt_d and daemonize();
 
-my $waitedpid = 0;
-my $paddr;
+# support non-root use (after we bind to the port)
+my $setuid_to_user = 0;
+if ($opt_u) {
+    my $uuid = getpwnam($opt_u);
+    if (!defined $uuid || $uuid == 0) {
+	die "fatal: cannot run as nonexistent user or root with -u option\n";
+    }
+    $> = $uuid;		# effective uid
+    $< = $uuid;		# real uid. we now cannot setuid anymore
+    if ($> != $uuid) {
+	die "fatal: setuid to uid $uuid failed\n";
+    }
 
-sub REAPER {
-    $waitedpid = wait;
-    $SIG{CHLD} = \&REAPER;  # loathe sysV
+} elsif ($> == 0) {
+    $setuid_to_user = 1;
 }
 
-$SIG{CHLD} = \&REAPER;
+logmsg "server started on port $port";
+if ($opt_D) {
+    warn "server started on port $port\n";
+    warn "server pid: $$\n";
+}
+
+my $waitedpid = 0;
+my $current_user;
+my $paddr;
+
+$SIG{CHLD} = 'IGNORE';		# important: avoids perl sighandling bug on BSD
 
 for ( $waitedpid = 0;
       ($paddr = accept(Client,Server)) || $waitedpid;
@@ -78,38 +179,99 @@ for ( $waitedpid = 0;
 {
     next if $waitedpid and not $paddr;
 
+    my $start = time;
+
     my($port,$iaddr) = sockaddr_in($paddr);
     my $name = gethostbyaddr($iaddr,AF_INET);
-    logmsg "connection from $name [",inet_ntoa($iaddr),"] at port $port";
+
+    if ( allowed($iaddr) ) {
+       logmsg "connection from $name [",
+       				inet_ntoa($iaddr),"] at port $port";
+    } else {
+       logmsg "unauthorized connection from $name [",
+       				inet_ntoa($iaddr),"] at port $port";
+       next;
+    } 
 
     spawn sub {
 	$|=1; # always immediately flush output
 	# First request line off stream
-        $_ = <STDIN>;
+        local $_ = <STDIN>;
 	chomp;
-        if(/PROCESS SPAMC\/1\.0/)
+        if(/PROCESS SPAMC\/(.*)/)
 	{
+	    my $version = $1;
+	    if($version > 1.0)
+	    {
+		while(1)
+                {
+                    $_ = <STDIN>;
+                    if(!defined $_) {
+                        protocol_error ("(EOF during headers)");
+                        return 1;
+                    }
+                    if (/^\r\n/s) { last; }
+                    if((/^User: (.*)\r\n/) && (! $opt_x)) {
+		        handle_user ($1);
+                    }
+                }	
+	    }
+
+            if ($spamtest->{paranoid} && $setuid_to_user && $> == 0)
+            {
+                logmsg "PARANOID: Still running as root, closing connection.";
+	    }
+            elsif ( $setuid_to_user && $> == 0 )
+            {
+                logmsg "Still running as root: user not specified, not found, or set to root.  Fall back to nobody.";
+		my $uid = getpwnam('nobody');
+		if (!defined $uid) { die "no UID for nobody"; }
+                $> = $uid;
+            }
+
 	    my $resp = "EX_OK";
 	    # Now read in message
-	    my $mail = Mail::Audit->new();
+	    my $mail = Mail::SpamAssassin::MyMailAudit->new();
+
 	    # Now use copy-on-writed (hopefully) SA object
 	    my $status = $spamtest->check($mail);
 	    $status->rewrite_mail; #if $status->is_spam;
 
-	    print "SPAMD/1.0 $resphash{$resp} $resp\r\n",$mail->header,"\n",(join '',@{$mail->body});
+	    print "SPAMD/1.0 $resphash{$resp} $resp\r\n",
+	    		$mail->header, "\n",
+			(join '',@{$mail->body});
 
-	    logmsg "processed successfully";
+	    logmsg "processed successfully for $current_user:$> in ".
+			 sprintf("%3d", time - $start) ." seconds.\n";
 
 	    $status->finish();	# added by jm to allow GC'ing
 	}
 	else
 	{
-	    my $resp = "EX_PROTOCOL";
-	    print "SPAMD/1.0 $resphash{$resp} Bad header line: $_\r\n";
-	    logmsg "bad protocol: header error: $_";
+	    protocol_error ($_);
 	}
     };
+}
 
+sub protocol_error {
+  local $_ = shift;
+
+  my $resp = "EX_PROTOCOL";
+  print "SPAMD/1.0 $resphash{$resp} Bad header line: $_\r\n";
+  logmsg "bad protocol: header error: $_";
+}
+
+sub allowed {
+    my $iaaddr = shift;
+
+    #I'm sure this could be improved, but hey, it works.
+    foreach (@allowed_clients) {
+        if (inet_ntoa($iaaddr) eq $_) {
+	   return(1);
+	}
+    }
+    
+    return(0);
 }
 
 sub spawn {
@@ -133,21 +295,112 @@ sub spawn {
     exit &$coderef();
 }
 
+sub handle_user {
+    my $username = shift;
+
+    $current_user = $username;
+    my ($name,$pwd,$uid,$gid,$quota,$comment,$gcos,$dir,$etc) =
+    				getpwnam($username);
+
+    if ( !$spamtest->{paranoid} && !defined($uid) ) {
+       #if we are given a username, but can't look it up,
+       #Maybe NIS is down? lets break out here to allow
+       #them to get 'defaults' when we are not running paranoid.
+       logmsg "handle_user() -> unable to find user [$username]!\n";
+       return 0;
+    }
+
+    if ($setuid_to_user) {
+      $> = $uid;
+      if ($> != $uid) {
+	logmsg "setuid to $uid failed";
+	die;		# make it fatal to avoid security breaches
+      }
+    }
+
+    my $cf_file = $dir."/.spamassassin.cf";
+
+    create_default_cf_if_needed ($cf_file, $username);
+    $spamtest->read_scoreonly_config ($cf_file);
+    $spamtest->load_scoreonly_sql ($username);
+    return 1;
+}
+
+sub create_default_cf_if_needed {
+    my ($cf_file, $username) = @_;
+
+    # Parse user scores, creating default .cf if needed:
+    if( ! -r $cf_file && ! $spamtest->{dont_copy_prefs})
+    {
+	logmsg "Creating default_prefs [$cf_file]";
+
+	$spamtest->create_default_prefs ($cf_file,$username);
+
+	if ( ! -r $cf_file )
+	{
+	    logmsg "Couldn't create readable default_prefs for [$cf_file]";
+	}
+    }
+}
+
 =head1 NAME
 
 spamd - daemonized version of spamassassin
 
 =head1 SYNOPSIS
 
-spamd [port]
+spamd [options]
 
 =head1 OPTIONS
 
 =over
 
-=item I<port>
+=item B<-c>
 
-Optionally specifies the port number for the server to listen on
+Create user preferences files if they don't exist (default: don't)
+
+=item B<-d>
+
+Detach from starting process and run in background (daemonize)
+
+=item B<-D>
+
+Print debugging messages
+
+=item B<-h>
+
+Print a brief help message, then exit without further action
+
+=item B<-L>
+
+Perform only local tests on all mail.  In other words, skip DNS and other
+network tests.  Works the same as the C<-L> flag to C<spamassassin(1)>
+
+=item B<-A> I<host,...>
+
+Specify a list of authorized hosts which can connect to this spamd instance.
+The list is one of valid IP addresses, separated by commas.  By default, connections are only accepted from localhost
+
+=item B<-p> I<port>
+
+Optionally specifies the port number for the server to listen on.
+
+=item B<-P>
+
+Die on user errors (for the user passed from spamc) instead of falling back to user I<nobody> and using the default configuration
+
+=item B<-s> I<facility>
+
+Specify the syslog facility to use (default: mail)
+
+=item B<-u> I<username>
+
+Run as the named user.  The alternative, default behaviour is to setuid() to
+the user running C<spamc>, if C<spamd> is running as root
+
+=item B<-x>
+
+Turn off per-user config files.  All users will just get the default configuration
 
 =back
 
@@ -178,4 +431,3 @@ Craig R Hughes E<lt>craig@hughes-family.orgE<gt>
 C<Mail::SpamAssassin>
 
 =cut
-

@@ -2,7 +2,7 @@ NAME
     Mail::SpamAssassin - Mail::Audit spam detector plugin
 
 SYNOPSIS
-      my $mail = Mail::Audit->new();
+      my $mail = Mail::SpamAssassin::MyMailAudit->new();
 
       my $spamtest = Mail::SpamAssassin->new();
       my $status = $spamtest->check ($mail);
@@ -54,7 +54,11 @@ METHODS
 
         local_tests_only
             If set to 1, no tests that require internet access will be
-            performed.
+            performed. (default: 0)
+
+        dont_copy_prefs
+            If set to 1, the user preferences file will not be created if it
+            doesn't already exist. (default: 0)
 
         If none of `rules_filename', `userprefs_filename', or `config_text'
         is set, the `Mail::SpamAssassin' module will search for the
@@ -73,11 +77,18 @@ METHODS
         be sure to call the `finish()' method on the status objects when
         you're done with them.
 
-    $f->report_as_spam ($mail)
+    $f->report_as_spam ($mail, $options)
         Report a mail, encapsulated in a `Mail::Audit' object, as
         human-verified spam. This will submit the mail message to live,
         collaborative, spam-blocker databases, allowing other users to block
         this message.
+
+        Options is an optional reference to a hash of options. Currently
+        these can be:
+
+        dont_report_to_razor
+            Inhibits reporting of the spam to Razor; useful if you know it's
+            already been listed there.
 
     $f->reply_with_warning ($mail, $replysender)
         Reply to the sender of a mail, encapsulated in a `Mail::Audit'
@@ -89,6 +100,38 @@ METHODS
     $text = $f->remove_spamassassin_markup ($mail)
         Returns the text of the message, with any SpamAssassin-added text
         (such as the report, or X-Spam-Status headers) stripped.
+
+    $f->read_scoreonly_config ($filename)
+        Read a configuration file and parse only scores from it. This is
+        used to safely allow multi-user daemons to read per-user config
+        files without having to use `setuid()'.
+
+    $f->load_scoreonly_sql ($username)
+        Read configuration paramaters from SQL database and parse scores
+        from it. This will only take effect if the perl `DBI' module is
+        installed, and the configuration parameters `user_scores_dsn',
+        `user_scores_sql_username', and `user_scores_sql_password' are set
+        correctly.
+
+    $f->compile_now ()
+        Compile all patterns, load all configuration files, and load all
+        possibly-required Perl modules.
+
+        Normally, Mail::SpamAssassin uses lazy evaluation where possible,
+        but if you plan to fork() or start a new perl interpreter thread to
+        process a message, this is suboptimal, as each process/thread will
+        have to perform these actions.
+
+        Call this function in the master thread or process to perform the
+        actions straightaway, so that the sub-processes will not have to.
+
+        Note that this will initialise the SpamAssassin configuration
+        without reading the per-user configuration file; it assumes that you
+        will call `read_scoreonly_config' at a later point.
+
+    $f->create_default_prefs ()
+        Copy default prefs file into home directory for later use and
+        modification.
 
 PREREQUISITES
     `Mail::Audit' `Mail::Internet'

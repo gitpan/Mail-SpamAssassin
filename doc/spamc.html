@@ -29,24 +29,43 @@
 <HR>
 <H1><A NAME="synopsis">SYNOPSIS</A></H1>
 <DL>
-<DT><STRONG><A NAME="item_spamc_%5B%2Dd_host%5D_%5B%2Dp_port%5D_%5B%2Dh%5D">spamc [-d host] [-p port] [-h]</A></STRONG><BR>
+<DT><STRONG><A NAME="item_spamc_%5B%2Dd_host%5D_%5B%2Dp_port%5D_%5B%2Ds_max_">spamc [-d host] [-p port] [-s max_size] [-u username] [-h] [-f]</A></STRONG><BR>
 <DD>
 </DL>
 <P>
 <HR>
 <H1><A NAME="options">OPTIONS</A></H1>
 <DL>
-<DT><STRONG><A NAME="item_%2Dh"><STRONG>-h</STRONG></A></STRONG><BR>
-<DD>
-Print this help message and terminate without action
-<P></P>
 <DT><STRONG><A NAME="item_%2Dd_host"><STRONG>-d</STRONG> <EM>host</EM></A></STRONG><BR>
 <DD>
 Connect to spamd server on given host
 <P></P>
+<DT><STRONG><A NAME="item_%2Df"><STRONG>-f</STRONG></A></STRONG><BR>
+<DD>
+Cause spamc to safe-failover if it can't connect to spamd -- what this means
+is that in case spamc fails to connect to spamd, it will not return with an
+exitcode set, it will instead dump the original message to stdout, allowing
+the message to be delivered, albeit unscanned for spam.  Without this flag,
+connection failures to spamd will cause message delivery failures.
+Even with this flag set however, if spamc connects successfully, and then
+encounters an error at a later stage of communication, it will still return
+an exitcode.
+<P></P>
+<DT><STRONG><A NAME="item_%2Dh"><STRONG>-h</STRONG></A></STRONG><BR>
+<DD>
+Print this help message and terminate without action
+<P></P>
 <DT><STRONG><A NAME="item_%2Dp_port"><STRONG>-p</STRONG> <EM>port</EM></A></STRONG><BR>
 <DD>
 Connect to spamd server listening on given port
+<P></P>
+<DT><STRONG><A NAME="item_%2Ds_max_size"><STRONG>-s</STRONG> <EM>max_size</EM></A></STRONG><BR>
+<DD>
+Set the maximum message size which will be sent to spamd -- any bigger than this threshold and the message will be returned unprocessed.  Note that the default size is 250k, so if spamc gets handed a message bigger than this, it won't be passed to spamd.  The size is specified in bytes, and if you send it a negative number, things are quite likely to break very hard.
+<P></P>
+<DT><STRONG><A NAME="item_%2Du_username"><STRONG>-u</STRONG> <EM>username</EM></A></STRONG><BR>
+<DD>
+This argument has been obsoleted.  To have spamd use per-user-config files, run spamc as the user whose config files spamd should load.
 <P></P></DL>
 <P>
 <HR>

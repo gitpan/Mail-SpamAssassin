@@ -33,7 +33,7 @@
 <HR>
 <H1><A NAME="synopsis">SYNOPSIS</A></H1>
 <PRE>
-  my $mail = Mail::Audit-&gt;new();</PRE>
+  my $mail = Mail::SpamAssassin::MyMailAudit-&gt;new();</PRE>
 <PRE>
   my $spamtest = Mail::SpamAssassin-&gt;new();
   my $status = $spamtest-&gt;check ($mail);</PRE>
@@ -85,7 +85,13 @@ override the settings for <A HREF="#item_rules_filename"><CODE>rules_filename</C
 <P></P>
 <DT><STRONG><A NAME="item_local_tests_only">local_tests_only</A></STRONG><BR>
 <DD>
-If set to 1, no tests that require internet access will be performed.
+If set to 1, no tests that require internet access will be performed. (default:
+0)
+<P></P>
+<DT><STRONG><A NAME="item_dont_copy_prefs">dont_copy_prefs</A></STRONG><BR>
+<DD>
+If set to 1, the user preferences file will not be created if it doesn't
+already exist. (default: 0)
 <P></P></DL>
 <P>If none of <A HREF="#item_rules_filename"><CODE>rules_filename</CODE></A>, <A HREF="#item_userprefs_filename"><CODE>userprefs_filename</CODE></A>, or <A HREF="#item_config_text"><CODE>config_text</CODE></A> is set,
 the <CODE>Mail::SpamAssassin</CODE> module will search for the configuration files in the
@@ -101,12 +107,19 @@ without affecting this check; in OO terminology, the <CODE>Mail::SpamAssassin</C
 object is a ``factory''.   However, if you do this, be sure to call the
 <CODE>finish()</CODE> method on the status objects when you're done with them.</P>
 <P></P>
-<DT><STRONG><A NAME="item_report_as_spam">$f-&gt;report_as_spam ($mail)</A></STRONG><BR>
+<DT><STRONG><A NAME="item_report_as_spam">$f-&gt;report_as_spam ($mail, $options)</A></STRONG><BR>
 <DD>
 Report a mail, encapsulated in a <CODE>Mail::Audit</CODE> object, as human-verified spam.
 This will submit the mail message to live, collaborative, spam-blocker
 databases, allowing other users to block this message.
-<P></P>
+<P>Options is an optional reference to a hash of options.  Currently these
+can be:</P>
+<DL>
+<DT><STRONG><A NAME="item_dont_report_to_razor">dont_report_to_razor</A></STRONG><BR>
+<DD>
+Inhibits reporting of the spam to Razor; useful if you know it's already
+been listed there.
+<P></P></DL>
 <DT><STRONG><A NAME="item_reply_with_warning">$f-&gt;reply_with_warning ($mail, $replysender)</A></STRONG><BR>
 <DD>
 Reply to the sender of a mail, encapsulated in a <CODE>Mail::Audit</CODE> object,
@@ -119,6 +132,36 @@ sender of the reply message.
 <DD>
 Returns the text of the message, with any SpamAssassin-added text (such
 as the report, or X-Spam-Status headers) stripped.
+<P></P>
+<DT><STRONG><A NAME="item_read_scoreonly_config">$f-&gt;read_scoreonly_config ($filename)</A></STRONG><BR>
+<DD>
+Read a configuration file and parse only scores from it.  This is used
+to safely allow multi-user daemons to read per-user config files
+without having to use <CODE>setuid()</CODE>.
+<P></P>
+<DT><STRONG><A NAME="item_load_scoreonly_sql">$f-&gt;load_scoreonly_sql ($username)</A></STRONG><BR>
+<DD>
+Read configuration paramaters from SQL database and parse scores from it.  This
+will only take effect if the perl <CODE>DBI</CODE> module is installed, and the
+configuration parameters <CODE>user_scores_dsn</CODE>, <CODE>user_scores_sql_username</CODE>, and
+<CODE>user_scores_sql_password</CODE> are set correctly.
+<P></P>
+<DT><STRONG><A NAME="item_compile_now">$f-&gt;compile_now ()</A></STRONG><BR>
+<DD>
+Compile all patterns, load all configuration files, and load all
+possibly-required Perl modules.
+<P>Normally, Mail::SpamAssassin uses lazy evaluation where possible, but if you
+plan to <CODE>fork()</CODE> or start a new perl interpreter thread to process a message,
+this is suboptimal, as each process/thread will have to perform these actions.</P>
+<P>Call this function in the master thread or process to perform the actions
+straightaway, so that the sub-processes will not have to.</P>
+<P>Note that this will initialise the SpamAssassin configuration without reading
+the per-user configuration file; it assumes that you will call
+<A HREF="#item_read_scoreonly_config"><CODE>read_scoreonly_config</CODE></A> at a later point.</P>
+<P></P>
+<DT><STRONG><A NAME="item_create_default_prefs">$f-&gt;create_default_prefs ()</A></STRONG><BR>
+<DD>
+Copy default prefs file into home directory for later use and modification.
 <P></P></DL>
 <P>
 <HR>

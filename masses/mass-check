@@ -4,6 +4,9 @@ use lib "../lib";
 use Mail::Internet;
 use Mail::SpamAssassin;
 
+my $FORK = 0;
+if (defined $ARGV[0] && $ARGV[0] eq '-f') { $FORK = 1; }
+
 sub sortbynum {
   $a =~ m,\/(\d+).*$,; my $anum = $1;
   $b =~ m,\/(\d+).*$,; my $bnum = $1;
@@ -13,16 +16,22 @@ sub sortbynum {
 $rulesfile = "../spamassassin.cf";
 if (-f "spamassassin.cf") { $rulesfile = "spamassassin.cf"; }
 
-my $spamtest = new Mail::SpamAssassin ({
+$spamtest = new Mail::SpamAssassin ({
   'rules_filename'      => $rulesfile,
   'userprefs_filename'  => "../spamassassin.prefs",
   'local_tests_only'    => 1
 });
+$spamtest->compile_now();
+
+my $count = 0;
 
 foreach my $folder (@ARGV) {
-  if (-d $folder && (-f "$folder/1" || -f "$folder/cyrus.index")) {
+  if (-d $folder &&
+  	(-f "$folder/1" || -f "$folder/1.gz" || -f "$folder/cyrus.index"))
+  {
     # it's an MH folder or a Cyrus mailbox
     mass_check_mh_folder($folder);
+
   } elsif (-f $folder) {
     mass_check_mailbox($folder);
   }
@@ -31,9 +40,14 @@ foreach my $folder (@ARGV) {
 sub mass_check_mh_folder {
   my $folder = shift;
   my @files = <$folder/[0-9]*>;
-
   foreach my $mail (sort sortbynum @files) {
-    open (STDIN, "<$mail");
+    if ($mail =~ /\.gz$/) {
+      open (STDIN, "gunzip -cd $mail |") or warn "gunzip $mail failed: $@";
+    } elsif ($mail =~ /\.bz2$/) {
+      open (STDIN, "bzip2 -cd $mail |") or warn "bunzip2 $mail failed: $@";
+    } else {
+      open (STDIN, "<$mail") or warn "open $mail failed: $@";
+    }
     my $ma = Mail::Audit->new();
     docheck ($mail, $ma);
   }
@@ -42,35 +56,51 @@ sub mass_check_mh_folder {
 sub mass_check_mailbox {
   my $folder = shift;
 
-  open (MBOX, "<$folder") or warn "open $folder failed $@";
+  if ($folder =~ /\.gz$/) {
+    open (MBOX, "gunzip -cd $folder |") or warn "gunzip $folder failed: $@";
+  } elsif ($folder =~ /\.bz2$/) {
+    open (MBOX, "bzip2 -cd $folder |") or warn "bunzip2 $folder failed: $@";
+  } else {
+    open (MBOX, "<$folder") or warn "open $folder failed: $@";
+  }
   while (<MBOX>) { /^From \S+ +... ... / and last; }
-  $count = 1;
 
+  my $tmpf = "/tmp/mass-check.$$";
   while (!eof MBOX) {
-    my $tmpf = "/tmp/mass-check.$$";
     open (MSG, ">$tmpf");
     my $msgid = undef;
+    $count++;
+
     while (<MBOX>) {
-      /^Message-I[dD]: (.*)\s*$/ and $msgid = $1;
+      /^Message-[Ii][Dd]: (.*)\s*$/ and $msgid = $1;
+
+      if (/^$/) {
+	if (!defined ($msgid)) {
+	  $msgid = "<$count\@no_msgid_in_msg.taint.org>";
+	  print MSG "Message-Id: $msgid\n";
+	}
+      }
+
       /^From \S+ +... ... / and last;
       print MSG;
     }
     close MSG;
 
-    if (defined ($msgid)) {
-      $msgid =~ s/[^-_<>A-Za-z0-9\.\,\:\=\+\@]/_/gs;	# make safe
-    } else {
-      $msgid = "<".($count++)."\@no_msgid_in_msg>";
-    }
+    # switch to a fork-based model to save RAM
+    if ($FORK && fork()) { wait; next; }
+
     $msgid = "$folder:$msgid";		# so we can find it again
+    $msgid =~ s/\s/_/gs;	# make safe
 
     open (STDIN, "<$tmpf");
+    unlink $tmpf;
     my $ma = Mail::Audit->new();
     docheck ($msgid, $ma);
     close STDIN;
+
+    if ($FORK) { exit; }
   }
   close MBOX;
-  unlink $tmpf;
 }
 
 sub docheck {
@@ -87,10 +117,10 @@ sub docheck {
   my $yorn = $status->is_spam();
   my $hits = $status->get_hits();
   my $tests = $status->get_names_of_tests_hit();
-
-  $ma = undef;		# clean 'em up
   $status->finish();
-  $status = undef;
+
+  undef $ma;		# clean 'em up
+  undef $status;
 
   printf "%s %2d %s %s\n",
 		    ($yorn ? 'Y' : '.'),

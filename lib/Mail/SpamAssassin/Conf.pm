@@ -5,8 +5,6 @@ package Mail::SpamAssassin::Conf;
 use Carp;
 use strict;
 
-use Mail::Audit;
-
 use vars	qw{
   	@ISA $type_body_tests $type_head_tests $type_head_evals
 	$type_body_evals $type_full_tests $type_full_evals
@@ -49,25 +47,138 @@ sub new {
   $self->{required_hits} = 5;
   $self->{auto_report_threshold} = 20;
   $self->{report_template} = '';
+  $self->{terse_report_template} = '';
   $self->{spamtrap_template} = '';
   $self->{razor_config} = $ENV{'HOME'}."/razor.conf";
+  $self->{rewrite_subject} = 1;
+  $self->{report_header} = 0;
+  $self->{use_terse_report} = 0;
+  $self->{defang_mime} = 1;
+  $self->{skip_rbl_checks} = 0;
+  $self->{ok_locales} = '';
 
   $self->{whitelist_from} = [ ];
+  $self->{blacklist_from} = [ ];
+  $self->{whitelist_from_doms} = [ ];
+  $self->{blacklist_from_doms} = [ ];
+
+  # this will hold the database connection params
+  $self->{user_scores_dsn} = '';
+  $self->{user_scores_sql_username} = '';
+  $self->{user_scores_sql_passowrd} = '';
+
+  $self->{_unnamed_counter} = 'aaaaa';
 
   $self;
 }
 
+sub mtime {
+    my $self = shift;
+    if (@_) {
+	$self->{mtime} = shift;
+    }
+    return $self->{mtime};
+}
+
 ###########################################################################
+
+sub parse_scores_only {
+  my ($self, $rules) = @_;
+  $self->_parse ($rules, 1);
+}
 
 sub parse_rules {
   my ($self, $rules) = @_;
+  $self->_parse ($rules, 0);
+}
+
+sub _parse {
+  my ($self, $rules, $scoresonly) = @_;
   local ($_);
 
-  $self->{unnamed_counter} = 'aaaaa';
-
   foreach $_ (split (/\n/, $rules)) {
-    s/\r//g; s/(?:^|(?<!\\))\#.*$//;
+    s/\r//g; s/(^|(?<!\\))\#.*$/$1/;
     s/^\s+//; s/\s+$//; /^$/ and next;
+
+    # note: no eval'd code should be loaded before the SECURITY line below.
+    #
+    if (/^whitelist[-_]from\s+(.+)\s*$/) {
+      $self->add_to_addrlist ($self->{whitelist_from},
+      	$self->{whitelist_from_doms}, split (' ', $1)); next;
+    }
+
+    if (/^blacklist[-_]from\s+(.+)\s*$/) {
+      $self->add_to_addrlist ($self->{blacklist_from},
+      	$self->{blacklist_from_doms}, split (' ', $1)); next;
+    }
+
+    if (/^describe\s+(\S+)\s+(.*)$/) {
+      $self->{descriptions}->{$1} = $2; next;
+    }
+
+    if (/^required[-_]hits\s+(\S+)$/) {
+      $self->{required_hits} = $1+0; next;
+    }
+
+    if (/^score\s+(\S+)\s+(\-*[\d\.]+)$/) {
+      $self->{scores}->{$1} = $2+0.0; next;
+    }
+
+    if (/^clear[-_]report[-_]template$/) {
+      $self->{report_template} = ''; next;
+    }
+
+    if (/^report\b\s*(.*?)$/) {
+      $self->{report_template} .= $1."\n"; next;
+    }
+
+    if (/^clear[-_]terse[-_]report[-_]template$/) {
+      $self->{terse_report_template} = ''; next;
+    }
+
+    if (/^terse[-_]report\b\s*(.*?)$/) {
+      $self->{terse_report_template} .= $1."\n"; next;
+    }
+
+    if (/^clear[-_]spamtrap[-_]template$/) {
+      $self->{spamtrap_template} = ''; next;
+    }
+
+    if (/^spamtrap\s*(.*?)$/) {
+      $self->{spamtrap_template} .= $1."\n"; next;
+    }
+
+    if (/^auto[-_]report[-_]threshold\s+(\d+)$/) {
+      $self->{auto_report_threshold} = $1+0; next;
+    }
+
+    if (/^rewrite[-_]subject\s+(\d+)$/) {
+      $self->{rewrite_subject} = $1+0; next;
+    }
+
+    if (/^report[-_]header\s+(\d+)$/) {
+      $self->{report_header} = $1+0; next;
+    }
+
+    if (/^use[-_]terse[-_]report\s+(\d+)$/) {
+      $self->{use_terse_report} = $1+0; next;
+    }
+
+    if (/^defang[-_]mime\s+(\d+)$/) {
+      $self->{defang_mime} = $1+0; next;
+    }
+
+    if (/^skip[-_]rbl[-_]checks\s+(\d+)$/) {
+      $self->{skip_rbl_checks} = $1+0; next;
+    }
+
+    if (/^ok[-_]locales\s+(.+)$/) {
+      $self->{ok_locales} = $1; next;
+    }
+
+    # SECURITY: no eval'd code should be loaded before this line.
+    #
+    if ($scoresonly) { goto failed_line; }
 
     if (/^header\s+(\S+)\s+eval:(.*)$/) {
       $self->add_test ($1, $2, $type_head_evals); next;
@@ -88,36 +199,18 @@ sub parse_rules {
       $self->add_test ($1, $2, $type_full_tests); next;
     }
 
-    if (/^describe\s+(\S+)\s+(.*)$/) {
-      $self->{descriptions}->{$1} = $2; next;
-    }
-
-    if (/^required_hits\s+(\d+)$/) {
-      $self->{required_hits} = $1+0; next;
-    }
-
-    if (/^score\s+(\S+)\s+(\-*[\d\.]+)$/) {
-      $self->{scores}->{$1} = $2+0.0; next;
-    }
-
-    if (/^report\s*(.*)$/) {
-      $self->{report_template} .= $1."\n"; next;
-    }
-
-    if (/^spamtrap\s*(.*)$/) {
-      $self->{spamtrap_template} .= $1."\n"; next;
-    }
-
-    if (/^razor-config\s*(.*)\s*$/) {
+    if (/^razor[-_]config\s*(.*)\s*$/) {
       $self->{razor_config} = $1; next;
     }
 
-    if (/^whitelist_from\s+(\S+)\s*$/) {
-      push (@{$self->{whitelist_from}}, $1); next;
+    if (/^user[-_]scores[-_]dsn\s+(\S+)$/) {
+      $self->{user_scores_dsn} = $1; next;
     }
-
-    if (/^auto_report_threshold\s+(\d+)$/) {
-      $self->{auto_report_threshold} = $1+0; next;
+    if(/^user[-_]scores[-_]sql[-_]username\s+(\S+)$/) {
+      $self->{user_scores_sql_username} = $1; next;
+    }
+    if(/^user[-_]scores[-_]sql[-_]password\s+(\S+)$/) {
+      $self->{user_scores_sql_password} = $1; next;
     }
 
 failed_line:
@@ -127,7 +220,7 @@ failed_line:
 
 sub add_test {
   my ($self, $name, $text, $type) = @_;
-  if ($name eq '.') { $name = ($self->{unnamed_counter}++); }
+  if ($name eq '.') { $name = ($self->{_unnamed_counter}++); }
   $self->{tests}->{$name} = $text;
   $self->{test_types}->{$name} = $type;
   $self->{scores}->{$name} ||= 1.0;
@@ -152,7 +245,19 @@ sub finish_parsing {
     }
   }
 
-  $self->{tests} = { };		# free it up
+  delete $self->{tests};		# free it up
+}
+
+sub add_to_addrlist {
+  my ($self, $singlelist, $domlist, @addrs) = @_;
+
+  foreach my $addr (@addrs) {
+    if ($addr =~ /^\*\@(\S+)/) {
+      push (@{$domlist}, $1);
+    } else {
+      push (@{$singlelist}, $addr);
+    }
+  }
 }
 
 sub dbg { Mail::SpamAssassin::dbg (@_); }

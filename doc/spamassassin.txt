@@ -9,6 +9,9 @@ OPTIONS
         spool by default. The -P parameter will cause it to pipe the output
         to STDOUT instead.
 
+    -e  Exit with a non-zero error code, if the message is determined to be
+        spam.
+
     -h  Print help message and exit.
 
     -t  Test mode. Pipe message through and add extra report.
@@ -68,13 +71,21 @@ DESCRIPTION
 
 CONFIGURATION FILES
     The rule base, text templates, and rule description text are loaded from
-    the configuration file. The default configuration file, if -c is not
-    specified, is $Config{installsitelib}/spamassassin.cf.
+    the configuration files.
+
+    The default configuration file is
+    $Config{installsitelib}/spamassassin.cf. This file will always be read
+    first.
+
+    /etc/spamassassin.cf (or the file specified with `-c') will be read
+    next, if it exists. This is a good place to add your own site-wide
+    preferences.
 
     The user preferences (such as scores to attach to each rule), are loaded
     from the file specified in the -p argument. If this is not specified,
-    ~/.spamassassin.cf is used if it exists, otherwise
-    $Config{installsitelib}/spamassassin.prefs is used.
+    ~/.spamassassin.cf is used if it exists. `spamassassin' will create this
+    file if it does not exist, using
+    $Config{installsitelib}/spamassassin.prefs as a template.
 
 TAGGING
     The following two sections detail the tagging that takes place for spam
@@ -88,7 +99,8 @@ TAGGING
     The modifications made are as follows:
 
     Subject: header
-        The string `*****SPAM*****' is prepended to the subject.
+        The string `*****SPAM*****' is prepended to the subject, unless the
+        `rewrite_subject 0' configuration option is given.
 
     X-Spam-Status: header
         A string, `Yes, hits=nn required=nn' is set in this header to
@@ -97,12 +109,17 @@ TAGGING
     X-Spam-Flag: header
         Set to `YES'.
 
+    X-Spam-Report: header for spam mails
+        The SpamAssassin report is added to the mail header if the
+        `report_header = 1' configuration option is given.
+
     Content-Type: header
         Set to `text/plain', in order to defang HTML mail or other active
         content that could "call back" to the spammer.
 
     spam mail body text
-        The SpamAssassin report is added to top of the mail message body.
+        The SpamAssassin report is added to top of the mail message body,
+        unless the `report_header 1' configuration option is given.
 
   TAGGING FOR NON-SPAM MAILS
 
@@ -132,7 +149,7 @@ SPAM TRAPPING
     specified in aliases, if you plan to do this; for one thing,
     spamassassin will not run under your user id in this case. If you are
     nervous about this, create a user for spamtrapping, and set up
-    spamassassin in it's .forward file.
+    spamassassin in its .forward file.
 
 INSTALLATION
     The spamassassin command is part of the Mail::SpamAssassin Perl module.

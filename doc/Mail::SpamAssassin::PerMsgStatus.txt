@@ -6,7 +6,7 @@ SYNOPSIS
         'rules_filename'      => '/etc/spamassassin.rules',
         'userprefs_filename'  => $ENV{HOME}.'/.spamassassin.cf'
       });
-      my $mail = Mail::Audit->new();
+      my $mail = Mail::SpamAssassin::MyMailAudit->new();
 
       my $status = $spamtest->check ($mail);
       if ($status->is_spam()) {
@@ -48,17 +48,22 @@ METHODS
 
     $status->rewrite_mail ()
         Rewrite the mail message. This will add headers, and possibly body
-        text, to reflect it's spam or not-spam status.
+        text, to reflect its spam or not-spam status.
 
         The modifications made are as follows:
 
         Subject: header for spam mails
-            The string `*****SPAM*****' is prepended to the subject.
+            The string `*****SPAM*****' is prepended to the subject, unless
+            the `rewrite_subject 0' configuration option is given.
 
         X-Spam-Status: header for spam mails
             A string, `Yes, hits=nn required=nn tests=...' is set in this
             header to reflect the filter status. The keys in this string are
             as follows:
+
+        X-Spam-Report: header for spam mails
+            The SpamAssassin report is added to the mail header if the
+            `report_header = 1' configuration option is given.
 
             hits=nn The number of hits the message triggered.
             required=nn The threshold at which a mail is marked as spam.
@@ -72,12 +77,26 @@ METHODS
 
         spam mail body text
             The SpamAssassin report is added to top of the mail message
-            body.
+            body, unless the `report_header 1' configuration option is
+            given.
 
         X-Spam-Status: header for non-spam mails
             A string, `No, hits=nn required=nn tests=...' is set in this
             header to reflect the filter status. The keys in this string are
             the same as for spam mails (see above).
+
+    $messagestring = $status->get_full_message_as_text ()
+        Returns the mail message as a string, including headers and raw body
+        text.
+
+        If the message has been rewritten using `rewrite_mail()', these
+        changes will be reflected in the string.
+
+        Note: this is simply a helper method which calls methods on the mail
+        message object. It is provided because Mail::Audit uses an unusual
+        (ie. not quite intuitive) interface to do this, and it has been a
+        common stumbling block for authors of scripts which use
+        SpamAssassin.
 
     $status->handle_auto_report ()
         If this mail message has a high enough hit score, report it to

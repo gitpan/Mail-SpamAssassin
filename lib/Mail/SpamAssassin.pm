@@ -4,7 +4,7 @@ Mail::SpamAssassin - Mail::Audit spam detector plugin
 
 =head1 SYNOPSIS
 
-  my $mail = Mail::Audit->new();
+  my $mail = Mail::SpamAssassin::MyMailAudit->new();
 
   my $spamtest = Mail::SpamAssassin->new();
   my $status = $spamtest->check ($mail);
@@ -46,26 +46,28 @@ filtering databases, such as Vipul's Razor ( http://razor.sourceforge.net/ ).
 package Mail::SpamAssassin;
 
 use Mail::SpamAssassin::Conf;
+use Mail::SpamAssassin::ConfSourceSQL;
 use Mail::SpamAssassin::PerMsgStatus;
 use Mail::SpamAssassin::Reporter;
 use Mail::SpamAssassin::Replier;
-use Carp;
+use Mail::SpamAssassin::MyMailAudit;
+
 use File::Basename;
 use File::Path;
 use File::Spec;
 use File::Copy;
 use Cwd;
 use Config;
-use strict;
 
 use vars	qw{
   	@ISA $VERSION $HOME_URL $DEBUG
 	@default_rules_path @default_prefs_path @default_userprefs_path
+	@site_rules_path
 };
 
 @ISA = qw();
 
-$VERSION = "1.3";
+$VERSION = "1.5";
 sub Version { $VERSION; }
 
 $HOME_URL = "http://spamassassin.taint.org/";
@@ -75,18 +77,24 @@ $DEBUG = 0;
 @default_rules_path = qw(
         ./spamassassin.cf
         ../spamassassin.cf
-        /etc/spamassassin.cf
         __installsitelib__/spamassassin.cf
+	__installvendorlib__/spamassassin.cf
+);
+
+@site_rules_path = qw(
+        /etc/spamassassin.cf
+        /etc/mail/spamassassin.cf
 );
     
 @default_prefs_path = qw(
         /etc/spamassassin.prefs
+        ./spamassassin.prefs 
+        ../spamassassin.prefs
         __installsitelib__/spamassassin.prefs
+	__installvendorlib__/spamassassin.prefs
 );
 
 @default_userprefs_path = qw(
-        ./spamassassin.prefs 
-        ../spamassassin.prefs
         ~/.spamassassin.cf
 );
 
@@ -115,7 +123,13 @@ override the settings for C<rules_filename> and C<userprefs_filename>.
 
 =item local_tests_only
 
-If set to 1, no tests that require internet access will be performed.
+If set to 1, no tests that require internet access will be performed. (default:
+0)
+
+=item dont_copy_prefs
+
+If set to 1, the user preferences file will not be created if it doesn't
+already exist. (default: 0)
 
 =back
 
@@ -157,34 +171,46 @@ C<finish()> method on the status objects when you're done with them.
 =cut
 
 sub check {
-  my ($self, $audit) = @_;
+  my ($self, $mail_obj) = @_;
   local ($_);
 
-  $self->init();
-  my $mail = $self->encapsulate_audit ($audit);
-  my $msg = new Mail::SpamAssassin::PerMsgStatus ($self, $mail);
+  $self->init(1);
+  my $mail = $self->encapsulate_mail_object ($mail_obj);
+  my $msg = Mail::SpamAssassin::PerMsgStatus->new($self, $mail);
   $msg->check();
   $msg;
 }
 
 ###########################################################################
 
-=item $f->report_as_spam ($mail)
+=item $f->report_as_spam ($mail, $options)
 
 Report a mail, encapsulated in a C<Mail::Audit> object, as human-verified spam.
 This will submit the mail message to live, collaborative, spam-blocker
 databases, allowing other users to block this message.
 
+Options is an optional reference to a hash of options.  Currently these
+can be:
+
+=over 4
+
+=item dont_report_to_razor
+
+Inhibits reporting of the spam to Razor; useful if you know it's already
+been listed there.
+
+=back
+
 =cut
 
 sub report_as_spam {
-  my ($self, $audit) = @_;
+  my ($self, $mail_obj, $options) = @_;
   local ($_);
 
-  $self->init();
-  my $mail = $self->encapsulate_audit ($audit);
-  my $msg = new Mail::SpamAssassin::Reporter ($self, $mail);
-  $msg->report();
+  $self->init(1);
+  my $mail = $self->encapsulate_mail_object ($mail_obj);
+  my $msg = Mail::SpamAssassin::Reporter->new($self, $mail, $options);
+  $msg->report ();
 }
 
 ###########################################################################
@@ -200,11 +226,11 @@ sender of the reply message.
 =cut
 
 sub reply_with_warning {
-  my ($self, $audit, $replysender) = @_;
+  my ($self, $mail_obj, $replysender) = @_;
   local ($_);
 
-  $self->init();
-  my $mail = $self->encapsulate_audit ($audit);
+  $self->init(1);
+  my $mail = $self->encapsulate_mail_object ($mail_obj);
   my $msg = new Mail::SpamAssassin::Replier ($self, $mail);
   $msg->reply ($replysender);
 }
@@ -219,18 +245,18 @@ as the report, or X-Spam-Status headers) stripped.
 =cut
 
 sub remove_spamassassin_markup {
-  my ($self, $audit) = @_;
+  my ($self, $mail_obj) = @_;
   local ($_);
 
-  $self->init();
-  my $mail = $self->encapsulate_audit ($audit);
+  $self->init(1);
+  my $mail = $self->encapsulate_mail_object ($mail_obj);
   my $hdrs = $mail->get_all_headers();
 
   # remove DOS line endings
   $hdrs =~ s/\r//gs;
 
   # de-break lines on SpamAssassin-modified headers.
-  $hdrs =~ s/(\n(?:X-Spam|Subject)[^\n]+?)\n[ \t]+/$1 /gs;
+  1 while $hdrs =~ s/(\n(?:X-Spam|Subject)[^\n]+?)\n[ \t]+/$1 /gs;
 
   # reinstate the old content type
   if ($hdrs =~ /^X-Spam-Prev-Content-Type: /m) {
@@ -282,62 +308,188 @@ sub remove_spamassassin_markup {
 }
 
 ###########################################################################
+
+=item $f->read_scoreonly_config ($filename)
+
+Read a configuration file and parse only scores from it.  This is used
+to safely allow multi-user daemons to read per-user config files
+without having to use C<setuid()>.
+
+=cut
+
+sub read_scoreonly_config {
+  my ($self, $filename) = @_;
+
+  if (!open(IN,"<$filename")) {
+    warn "read_scoreonly_config: cannot open \"$filename\"\n";
+    return;
+  }
+  my $text = join ('',<IN>);
+  close IN;
+
+  $self->{conf}->parse_scores_only ($text);
+}
+
+###########################################################################
+
+=item $f->load_scoreonly_sql ($username)
+
+Read configuration paramaters from SQL database and parse scores from it.  This
+will only take effect if the perl C<DBI> module is installed, and the
+configuration parameters C<user_scores_dsn>, C<user_scores_sql_username>, and
+C<user_scores_sql_password> are set correctly.
+
+=cut
+
+sub load_scoreonly_sql {
+  my ($self, $username) = @_;
+
+  my $src = Mail::SpamAssassin::ConfSourceSQL->new ($self);
+  $src->load($username);
+}
+###########################################################################
+
+=item $f->compile_now ()
+
+Compile all patterns, load all configuration files, and load all
+possibly-required Perl modules.
+
+Normally, Mail::SpamAssassin uses lazy evaluation where possible, but if you
+plan to fork() or start a new perl interpreter thread to process a message,
+this is suboptimal, as each process/thread will have to perform these actions.
+
+Call this function in the master thread or process to perform the actions
+straightaway, so that the sub-processes will not have to.
+
+Note that this will initialise the SpamAssassin configuration without reading
+the per-user configuration file; it assumes that you will call
+C<read_scoreonly_config> at a later point.
+
+=cut
+
+sub compile_now {
+  my ($self) = @_;
+
+  # note: this may incur network access. Good.  We want to make sure
+  # as much as possible is preloaded!
+  my @testmsg = ("From: ignore\@compiling.spamassassin.taint.org\n",
+  			"\n", "x\n");
+
+  dbg ("ignore: test message to precompile patterns and load modules");
+  $self->init(0);
+  my $mail = Mail::SpamAssassin::MyMailAudit->new(data => \@testmsg);
+  $self->check($mail)->finish();
+
+  # load SQL modules now as well
+  my $dsn = $self->{conf}->{user_scores_dsn};
+  if ($dsn ne '') {
+    Mail::SpamAssassin::ConfSourceSQL::load_modules();
+  }
+
+  1;
+}
+
+###########################################################################
 # non-public methods.
 
 sub init {
-  my ($self) = @_;
+  my ($self, $use_user_pref) = @_;
 
   if ($self->{_initted}) { return; }
   $self->{_initted} = 1;
 
+  #fix spamd reading root prefs file
+  unless (defined $use_user_pref) {
+    $use_user_pref = 1;
+  }
+
   if (!defined $self->{config_text}) {
     $self->{config_text} = '';
 
-    my $fname = $self->{rules_filename};
-    if (!defined $fname) {
-      $fname = $self->first_existing_path (@default_rules_path);
-    }
-    dbg ("using \"$fname\" for rules file");
+    my $fname = $self->first_existing_path (@default_rules_path);
+    $self->{config_text} .= $self->read_cf ($fname, 'default rules file');
 
-    if (defined $fname) {
-      open (IN, "<".$fname) or
-		  warn "cannot open \"$fname\"\n";
-      $self->{config_text} .= join ('', <IN>);
-      close IN;
-    }
+    $fname = $self->{rules_filename};
+    $fname ||= $self->first_existing_path (@site_rules_path);
+    $self->{config_text} .= $self->read_cf ($fname, 'site rules file');
 
-    $fname = $self->{userprefs_filename};
-    if (!defined $fname) {
-      $fname = $self->first_existing_path (@default_userprefs_path);
-      dbg ("using \"$fname\" for user prefs file");
+    if ( $use_user_pref != 0 ) {
+      $fname = $self->{userprefs_filename};
+      $fname ||= $self->first_existing_path (@default_userprefs_path);
 
-      if (!-f $fname) {
-	# copy in the default one for later editing
+      if (defined $fname) {
+	dbg ("using \"$fname\" for user prefs file");
 
-	my $defprefs = $self->first_existing_path
-				 (@Mail::SpamAssassin::default_prefs_path);
-	use File::Copy;
-	if (copy ($defprefs, $fname)) {
-	  warn "Created user preferences file: $fname\n";
-	} else {
-	  warn "Failed to create user preferences file\n".
-		    "\"$fname\" from default \"$defprefs\".\n";
-	}
+        if (!-f $fname && !$self->create_default_prefs($fname)) {
+          warn "Failed to create default prefs file $fname\n";
+        }
       }
-    }
 
-    if (defined $fname) {
-      open (IN, "<".$fname) or
-		  warn "cannot open \"$fname\"\n";
-      $self->{config_text} .= join ('', <IN>);
-      close IN;
+      $self->{config_text} .= $self->read_cf ($fname, 'user prefs');
     }
+  }
+
+  if ($self->{config_text} !~ /\S/) {
+    warn "No configuration text or files found! Please check your setup.\n";
   }
 
   $self->{conf}->parse_rules ($self->{config_text});
   $self->{conf}->finish_parsing ();
 
-  # TODO -- open DNS cache etc.
+  delete $self->{config_text};
+
+  # TODO -- open DNS cache etc. if necessary
+}
+
+sub read_cf {
+  my ($self, $fname, $desc) = @_;
+
+  return '' unless defined ($fname);
+
+  dbg ("using \"$fname\" for $desc");
+  my $txt = '';
+  if (-f $fname && -s _) {
+    open (IN, "<".$fname) or warn "cannot open \"$fname\"\n";
+    $txt = join ('', <IN>);
+    close IN;
+  }
+  return $txt;
+}
+
+=item $f->create_default_prefs ()
+
+Copy default prefs file into home directory for later use and modification.
+
+=cut
+
+sub create_default_prefs {
+  my ($self,$fname,$user) = @_;
+
+  if (!$self->{dont_copy_prefs} && !-f $fname)
+  {
+    # copy in the default one for later editing
+    my $defprefs = $self->first_existing_path
+			(@Mail::SpamAssassin::default_prefs_path);
+    use File::Copy;
+
+    if (copy ($defprefs, $fname)) {
+      if ( $< == 0 && $> == 0 && defined $user) {
+	# chown it
+	my ($uid,$gid) = (getpwnam($user))[2,3];
+	unless (chown $uid, $gid, $fname) {
+	   warn "Couldn't chown $fname to $uid:$gid for $user\n";
+	}
+      }
+     warn "Created user preferences file: $fname\n";
+     return(1);
+
+   } else {
+     warn "Failed to create user preferences file\n".
+			 "\"$fname\" from default \"$defprefs\".\n";
+   }
+ }
+
+ return(0);
 }
 
 ###########################################################################
@@ -354,6 +506,7 @@ sub sed_path {
   my $self = shift;
   my $path = shift;
   $path =~ s/__installsitelib__/$Config{installsitelib}/gs;
+  $path =~ s/__installvendorlib__/$Config{installvendorlib}/gs;
   $path =~ s/^\~([^\/]*)/$self->expand_name($1)/es;
   $path;
 }
@@ -370,14 +523,21 @@ sub first_existing_path {
 
 ###########################################################################
 
-sub encapsulate_audit {
-  my ($self, $audit) = @_;
+sub encapsulate_mail_object {
+  my ($self, $mail_obj) = @_;
 
   # first, check to see if this is not actually a Mail::Audit object;
   # it could also be an already-encapsulated Mail::Audit wrapped inside
   # a Mail::SpamAssassin::Message.
-  if ($audit->{is_spamassassin_wrapper_object}) {
-    return $audit;
+  if ($mail_obj->{is_spamassassin_wrapper_object}) {
+    return $mail_obj;
+  }
+  
+  if ($self->{use_my_mail_class}) {
+    my $class = $self->{use_my_mail_class};
+    (my $file = $class) =~ s/::/\//g;
+    require "$file.pm";
+    return $class->new($mail_obj);
   }
 
   if (!defined $self->{mail_audit_supports_encapsulation}) {
@@ -385,7 +545,7 @@ sub encapsulate_audit {
     # message object.
     my ($hdr, $val);
     foreach my $hdrtest (qw(From To Subject Message-Id Date Sender)) {
-      $val = $audit->get ($hdrtest);
+      $val = $mail_obj->get ($hdrtest);
       if (defined $val) { $hdr = $hdrtest; last; }
     }
 
@@ -394,23 +554,27 @@ sub encapsulate_audit {
     }
 
     # now try using one of the new methods...
-    if (eval q{
-		  $audit->replace_header ($hdr, $val);
-		  1;
-	  })
+    eval { $mail_obj->replace_header ($hdr, $val); };
+
+    if ($@)
     {
-      dbg ("using Mail::Audit message-encapsulation code");
-      $self->{mail_audit_supports_encapsulation} = 1;
-    } else {
       dbg ("using Mail::Audit exposed-message-object code");
       $self->{mail_audit_supports_encapsulation} = 0;
+    } else {
+      dbg ("using Mail::Audit message-encapsulation code");
+      $self->{mail_audit_supports_encapsulation} = 1;
     }
   }
 
   if ($self->{mail_audit_supports_encapsulation}) {
-    return new Mail::SpamAssassin::EncappedMessage ($self, $audit);
+    require Mail::SpamAssassin::EncappedMessage;
+    # warning: Changed indirect object syntax here because of new() function 
+    # above which may bite us in the foot some time. See Damian Conway's book for details
+    return Mail::SpamAssassin::EncappedMessage->new($mail_obj);
+
   } else {
-    return new Mail::SpamAssassin::ExposedMessage ($self, $audit);
+    require Mail::SpamAssassin::ExposedMessage;
+    return Mail::SpamAssassin::ExposedMessage->new($mail_obj);
   }
 }
 

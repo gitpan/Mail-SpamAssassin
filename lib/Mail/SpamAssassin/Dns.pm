@@ -23,15 +23,44 @@ $IS_DNS_AVAILABLE = undef;
 
 ###########################################################################
 
+BEGIN {
+  # some trickery. Load these modules right here, if possible; that way, if
+  # the module exists, we'll get it loaded now.  Very useful to avoid attempted
+  # loads later (which will happen).  If we do a fork(), we could wind up
+  # attempting to load these modules in *every* subprocess.
+  #
+  # We turn off strict and warnings, because Net::DNS and Razor both contain
+  # crud that -w complains about (perl 5.6.0).  Not that this seems to work,
+  # mind ;)
+
+  no strict;
+  local ($^W) = 0;
+
+  eval {
+    require Net::DNS;
+    require Net::DNS::Resolver;
+  };
+  eval {
+    require Razor::Client;
+  };
+  eval {
+    require MIME::Base64;
+  };
+};
+
+###########################################################################
+
 sub do_rbl_lookup {
-  my ($self, $dom, $ip, $found) = @_;
+  my ($self, $set, $dom, $ip, $found) = @_;
   return $found if $found;
 
   my $q = $self->{res}->search ($dom);
+
   if ($q) {
     foreach my $rr ($q->answer) {
       if ($rr->type eq "A") {
 	my $addr = $rr->address();
+	dbg ("record found for $dom = $addr");
 
 	if ($addr ne '127.0.0.2' && $addr ne '127.0.0.3') {
 	  $self->test_log ("RBL check: found relay ".$dom.", type: ".$addr);
@@ -41,8 +70,8 @@ sub do_rbl_lookup {
 	  $self->test_log ("RBL check: found relay ".$dom);
 	}
 
-	$self->{rbl_IN_As_found} .= $addr.' ';
-	$self->{rbl_matches_found} .= $ip.' ';
+	$self->{$set}->{rbl_IN_As_found} .= $addr.' ';
+	$self->{$set}->{rbl_matches_found} .= $ip.' ';
 	return ($found+1);
       }
     }
@@ -96,19 +125,24 @@ sub init_rbl_check_reserved_ips {
 
 sub is_razor_available {
   my ($self) = @_;
-  my $razor_avail = 0;
+
+  if ($self->{main}->{local_tests_only}) {
+    dbg ("local tests only, ignoring Razor");
+    return 0;
+  }
 
   eval {
     require Razor::Client;
-    require Razor::Signature; 
-    require Razor::String;
-    $razor_avail = 1;
-    1;
   };
-
-  dbg ("is Razor available? $razor_avail");
-
-  return $razor_avail;
+  
+  if ($@) {
+    dbg ("Razor is not available");
+    return 0;
+  }
+  else {
+    dbg ("Razor is available");
+    return 1;
+  }
 }
 
 sub razor_lookup {
@@ -125,21 +159,55 @@ sub razor_lookup {
   my $response = undef;
   my $config = $self->{conf}->{razor_config};
   my %options = (
-    # 'debug'	=> 1
+    'debug'	=> $Mail::SpamAssassin::DEBUG
   );
 
-  if (!eval q{
-    use Razor::Client;
-    use Razor::Signature; 
-    my $rc = new Razor::Client ($config, %options);
-    $response = $rc->check (\@msg);
-  1;})
-  {
-    warn ("$! $@") unless ($@ eq "timeout\n");
-    warn "razor check timed out after $timeout secs.\n";
+  # razor also debugs to stdout. argh. fix it to stderr...
+  if ($Mail::SpamAssassin::DEBUG) {
+    open (OLDOUT, ">&STDOUT");
+    open (STDOUT, ">&STDERR");
   }
 
-  if ($response) { return 1; }
+  eval {
+    require Razor::Client;
+    require Razor::Agent;
+    local ($^W) = 0;		# argh, warnings in Razor
+
+    my $rc = Razor::Client->new ($config, %options);
+    die "undefined Razor::Client\n" if (!$rc);
+
+    local $SIG{ALRM} = sub { die "alarm\n" };
+    alarm 10;
+
+    if ($Razor::Client::VERSION >= 1.12) {
+      my $respary = $rc->check ('spam' => \@msg);
+      # response can be "0" or "1". there can be many responses.
+      # so if we get 5 responses, and one of them's 1, we
+      # wind up with "00010", which +0 below turns to 10, ie. != 0.
+      for my $resp (@$respary) { $response .= $resp; }
+
+    } else {
+      $response = $rc->check (\@msg);
+    }
+
+    alarm 0;
+  };
+
+  if ($@) {
+    if ($@ =~ /alarm/) {
+      warn "razor check timed out after $timeout secs.\n";
+    } else {
+      warn ("razor check skipped: $! $@");
+    }
+  }
+
+  # razor also debugs to stdout. argh. fix it to stderr...
+  if ($Mail::SpamAssassin::DEBUG) {
+    open (STDOUT, ">&OLDOUT");
+    close OLDOUT;
+  }
+
+  if ((defined $response) && ($response+0)) { return 1; }
   return 0;
 }
 
@@ -151,14 +219,15 @@ sub load_resolver {
   if (defined $self->{res}) { return 1; }
   $self->{no_resolver} = 1;
 
-  eval '
-    use Net::DNS;
-    $self->{res} = new Net::DNS::Resolver;
+  eval {
+    require Net::DNS;
+    $self->{res} = Net::DNS::Resolver->new;
     if (defined $self->{res}) {
       $self->{no_resolver} = 0;
     }
     1;
-  ';   #  or warn "eval failed: $@ $!\n";
+  };   #  or warn "eval failed: $@ $!\n";
+
   dbg ("is Net::DNS::Resolver unavailable? $self->{no_resolver}");
 
   return (!$self->{no_resolver});
@@ -171,14 +240,16 @@ sub lookup_mx {
   my $ret = 0;
 
   dbg ("looking up MX for '$dom'");
-  eval '
-    if (mx ($self->{res}, $dom)) { $ret = 1; }
-    1;
-  ' or sa_die (71, "MX lookup died: $@ $!\n");
-  # 71 == EX_OSERR.  MX lookups are not supposed to crash and burn!
+
+  eval {
+    if (Net::DNS::mx ($self->{res}, $dom)) { $ret = 1; }
+  };
+  if ($@) {
+    # 71 == EX_OSERR.  MX lookups are not supposed to crash and burn!
+    sa_die (71, "MX lookup died: $@ $!\n");
+  }
 
   dbg ("MX for '$dom' exists? $ret");
-
   return $ret;
 }
 
@@ -190,6 +261,10 @@ sub is_dns_available {
   $IS_DNS_AVAILABLE = 0;
   goto done if ($self->{main}->{local_tests_only});
   goto done unless $self->load_resolver();
+
+  # TODO: retry every now and again if we get this far, but the
+  # next test fails?  could be because the ethernet cable has
+  # simply fallen out ;)
   goto done unless $self->lookup_mx ($EXISTING_DOMAIN);
 
   $IS_DNS_AVAILABLE = 1;

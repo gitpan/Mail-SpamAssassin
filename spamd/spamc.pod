@@ -7,7 +7,7 @@ spamc - client for spamd
 
 =over
 
-=item spamc [-d host] [-p port] [-h]
+=item spamc [-d host] [-p port] [-s max_size] [-u username] [-h] [-f]
 
 =back
 
@@ -15,17 +15,36 @@ spamc - client for spamd
 
 =over
 
-=item B<-h>
-
-Print this help message and terminate without action
-
 =item B<-d> I<host>
 
 Connect to spamd server on given host
 
+=item B<-f>
+
+Cause spamc to safe-failover if it can't connect to spamd -- what this means
+is that in case spamc fails to connect to spamd, it will not return with an
+exitcode set, it will instead dump the original message to stdout, allowing
+the message to be delivered, albeit unscanned for spam.  Without this flag,
+connection failures to spamd will cause message delivery failures.
+Even with this flag set however, if spamc connects successfully, and then
+encounters an error at a later stage of communication, it will still return
+an exitcode.
+
+=item B<-h>
+
+Print this help message and terminate without action
+
 =item B<-p> I<port>
 
 Connect to spamd server listening on given port
+
+=item B<-s> I<max_size>
+
+Set the maximum message size which will be sent to spamd -- any bigger than this threshold and the message will be returned unprocessed.  Note that the default size is 250k, so if spamc gets handed a message bigger than this, it won't be passed to spamd.  The size is specified in bytes, and if you send it a negative number, things are quite likely to break very hard.
+
+=item B<-u> I<username>
+
+This argument has been obsoleted.  To have spamd use per-user-config files, run spamc as the user whose config files spamd should load.
 
 =back
 

@@ -1,3 +1,618 @@
+2001-12-03 02:34  jmason
+
+	* MANIFEST.SKIP: renamed ChangeLog *back* to Changes; hey Craig, I
+	had stuff relying on that ;)
+
+2001-12-03 02:32  jmason
+
+	* Makefile.PL, spamassassin.spec: updated spec file for RH7.1, and
+	1.5
+
+2001-12-03 02:09  jmason
+
+	* Changes: let's see if Changes now works
+
+2001-12-03 02:06  jmason
+
+	* Changes, Changes: [no log message]
+
+2001-12-03 01:59  jmason
+
+	* Makefile.PL, t/SATest.pm: spamd tests now on diff port,
+	Makefile.PL gives reassuring anti-warning
+
+2001-12-03 01:49  jmason
+
+	* ChangeLog, Changes: changes file added
+
+2001-12-02 17:41  hughescr
+
+	* spamd/: spamc.pod, spamd.raw: Doc updates
+
+2001-12-02 07:16  jmason
+
+	* spamassassin.cf, spamd/spamd.raw: [no log message]
+
+2001-12-02 05:05  jmason
+
+	* spamassassin.prefs: added note about terse report for headers
+
+2001-12-02 04:48  jmason
+
+	* filterproxy/: README-SMARTHOST.TXT, README.TXT, SmartHost.pm,
+	filterproxy.pl: added filterproxy
+
+2001-12-02 04:47  jmason
+
+	* spamassassin.cf, lib/Mail/SpamAssassin/EvalTests.pm: whoops,
+	broke the PORN test
+
+2001-12-02 04:45  jmason
+
+	* lib/Mail/SpamAssassin/Conf.pm: added support for using either -
+	or _ in config lines
+
+2001-12-02 04:42  jmason
+
+	* spamassassin.cf, lib/Mail/SpamAssassin.pm,
+	lib/Mail/SpamAssassin/PerMsgStatus.pm: added terse-report support
+	from Thomas Hurst
+
+2001-12-02 04:24  jmason
+
+	* spamd/spamd.raw: added quick dont-copy-prefs patch from Duncan
+	Findlay
+
+2001-12-02 04:22  jmason
+
+	* lib/Mail/SpamAssassin.pm: added support for installvendorlib
+
+2001-12-02 04:21  jmason
+
+	* spamassassin.prefs, lib/Mail/SpamAssassin/Conf.pm,
+	lib/Mail/SpamAssassin/PerMsgStatus.pm: added terse-report support
+	from Thomas Hurst
+
+2001-12-02 04:21  jmason
+
+	* License, README: updated license to use current perl lic
+
+2001-12-02 04:13  jmason
+
+	* spamassassin.cf: added new tests
+
+2001-12-02 04:07  jmason
+
+	* spamassassin.cf: removal instructions
+
+2001-12-02 04:02  jmason
+
+	* spamassassin.cf: added more porn
+
+2001-12-02 03:02  jmason
+
+	* lib/Mail/SpamAssassin/: EvalTests.pm, PerMsgStatus.pm: fixed
+	Trey's double-checking bug
+
+2001-11-30 05:17  jmason
+
+	* lib/Mail/SpamAssassin/EvalTests.pm: dns mx test was not working.
+	fixed
+
+2001-11-30 04:59  jmason
+
+	* MANIFEST, spamd/debian-rc-script.sh, spamd/debian-rc-spamd.conf:
+	added updated debian scripts
+
+2001-11-30 03:50  jmason
+
+	* spamassassin.cf: univ dips tweaked
+
+2001-11-30 03:46  jmason
+
+	* README, spamassassin.cf, spamassassin.prefs,
+	lib/Mail/SpamAssassin/Conf.pm, lib/Mail/SpamAssassin/EvalTests.pm,
+	lib/Mail/SpamAssassin/Locales.pm,
+	lib/Mail/SpamAssassin/PerMsgStatus.pm, spamd/debian-rc-script.sh: a
+	variety of minor tweaks contributed; also Debian init.d script from
+	Duncan Findlay
+
+2001-11-29 00:41  jmason
+
+	* lib/Mail/SpamAssassin/EvalTests.pm: added lc call to uniq id
+	check
+
+2001-11-29 00:36  jmason
+
+	* spamassassin.cf: rescored whitelist
+
+2001-11-28 05:27  jmason
+
+	* lib/Mail/: SpamAssassin.pm, SpamAssassin/Dns.pm: added check for
+	any config
+
+2001-11-28 04:03  jmason
+
+	* sql/spamassassin.sql: fix to sql from Justin England
+
+2001-11-28 04:03  jmason
+
+	* lib/Mail/SpamAssassin/: Conf.pm, ConfSourceSQL.pm,
+	PerMsgStatus.pm: required_hits fix, maybe, and a patch from
+	ConfSourceSQL from Justin England
+
+2001-11-27 20:58  hughescr
+
+	* masses/mass-check: Oops, left in debug line
+
+2001-11-27 20:41  hughescr
+
+	* masses/mass-check: Revert -- seems to break when there is no
+	space in pathname!
+
+2001-11-27 20:26  hughescr
+
+	* masses/mass-check: Mail folders with spaces in name
+
+2001-11-26 06:47  jmason
+
+	* README, lib/Mail/SpamAssassin.pm: README updated
+
+2001-11-26 01:45  jmason
+
+	* MANIFEST, lib/Mail/SpamAssassin/PerMsgStatus.pm: added
+	get_full_message_as_text() helper method
+
+2001-11-26 01:27  jmason
+
+	* spamd/: redhat-rc-script.sh, solaris-rc-script.sh, spamassassin:
+	added skod's solaris rc script, renamed Craig's rh one
+
+2001-11-26 00:58  jmason
+
+	* MANIFEST, qmail/README, qmail/qmail-scanner.patch: added Kobe
+	Lenjou's patch for qmail support
+
+2001-11-25 23:59  jmason
+
+	* spamassassin.cf, lib/Mail/SpamAssassin/EvalTests.pm: updated
+	scores
+
+2001-11-23 05:08  jmason
+
+	* masses/continual_evolve.sh: avoid overwrites
+
+2001-11-22 04:23  jmason
+
+	* spamassassin.cf, spamassassin.prefs,
+	lib/Mail/SpamAssassin/Conf.pm, lib/Mail/SpamAssassin/Dns.pm,
+	lib/Mail/SpamAssassin/EvalTests.pm,
+	lib/Mail/SpamAssassin/Reporter.pm, spamd/spamd.raw: added
+	skip_rbl_checks
+
+2001-11-22 03:14  jmason
+
+	* masses/: continual_evolve.sh, evolve.cxx,
+	kill_continual_evolve.sh: added kill_continual_evolve.sh
+
+2001-11-22 03:09  jmason
+
+	* masses/: RUNME, evolve.cxx: updated sleep
+
+2001-11-22 02:41  jmason
+
+	* masses/evolve.cxx: added sleep
+
+2001-11-22 00:40  jmason
+
+	* ninjalogo.xcf: updated logo
+
+2001-11-21 05:16  jmason
+
+	* ninjalogo.xcf, spamassassin.cf, masses/Makefile,
+	masses/logs-to-c, masses/mk-baseline-results,
+	masses/score-ranges-from-freqs: new GA-evolved scores;	73
+	false-pos / 2109 false-neg old,  62 / 1784 new.  These are
+	hopefully more aggressively optimised to produce good results with
+	min false positives and false negatives
+
+2001-11-20 11:13  jmason
+
+	* ninjalogo.xcf: added new logo image
+
+2001-11-20 11:11  jmason
+
+	* spamassassin.cf, lib/Mail/SpamAssassin/Conf.pm: added clear
+	commands, to avoid doubled reports
+
+2001-11-20 04:41  jmason
+
+	* MANIFEST, spamassassin.cf, masses/score-ranges-from-freqs: some
+	test tweaks to reduce false-pozzes
+
+2001-11-20 03:57  jmason
+
+	* lib/Mail/SpamAssassin/PerMsgStatus.pm: added workaround to avoid
+	scanning pure-attachment mails
+
+2001-11-20 03:53  jmason
+
+	* spamassassin.cf, lib/Mail/SpamAssassin/Dns.pm,
+	lib/Mail/SpamAssassin/EvalTests.pm,
+	lib/Mail/SpamAssassin/Locales.pm,
+	lib/Mail/SpamAssassin/Reporter.pm, masses/Makefile, masses/RUNME,
+	masses/evolve.cxx, masses/logs-to-c, masses/mass-check: some fixes
+	for false-positives
+
+2001-11-19 06:17  jmason
+
+	* spamd/: README, spamd.raw: updated spamd/README with info about
+	init.d script; also moved daemonize call
+
+2001-11-19 06:10  jmason
+
+	* spamd/spamassassin: fixed minor typo
+
+2001-11-19 06:09  jmason
+
+	* spamassassin.cf, lib/Mail/SpamAssassin/EvalTests.pm,
+	spamd/spamd.raw: added fallback-to-nobody from Kelsey; fix for RBL
+	bug from Sidney Markowitz
+
+2001-11-19 00:21  hughescr
+
+	* spamassassin.spec: Added RPM spec file
+
+2001-11-18 21:45  hughescr
+
+	* ChangeLog, Changes: Renamed Changes to ChangeLog for RPM
+
+2001-11-18 21:37  hughescr
+
+	* t/reportheader.t: Too many tests
+
+2001-11-18 20:56  hughescr
+
+	* spamd/: spamassassin, spamd.raw: Changes for SysV startup script
+
+2001-11-16 03:20  jmason
+
+	* MANIFEST, MANIFEST.SKIP, README, lib/Mail/SpamAssassin/Conf.pm,
+	t/SATest.pm, t/reportheader.t: fixed report_header, added test
+
+2001-11-15 07:12  hughescr
+
+	* spamd/: spamc.c, spamc.pod: Added size limit to spamc
+
+2001-11-15 06:21  jmason
+
+	* Changes, lib/Mail/SpamAssassin.pm: RELEASED 1.4
+
+2001-11-15 04:12  jmason
+
+	* spamd/spamd.raw: added safe setuid operation to spamd, -u switch
+
+2001-11-15 02:35  jmason
+
+	* MANIFEST, README, spamassassin.cf, lib/Mail/SpamAssassin.pm,
+	lib/Mail/SpamAssassin/Dns.pm, lib/Mail/SpamAssassin/EvalTests.pm,
+	lib/Mail/SpamAssassin/PerMsgStatus.pm, spamd/spamd.raw: fixed
+	Skod's bug; RBL checks were being run inconstently
+
+2001-11-15 01:44  jmason
+
+	* lib/Mail/SpamAssassin/: Dns.pm, Reporter.pm: updated SA to
+	support Razor 1.13
+
+2001-11-13 23:42  jmason
+
+	* spamd/spamc.c: removed srand() call, would slow things down
+
+2001-11-13 01:22  jmason
+
+	* sql/README: fixed typo
+
+2001-11-13 01:22  jmason
+
+	* spamassassin.cf: added REMOVE_PAGE test
+
+2001-11-12 04:43  jmason
+
+	* spamassassin.cf: improved MSGID_NO_HOST and INVALID_MSGID tests
+	to catch general bad msgids
+
+2001-11-12 04:41  jmason
+
+	* spamassassin.cf: improved NO_HOST test to catch general bad
+	msgids
+
+2001-11-12 04:17  jmason
+
+	* spamassassin.cf, lib/Mail/SpamAssassin/EvalTests.pm,
+	lib/Mail/SpamAssassin/EvalTests.pm: added missing-headers test
+
+2001-11-12 03:51  jmason
+
+	* MANIFEST: cosmetic. sorted MANIFEST
+
+2001-11-12 03:48  jmason
+
+	* MANIFEST, README, sql/README, sql/spamassassin.sql: added SQL
+	stuff from JE
+
+2001-11-12 03:41  jmason
+
+	* MANIFEST: dist updated
+
+2001-11-12 03:39  jmason
+
+	* README, spamassassin.raw, lib/Mail/SpamAssassin.pm: fixed config
+	file reading to use /etc as well as site_perl
+
+2001-11-12 03:20  jmason
+
+	* spamassassin.cf, spamassassin.prefs,
+	lib/Mail/SpamAssassin/Conf.pm, lib/Mail/SpamAssassin/EvalTests.pm,
+	spamassassin.cf: whitelist patterns and blacklists added
+
+2001-11-12 02:25  jmason
+
+	* README, spamassassin.cf: added recently contributed tests
+
+2001-11-08 07:54  jmason
+
+	* spamassassin.cf, lib/Mail/SpamAssassin.pm,
+	lib/Mail/SpamAssassin/Conf.pm,
+	lib/Mail/SpamAssassin/ConfSourceSQL.pm, spamd/spamd.raw,
+	t/SATest.pm: added SQL config source code from Justin England
+
+2001-11-08 07:26  jmason
+
+	* spamd/spamd.raw, t/SATest.pm, t/spamd.t, t/spamd_port.t: added
+	spamd tests
+
+2001-11-08 06:59  jmason
+
+	* spamd/spamd.raw: set_username method removed
+
+2001-11-08 06:51  jmason
+
+	* spamassassin.prefs, spamd/spamd.raw: auto_report_threshold
+	doubled for paranoia
+
+2001-11-08 06:38  jmason
+
+	* lib/Mail/SpamAssassin/: Dns.pm, Reporter.pm: fixed 'Use of
+	uninitialized value at lib/Mail/SpamAssassin/Dns.pm line 191.'
+
+2001-11-08 06:36  jmason
+
+	* spamassassin.prefs, lib/Mail/SpamAssassin/Conf.pm,
+	lib/Mail/SpamAssassin/PerMsgStatus.pm, spamd/spamd.raw: patch from
+	Charlie Watts: mime defanging now optional, spamd now has
+	commandline switches to disable looking for user config files, and
+	the ability to specify syslog facility on cmd line
+
+2001-11-07 06:01  jmason
+
+	* lib/Mail/SpamAssassin/: Dns.pm, Reporter.pm: razor 1.12 support
+	added
+
+2001-11-07 05:19  jmason
+
+	* spamassassin.cf: added strong buy test
+
+2001-11-07 05:16  jmason
+
+	* lib/Mail/SpamAssassin/Dns.pm: added check for Razor 1.12; doesn't
+	support it yet
+
+2001-11-07 04:37  jmason
+
+	* spamd/: README, spamd.raw: update for username stuff
+
+2001-11-07 04:23  jmason
+
+	* spamassassin.raw, spamd/spamc.c, t/SATest.pm, t/forged_rcvd.t,
+	t/data/spam/002: auto-add of User header by spamc
+
+2001-11-07 04:02  jmason
+
+	* spamassassin.cf: updated EXCUSE_7 pattern from Justin England
+
+2001-11-05 08:19  jmason
+
+	* README, spamassassin.cf, lib/Mail/SpamAssassin/PerMsgStatus.pm,
+	spamd/spamd.raw: added patch to spamd for Kelsey
+
+2001-11-05 04:31  jmason
+
+	* spamassassin.cf, spamassassin.prefs,
+	lib/Mail/SpamAssassin/Conf.pm, lib/Mail/SpamAssassin/EvalTests.pm,
+	lib/Mail/SpamAssassin/Locales.pm: added ok_locales setting
+
+2001-11-05 02:25  jmason
+
+	* spamd/spamd.raw: added patch from Charlie Watts for broken perl
+	signal handling
+
+2001-11-05 02:23  jmason
+
+	* lib/Mail/SpamAssassin.pm: added patch from Kelsey: improvements
+	for per-user spamd/spamc functionality
+
+2001-11-05 00:37  jmason
+
+	* spamassassin.cf: updated cf
+
+2001-11-02 02:01  jmason
+
+	* lib/Mail/SpamAssassin/Dns.pm: oops, 5.6ism checked in
+
+2001-11-01 03:59  jmason
+
+	* spamassassin.raw, lib/Mail/SpamAssassin/Conf.pm,
+	lib/Mail/SpamAssassin/PerMsgStatus.pm: rewrite_subject and
+	report_header support contributed by David Hull
+
+2001-11-01 02:34  jmason
+
+	* lib/Mail/SpamAssassin/PerMsgStatus.pm: added fix for hang on msgs
+	with really long lines
+
+2001-11-01 02:07  jmason
+
+	* spamd/spamd.raw: fixed typo noted by Kelsey
+
+2001-11-01 02:06  jmason
+
+	* lib/Mail/SpamAssassin.pm, lib/Mail/SpamAssassin/Conf.pm,
+	lib/Mail/SpamAssassin/Dns.pm, lib/Mail/SpamAssassin/EvalTests.pm,
+	lib/Mail/SpamAssassin/PerMsgStatus.pm,
+	lib/Mail/SpamAssassin/Replier.pm, masses/mass-check,
+	spamd/spamd.raw, t/strip2.t: incorporated speed patch from Matt
+	Sergeant, added compile_now() method to Mail::SpamAssassin to help
+	forking servers, fixed side-effect due to Razor bug in spamd, added
+	protocol error warning to spamd
+
+2001-11-01 01:48  hughescr
+
+	* spamd/spamd.raw: Fixed docs
+
+2001-11-01 01:46  hughescr
+
+	* spamd/spamd.raw: First pass at command-line arg for authorized
+	host.  Must be list of IP addresses for now.
+
+2001-11-01 01:28  hughescr
+
+	* lib/Mail/SpamAssassin.pm, spamd/spamd.raw: * Moved eval{require}
+	stuff into lib initialization in SpamAssassin.pm from spamd * Check
+	for existance of user config file before trying to load it
+
+2001-11-01 00:17  jmason
+
+	* Changes, spamassassin.cf: fixed some false-pos scores
+
+2001-10-31 23:22  jmason
+
+	* spamd/spamd.raw: other spamd bugs fixed. bad day yesterday I
+	think :(
+
+2001-10-31 23:20  jmason
+
+	* fixpath.pl, spamassassin.cf: fixed newline on #! line deletion
+
+2001-10-31 03:10  jmason
+
+	* spamassassin.cf, spamd/spamd.raw: added client-ip-address
+	security to spamd, patch by Kelsey Cummings
+
+2001-10-31 00:35  jmason
+
+	* spamassassin.cf, masses/evolve.cxx: new scores: 0.19% fp / 3.47%
+	fn now
+
+2001-10-30 13:59  jmason
+
+	* lib/Mail/SpamAssassin/EvalTests.pm: fixed charset bug
+
+2001-10-30 13:44  jmason
+
+	* masses/mass-check, spamd/spamd.raw: added evals to load optional
+	modules
+
+2001-10-30 08:55  jmason
+
+	* lib/Mail/SpamAssassin/EvalTests.pm, masses/RUNME,
+	spamd/spamd.raw: bug in charset code fixed
+
+2001-10-30 06:09  hughescr
+
+	* spamd/spamd.raw: Flaggified spamd, added -L flag for local-only
+	testing
+
+2001-10-30 05:51  hughescr
+
+	* spamd/: spamc.c, spamc.pod, spamd.raw: Implemented per-user
+	config files for spamd
+
+2001-10-30 05:51  jmason
+
+	* MANIFEST, masses/evolve.cxx: updated MANIFEST
+
+2001-10-30 05:41  jmason
+
+	* lib/Mail/SpamAssassin/Locales.pm: oops, fixed bug with new
+	charset code
+
+2001-10-30 05:37  jmason
+
+	* spamassassin.cf, lib/Mail/SpamAssassin.pm,
+	lib/Mail/SpamAssassin/Conf.pm, lib/Mail/SpamAssassin/Dns.pm,
+	lib/Mail/SpamAssassin/EvalTests.pm,
+	lib/Mail/SpamAssassin/ExposedMessage.pm,
+	lib/Mail/SpamAssassin/Locales.pm,
+	lib/Mail/SpamAssassin/PerMsgStatus.pm,
+	lib/Mail/SpamAssassin/Reporter.pm, masses/Makefile, masses/RUNME,
+	masses/evolve.cxx, masses/logs-to-c, masses/mass-check,
+	spamd/spamd.raw: added more new tests from Wolfgang Weisselberg;
+	added charset detector based on LANG env var setting; rescored
+	again.
+
+2001-10-27 19:05  hughescr
+
+	* spamd/spamc.pod: Update man page
+
+2001-10-27 18:51  hughescr
+
+	* spamd/spamc.c: * Added safe fallback option * Added some required
+	include files * Fixed miscellaneous compile warnings
+
+2001-10-27 10:32  jmason
+
+	* spamassassin.cf, lib/Mail/SpamAssassin.pm,
+	lib/Mail/SpamAssassin/PerMsgStatus.pm,
+	lib/Mail/SpamAssassin/Reporter.pm, masses/README: couple of new
+	tests
+
+2001-10-27 10:04  jmason
+
+	* spamassassin.cf, lib/Mail/SpamAssassin/EvalTests.pm,
+	lib/Mail/SpamAssassin/MyMailAudit.pm,
+	lib/Mail/SpamAssassin/PerMsgStatus.pm, masses/RUNME,
+	masses/mass-check: added new eval test: analyses Reply-To header
+
+2001-10-27 06:39  jmason
+
+	* masses/README: metasend now 2 commands
+
+2001-10-25 23:02  hughescr
+
+	* spamd/spamc.c: Minor optimization
+
+2001-10-25 08:48  jmason
+
+	* MANIFEST, spamassassin.raw, lib/Mail/SpamAssassin.pm,
+	lib/Mail/SpamAssassin/Conf.pm,
+	lib/Mail/SpamAssassin/EncappedMessage.pm,
+	lib/Mail/SpamAssassin/ExposedMessage.pm,
+	lib/Mail/SpamAssassin/Message.pm,
+	lib/Mail/SpamAssassin/PerMsgStatus.pm,
+	lib/Mail/SpamAssassin/Replier.pm,
+	lib/Mail/SpamAssassin/Reporter.pm,
+	lib/Mail/SpamAssassin/AuditMessage.pm,
+	lib/Mail/SpamAssassin/MyMailAudit.pm: patch from Matt Sergeant
+
+2001-10-25 08:40  jmason
+
+	* spamd/spamc.c: ifdef'd TCP_NODELAY code, working on the principle
+	of least surprise ;)
+
+2001-10-25 06:08  jmason
+
+	* README, lib/Mail/SpamAssassin.pm: released 1.3
+
 2001-10-25 06:00  jmason
 
 	* Makefile.PL, TODO: last-minute mods
@@ -757,11 +1372,6 @@
 	* Changes, MANIFEST, spamassassin.cf, windows_install.pl,
 	lib/Mail/SpamAssassin.pm: added windows_install script
 
-2001-05-02 13:01  jmason
-
-	* testmails/positive.tar.gz: moved positive test mails into a
-	tarfile to speed up cvs
-
 2001-05-01 15:16  jmason
 
 	* spamassassin.cf: fixed RBL, new anti-porn patterns
@@ -829,14 +1439,12 @@
 	* .cvsignore, MANIFEST, Makefile.PL, README, TODO, spamassassin,
 	rules.cf, userprefs.cf, lib/Mail/SpamAssassin/Main.pm,
 	lib/Mail/SpamAssassin/Conf.pm, lib/Mail/SpamAssassin/EvalTests.pm,
-	lib/Mail/SpamAssassin/Msg.pm, testmails/get_stats,
-	testmails/reorder_by_hits, testmails/stats: Initial revision
+	lib/Mail/SpamAssassin/Msg.pm: Initial revision
 
 2001-04-20 19:47  jmason
 
 	* .cvsignore, MANIFEST, Makefile.PL, README, TODO, spamassassin,
 	rules.cf, userprefs.cf, lib/Mail/SpamAssassin/Main.pm,
 	lib/Mail/SpamAssassin/Conf.pm, lib/Mail/SpamAssassin/EvalTests.pm,
-	lib/Mail/SpamAssassin/Msg.pm, testmails/get_stats,
-	testmails/reorder_by_hits, testmails/stats: Initial import
+	lib/Mail/SpamAssassin/Msg.pm: Initial import
 
