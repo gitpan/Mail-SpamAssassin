@@ -14,7 +14,8 @@ use Mail::SpamAssassin;
 use Mail::SpamAssassin::NoMailAudit;
 use Sys::Syslog qw(:DEFAULT setlogsock);
 use POSIX qw(setsid);
-use Getopt::Std;
+use Getopt::Long;
+use Pod::Usage;
 use POSIX ":sys_wait_h";
 
 my %resphash = (
@@ -36,56 +37,43 @@ my %resphash = (
 		EX_CONFIG      => 78, # configuration error
 		);
 
-sub usage
-{
-    warn <<EOUSAGE;
+# defaults
+my %opt = ('user-config' => 1);
 
-Spamd version $Mail::SpamAssassin::VERSION
+Getopt::Long::Configure ("bundling");
+GetOptions(
+	'auto-whitelist|whitelist|a' => \$opt{'auto-whitelist'},
+	'create-prefs!', => \$opt{'create-prefs'}, 'c' => \$opt{'create-prefs'},
+	'daemonize!' => \$opt{'daemonize'}, 'd' => \$opt{'daemonize'},
+	'help|h' => \$opt{'help'},
+	'listen-ip|ip-address|i=s' => \$opt{'listen-ip'},
+	'max-children|m=i' => \$opt{'max-children'},
+	'port|p=i' => \$opt{'port'},
+	'sql-config!' => \$opt{'sql-config'}, 'q' => \$opt{'sql-config'},
+	'pidfile|r=s' => \$opt{'pidfile'},
+	'syslog|s=s' => \$opt{'syslog'},
+	'username|u=s' => \$opt{'username'},
+	'vpopmail!' => \$opt{'vpopmail'}, 'v' => \$opt{'vpopmail'},
+	'configpath|C=s' => \$opt{'configpath'},
+	'user-config!' => \$opt{'user-config'}, 'x' => sub{$opt{'user-config'}=0},
+	'allowed-ips|A=s' => \@{$opt{'allowed-ip'}},
+	'debug!', => \$opt{'debug'}, 'D' => \$opt{'debug'},
+	'add-from!' => \$opt{'add-from'}, 'F=i' => \$opt{'add-from'},
+	'local!' => \$opt{'local'}, 'L' => \$opt{'local'},
+	'paranoid!' => \$opt{'paranoid'}, 'P' => \$opt{'paranoid'},
+	'stop-at-threshold!' => \$opt{'stop-at-threshold'}, 'S' => \$opt{'stop-at-threshold'}
+) or pod2usage(-exitval => $resphash{'EXUSAGE'}, -verbose => 0);
 
-Usage: spamd [options]
+$opt{'user-config'} = 1 unless defined $opt{'user-config'};
+$opt{'add-from'} = 1 unless defined $opt{'add-from'};
 
-Options:
-
-  -a              Use auto-whitelists.
-  -c              Create user preferences files if they do not already exist
-  -d		  Daemonize, detach from parent process
-  -h              Print this usage message and exit
-  -i ipaddr       Listen on the specified IP address (default: 127.0.0.1,
-                  use 0.0.0.0 to listen on all available addresses)
-  -p port         Listen on the specific port (default: 783)
-  -q              Enable SQL config (only useful with -x)
-  -v              Enable vpopmail config  (only useful with -u set to vpopmail user)
-  -s facility     Specify the syslog facility (default: mail)
-  -u username     Run as named user, instead of running setuid to spamc user
-  -x              Disable user config files
-  -A host,...     Set list of authorized ip addresses which can connect to this
-                  server (default: 127.0.0.1)
-  -D              Print debugging messages
-  -L              Use local tests only (no DNS or other network lookups)
-  -S              Stop tests after the spam threshold is reached
-  -P              Die upon user errors (does not exist or user = root) instead of
-                  running as 'nobody' with defaults.
-  -F 0|1          remove/add 'From ' line at start of output (default: 1)
-  -m num          allow maximum num children
-
-EOUSAGE
-    exit $resphash{EX_USAGE};
-}
-
-use vars qw{
-    $opt_d $opt_h $opt_L $opt_p $opt_A $opt_x $opt_s $opt_D $opt_u
-    $opt_P $opt_c $opt_a $opt_i $opt_q $opt_F $opt_S $opt_m $opt_v
-};
-
-getopts('acdhi:p:qvs:u:xA:DLSPF:m:') or usage();
-
-$opt_h and usage();
+$opt{'help'} and pod2usage(-exitval => $resphash{EX_USAGE}, -verbose => 0, -message => 'For more details, use "man spamd"');
 
 # These can be changed on command line with -A flag
 my %allowed = ();
-if($opt_A)
+if(@{$opt{'allowed-ip'}})
 {
-    %allowed = map { $_ => 1 } split /,/, $opt_A;
+    %allowed = map { $_ => 1 } split /,/,join(',',@{$opt{'allowed-ip'}});
 }
 else
 {
@@ -94,9 +82,9 @@ else
 
 # This can be changed on the command line with the -s flag
 my $log_facility;
-if($opt_s)
+if($opt{'syslog'})
 {
-    $log_facility = $opt_s;
+    $log_facility = $opt{'syslog'};
 }
 else
 {
@@ -104,14 +92,12 @@ else
 }
 
 my $dontcopy = 1;
-if ($opt_c) { $dontcopy = 0; }
+if ($opt{'create-prefs'}) { $dontcopy = 0; }
 
 
 my $extrapid = 5000;
-if ($opt_m) {	# Duncan
-    $opt_m =~ /(\d+)/; # Make sure it is numeric!
-	$extrapid = $1;
-}
+$extrapid = $opt{'max-children'} if defined($opt{'max-children'}) && $opt{'max-children'} > 0;
+
 
 if (defined $ENV{'HOME'}) {
     delete $ENV{'HOME'}; # we do not want to use this when running spamd
@@ -119,21 +105,14 @@ if (defined $ENV{'HOME'}) {
 
 my $spamtest = Mail::SpamAssassin->new({
     dont_copy_prefs => $dontcopy,
-    local_tests_only => $opt_L,
-    stop_at_threshold => $opt_S,
-    debug => $opt_D,
-    paranoid => ($opt_P || 0),
+    rules_filename => ($opt{'configpath'} || 0),
+    local_tests_only => ($opt{'local'} || 0),
+    stop_at_threshold => ($opt{'stop-at-threshold'} || 0),
+    debug => ($opt{'debug'} || 0),
+    paranoid => ($opt{'paranoid'} || 0),
 });
 
-$opt_a and eval
-{
-    require Mail::SpamAssassin::DBBasedAddrList;
-
-    # create a factory for the persistent address list
-    my $addrlistfactory = Mail::SpamAssassin::DBBasedAddrList->new();
-    $spamtest->set_persistent_address_list_factory ($addrlistfactory);
-};
-
+# Do whitelist later in tmp dir. Side effect: this will be done as -u user.
 
 sub spawn;  # forward declaration
 sub logmsg; # forward declaration
@@ -141,8 +120,8 @@ sub cleanupchildren;
 
 setlogsock('unix');
 
-my $port = $opt_p || 783;
-my $addr = gethostbyname($opt_i || '127.0.0.1');
+my $port = $opt{'port'} || 783;
+my $addr = gethostbyname($opt{'listen-ip'} || '127.0.0.1');
 my $proto = getprotobyname('tcp');
 
 ($port) = $port =~ /^(\d+)$/ or die "invalid port";
@@ -153,16 +132,18 @@ setsockopt(Server,SOL_SOCKET,SO_REUSEADDR,pack("l",1))  || die "setsockopt: $!";
 bind(Server, sockaddr_in($port, $addr))                 || die "bind: $!";
 listen(Server,SOMAXCONN)                                || die "listen: $!";
 
+$opt{'daemonize'} and daemonize();
+
 # support non-root use (after we bind to the port)
 my $setuid_to_user = 0;
-if ($opt_u) {
-    my $uuid = getpwnam($opt_u);
+if ($opt{'username'}) {
+    my $uuid = getpwnam($opt{'username'});
     if (!defined $uuid || $uuid == 0) {
 	die "fatal: cannot run as nonexistent user or root with -u option\n";
     }
     $> = $uuid;		# effective uid
     $< = $uuid;		# real uid. we now cannot setuid anymore
-    if ($> != $uuid) {
+    if ($> != $uuid and $> != ($uuid-2**32)) {
 	die "fatal: setuid to uid $uuid failed\n";
     }
 
@@ -170,10 +151,33 @@ if ($opt_u) {
     $setuid_to_user = 1;
 }
 
-$spamtest->compile_now();	# ensure all modules etc. are loaded
+
+# We should set $ENV{HOME} in /tmp.
+$ENV{'HOME'} = (-d '/tmp' ? '/tmp' : $ENV{TMP} || $ENV{TEMP})."/spamassassin-$$"; 
+mkdir("$ENV{'HOME'}",0700)
+    or die "fatal: Can't create $ENV{'HOME'}";
+mkdir("$ENV{'HOME'}/.spamassassin", 0700)
+    or die "fatal: Can't create $ENV{'HOME'}/.spamassassin";
+
+# This might be slightly paranoid. Good.
+
+$opt{'auto-whitelist'} and eval
+{
+    require Mail::SpamAssassin::DBBasedAddrList;
+
+    # create a factory for the persistent address list
+    my $addrlistfactory = Mail::SpamAssassin::DBBasedAddrList->new();
+    $spamtest->set_persistent_address_list_factory ($addrlistfactory);
+};
+
+$spamtest->compile_now(0);	# ensure all modules etc. are loaded
 $/ = "\n";			# argh, Razor resets this!  Bad Razor!
 
-$opt_d and daemonize();
+unlink <$ENV{HOME}/.spamassassin/*>,<$ENV{HOME}/*>;
+rmdir "$ENV{HOME}/.spamassassin";
+rmdir $ENV{HOME};
+system "/bin/rm -Rf /tmp/spamassassin-$$";
+delete $ENV{'HOME'};
 
 my $current_user;
 my $paddr;
@@ -182,7 +186,7 @@ sub REAPER { # Adapted from the perlipc manpage
 	cleanupchildren;
 	$SIG{CHLD} = \&REAPER;
 }
-if ($opt_m) {
+if ($opt{'max-children'}) {
     $SIG{CHLD} = \&REAPER;
 } else {
     $SIG{CHLD} = 'IGNORE';
@@ -193,7 +197,7 @@ $SIG{TERM} = \&kill_handler;
 
 # now allow waiting processes to connect, if they're watching the log.
 # The test suite does this!
-if ($opt_D) {
+if ($opt{'debug'}) {
     warn "server started on port $port\n";
     warn "server pid: $$\n";
 }
@@ -269,23 +273,24 @@ for ( ; ($paddr = accept(Client,Server)) ; close Client)
                     # We'll run handle user unless we've been told not
                     # to process per-user config files.  Otherwise
                     # we'll check and see if we need to try SQL
-                    # lookups.  If $opt_x is NOT true, we need to try
+                    # lookups.  If $opt{'user-config'} is true, we need to try
                     # their config file and then do the SQL lookup.
-                    # If $opt_x IS true, we skip the conf file and
-                    # only need to do the SQL lookup if $opt_q IS
+                    # If $opt{'user-config'} IS NOT true, we skip the conf file and
+                    # only need to do the SQL lookup if $opt{'sql-config'} IS
                     # true.  (I got that wrong the first time.)
 
                     if (/^User: (.*)\r\n/)
                     {
-                        if ($opt_x)
+                        $current_user = $1;
+                        if (!$opt{'user-config'})
                         {
-			    if ($opt_q) {
-				handle_user_sql($1);
-			    }
+			               if ($opt{'sql-config'}) {
+				              handle_user_sql($current_user);
+			               }
                         }
-			else
+               			else
                         {
-                            handle_user($1);
+                            handle_user($current_user);
                         }
                     }
 		    if (/^Content-length: ([0-9]*)\r\n/i) {
@@ -296,7 +301,7 @@ for ( ; ($paddr = accept(Client,Server)) ; close Client)
 
            if ( $setuid_to_user && $> == 0 )
            {
-               if ($spamtest->{paranoid}) {
+               if ($spamtest->{'paranoid'}) {
                    logmsg "PARANOID: still running as root, closing connection.";
                    die;
                }
@@ -304,7 +309,7 @@ for ( ; ($paddr = accept(Client,Server)) ; close Client)
 		    "not found, or set to root.  Fall back to nobody.";
 		my $uid = getpwnam('nobody');
                $> = $uid;
-               if ( !defined($uid) || $> != $uid ) {
+               if ( !defined($uid) || ($> != $uid and $> != ($uid-2**32))) {
                    logmsg "fatal: setuid to nobody failed";
                    die;
                }
@@ -320,7 +325,7 @@ for ( ; ($paddr = accept(Client,Server)) ; close Client)
 	    }
 	    my $mail = Mail::SpamAssassin::NoMailAudit->new (
                                 data => \@msglines,
-                                add_From_line => $opt_F
+                                add_From_line => $opt{'add-from'}
                          );
 
 	    # Check length if we're supposed to
@@ -348,7 +353,7 @@ for ( ; ($paddr = accept(Client,Server)) ; close Client)
 	    print $status->get_report,"\r\n" if ($method eq "REPORT");
 	    $current_user ||= '(unknown)';
 	    logmsg "$was_it_spam ($msg_score/$msg_threshold) for $current_user:$> in ".
-		sprintf("%3d", time - $start) ." seconds.\n";
+		sprintf("%3d", time - $start) ." seconds, $actual_length bytes.\n";
 
 	    $status->finish();	# added by jm to allow GC'ing
 	}
@@ -381,23 +386,24 @@ for ( ; ($paddr = accept(Client,Server)) ; close Client)
                     # We'll run handle user unless we've been told not
                     # to process per-user config files.  Otherwise
                     # we'll check and see if we need to try SQL
-                    # lookups.  If $opt_x is NOT true, we need to try
+                    # lookups.  If $opt{'user-config'} is true, we need to try
                     # their config file and then do the SQL lookup.
-                    # If $opt_x IS true, we skip the conf file and
-                    # only need to do the SQL lookup if $opt_q IS
+                    # If $opt{'user-config'} IS NOT true, we skip the conf file and
+                    # only need to do the SQL lookup if $opt{'sql-config'} IS
                     # true.  (I got that wrong the first time.)
 
                     if (/^User: (.*)\r\n/)
                     {
-                        if ($opt_x)
+                        $current_user = $1;
+                        if (!$opt{'user-config'})
                         {
-			    if ($opt_q) {
-				handle_user_sql($1);
+			    if ($opt{'sql-config'}) {
+				handle_user_sql($current_user);
 			    }
                         }
 			else
                         {
-                            handle_user($1);
+                            handle_user($current_user);
                         }
                     }
 		    if (/^Content-length: ([0-9]*)\r\n/i) {
@@ -416,7 +422,7 @@ for ( ; ($paddr = accept(Client,Server)) ; close Client)
 		    "not found, or set to root.  Fall back to nobody.";
 		my $uid = getpwnam('nobody');
                $> = $uid;
-               if ( !defined($uid) || $> != $uid ) {
+               if ( !defined($uid) || ($> != $uid and $> != ($uid-2**32))) {
                    logmsg "fatal: setuid to nobody failed";
                    die;
                }
@@ -432,7 +438,7 @@ for ( ; ($paddr = accept(Client,Server)) ; close Client)
 	    }
 	    my $mail = Mail::SpamAssassin::NoMailAudit->new (
                                 data => \@msglines,
-                                add_From_line => $opt_F
+                                add_From_line => $opt{'add-from'}
                          );
 
 	    # Check length if we're supposed to
@@ -465,7 +471,7 @@ for ( ; ($paddr = accept(Client,Server)) ; close Client)
             my $msg_threshold = sprintf("%.1f",$status->get_required_hits);
 	    $current_user ||= '(unknown)';
 	    logmsg "$was_it_spam ($msg_score/$msg_threshold) for $current_user:$> in ".
-		sprintf("%3d", time - $start) ." seconds.\n";
+		sprintf("%3d", time - $start) ." seconds, $actual_length bytes.\n";
 
 	    $status->finish();	# added by jm to allow GC'ing
 	}
@@ -506,7 +512,7 @@ sub spawn {
     my $pid;
 
     cleanupchildren;
-    wait if ($opt_m && $extrapid <= 0);
+    wait if ($opt{'max-children'} && $extrapid <= 0);
 	
     $extrapid--;
 
@@ -529,21 +535,20 @@ sub handle_user
 {
     my $username = shift;
 
-    $current_user = $username;
     #
     # If vpopmail config enabled then look up userinfo for vpopmail uid
-    # as defined by $opt_u
+    # as defined by $opt{'username'}
     #
     my $userid = '';
-    if ($opt_v && $opt_u) {
-	$userid = $opt_u;
+    if ($opt{'vpopmail'} && $opt{'username'}) {
+	$userid = $opt{'username'};
     } else {
 	$userid = $username;
     }
     my ($name,$pwd,$uid,$gid,$quota,$comment,$gcos,$dir,$etc) =
 	getpwnam($userid);
 
-    if ( !$spamtest->{paranoid} && !defined($uid) ) {
+    if ( !$spamtest->{'paranoid'} && !defined($uid) ) {
 	#if we are given a username, but can't look it up,
 	#Maybe NIS is down? lets break out here to allow
 	#them to get 'defaults' when we are not running paranoid.
@@ -553,16 +558,20 @@ sub handle_user
 
     if ($setuid_to_user) {
 	$> = $uid;
-       if ( !defined($uid) || $> != $uid ) {
+       if ( !defined($uid) || ($> != $uid and $> != ($uid-2**32))) {
            logmsg "fatal: setuid to $username failed";
 	    die;		# make it fatal to avoid security breaches
 	}
+	else
+	{
+	   logmsg "info: setuid to $username succeeded";
+    }
     }
 
     #
     # If vpopmail config enabled then set $dir to virtual homedir
     #
-    if ($opt_v && $opt_u) {
+    if ($opt{'vpopmail'} && $opt{'username'}) {
 	$dir = `$dir/bin/vuserinfo -d $username`;
 	$dir =~ s/\n//g;
     }
@@ -571,7 +580,7 @@ sub handle_user
     #
     # If vpopmail config enabled then pass virtual homedir onto create_default_cf_needed
     #
-    if ($opt_v && $opt_u) {
+    if ($opt{'vpopmail'} && $opt{'username'}) {
 	create_default_cf_if_needed ($cf_file, $username, $dir);
     } else {
 	create_default_cf_if_needed ($cf_file, $username);
@@ -582,8 +591,8 @@ sub handle_user
 
 sub handle_user_sql
 {
-    $current_user = shift;
-    $spamtest->load_scoreonly_sql ($current_user);
+    my $username = shift;
+    $spamtest->load_scoreonly_sql ($username);
     return 1;
 }
 
@@ -591,7 +600,7 @@ sub create_default_cf_if_needed {
     my ($cf_file, $username, $userdir) = @_;
 
     # Parse user scores, creating default .cf if needed:
-    if( ! -r $cf_file && ! $spamtest->{dont_copy_prefs})
+    if( ! -r $cf_file && ! $spamtest->{'dont_copy_prefs'})
     {
 	logmsg "Creating default_prefs [$cf_file]";
 
@@ -610,9 +619,37 @@ sub create_default_cf_if_needed {
 
 sub logmsg
 {
+    my $old = $SIG{'PIPE'};
+    $SIG{'PIPE'} = sub { $main::SIGPIPE_RECEIVED++; };
+    
     openlog('spamd','cons,pid',$log_facility);
     syslog('info',"@_");
-    if ($opt_D) { warn "logmsg: @_\n"; }
+    if ($opt{'debug'}) { warn "logmsg: @_\n"; }
+
+    if ($main::SIGPIPE_RECEIVED) {
+       # SIGPIPE recieved when writing to syslog - this has been
+       # found to occur with syslog-ng after syslog-ng restarts.
+       # Close and reopen the log handle, then try again.
+
+       closelog();
+       openlog('spamd','cons,pid',$log_facility);
+       syslog('info',"@_");
+
+       # now report what happend
+       my $msg = "SIGPIPE received - reopening log socket";
+       if ($opt{'debug'}) { warn "logmsg: $msg\n"; }
+       syslog('warning', $msg);
+
+       # if we've received multiple sigpipes, logging is probably
+       # still broken.
+       if ($main::SIGPIPE_RECEIVED > 1) {
+           warn "logging failure: multiple SIGPIPEs received\n";
+       }
+
+       $main::SIGPIPE_RECEIVED = 0;
+    }
+
+    $SIG{'PIPE'} = $old if defined($old);
 }
 
 sub kill_handler
@@ -620,6 +657,7 @@ sub kill_handler
     my ($sig) = @_;
     logmsg "server killed by SIG$sig, shutting down";
     close Server;
+    defined($opt{'pidfile'}) and unlink($opt{'pidfile'});
     exit 0;
 }
 
@@ -633,12 +671,18 @@ use POSIX 'setsid';
 sub daemonize
 {
     chdir '/' or die "Can't chdir to '/': $!";
+	$SIG{__WARN__} = sub { logmsg($_[0]); };
     open STDIN,'/dev/null' or die "Can't read '/dev/null': $!";
     open STDOUT,'>/dev/null' or die "Can't write '/dev/null': $!";
     defined(my $pid=fork) or die "Can't fork: $!";
     exit if $pid;
     setsid or die "Can't start new session: $!";
     open STDERR,'>&STDOUT' or die "Can't duplicate stdout: $!";
+    if(defined($opt{'pidfile'})) {
+       open PIDF,">$opt{'pidfile'}" or warn "Can't open PID file: $!";
+       print PIDF $$."\n";
+       close PIDF;
+    }
 }
 
 =head1 NAME
@@ -649,48 +693,83 @@ spamd - daemonized version of spamassassin
 
 spamd [options]
 
+Options:
+
+ -a, --auto-whitelist, --whitelist  Use auto-whitelists
+ -c, --create-prefs                 Create user preferences files
+ -C path, --configpath=path         Path for default config files
+ -d, --daemonize                    Daemonize
+ -h, --help                         Print usage message.
+ -i ipaddr, --listen-ip=ipaddr,...  Listen on the IP ipaddr (default: 127.0.0.1)
+ -m num, --max-children num         Allow maximum num children
+ -p port, --port                    Listen on specified port (default: 783)
+ -q, --sql-config                   Enable SQL config (only useful with -x)
+ -r pidfile, --pidfile              Write the process id to pidfile
+ -s facility, --syslog=facility     Specify the syslog facility (default: mail)
+ -u username, --username=username   Run as username
+ -v, --vpopmail                     Enable vpopmail config
+ -x, --nouser-config                Disable user config files
+ -A host,..., --allowed-ips=..,..   Limit ip addresses which can connect
+ -D, --debug                        Print debugging messages
+ -F 0|1, --add-from, --noadd-from   Remove/add 'From ' line (default: add)
+ -L, --local                        Use local tests only (no DNS)
+ -P, --paranoid                     Die upon user errors
+ -S, --stop-at-threshold            Stop tests after the threshold is reached
+
+
 =head1 OPTIONS
+
+Options of the long form can be shortened as long as they remain
+unambiguous.  (i.e. B<--dae> can be used instead of B<--daemonize>)
+Also, boolean options (like B<--auto-whitelist>) can be negated by
+adding I<--no> (B<--noauto-whitelist>), however, this is usually unnecessary.
 
 =over
 
-=item B<-a>
+=item B<-a>, B<--auto-whitelist>, B<--whitelist>
 
-Use auto-whitelists.  These will automatically create a list of
-senders whose messages are to be considered non-spam by monitoring the total
-number of received messages which weren't tagged as spam from that sender.
-Once a threshold is exceeded, further messages from that sender will be given a
-non-spam bonus (in case you correspond with people who occasionally swear in
-their emails).
+Use auto-whitelists.  Auto-whitelists track the long-term average score for each sender
+and then shift the score of new messages toward that long-term average.  This can increase
+or decrease the score for messages, depending on the long-term behavior of the
+particular correspondent.  See the README file for more details.
 
-=item B<-c>
+=item B<-c>, B<--create-prefs>
 
 Create user preferences files if they don't exist (default: don't).
 
-=item B<-d>
+=item B<-C> I<path>, B<--configpath>=I<path>
+
+Use the specified path for locating configuration files.  Ignore the default directories.
+
+=item B<-d>, B<--daemonize>
 
 Detach from starting process and run in background (daemonize).
 
-=item B<-h>
+=item B<-h>, B<--help>
 
 Print a brief help message, then exit without further action.
 
-=item B<-i> I<ipaddress>
+=item B<-i> I<ipaddress>, B<--listen-ip>=I<ipaddress>, B<--ip-address>=I<ipaddress>
 
 Tells spamd to listen on the specified IP address [defaults to 127.0.0.1].  Use
 0.0.0.0 to listen on all interfaces.
 
-=item B<-p> I<port>
+=item B<-p> I<port>, B<--port>=I<port>
 
 Optionally specifies the port number for the server to listen on.
 
-=item B<-q>
+=item B<-q>, B<--sql-config>
 
 Turn on SQL lookups even when per-user config files have been disabled
 with B<-x>. this is useful for spamd hosts which don't have user's
 home directories but do want to load user preferences from an SQL
 database.
 
-=item B<-v>
+=item B<-r> I<pidfile>, B<--pidfile>=I<pidfile>
+
+Write the process ID of the spamd parent to the file specified by I<pidfile>.  The file will be unlinked when the parent exits.
+
+=item B<-v>, B<--vpopmail>
 
 Enable vpopmail config  (only useful with -u set to vpopmail
 user). This option is useful for vpopmail virtual users who
@@ -698,52 +777,52 @@ do not have an entry in the system /etc/passwd file.  This
 allows spamd to lookup/create user_prefs in the vpopmail users
 own maildir.
 
-=item B<-s> I<facility>
+=item B<-s> I<facility>, B<--syslog>=I<facility>
 
 Specify the syslog facility to use (default: mail).
 
-=item B<-u> I<username>
+=item B<-u> I<username>, B<--username>=I<username>
 
 Run as the named user.  The alternative, default behaviour is to setuid() to
 the user running C<spamc>, if C<spamd> is running as root.
 
-=item B<-x>
+=item B<-x>, B<--nouser-config>, B<--user-config>
 
-Turn off per-user config files.  All users will just get the default
+Turn off(on) per-user config files.  All users will just get the default
 configuration.
 
-=item B<-A> I<host,...>
+=item B<-A> I<host,...>, B<--allowed-ips>=I<host,...>
 
 Specify a list of authorized hosts which can connect to this spamd instance.
 The list is one of valid IP addresses, separated by commas.  By default,
 connections are only accepted from localhost (127.0.0.1).
 
-=item B<-D>
+=item B<-D>, B<--debug>
 
 Print debugging messages
 
-=item B<-L>
+=item B<-L>, B<--local>
 
 Perform only local tests on all mail.  In other words, skip DNS and other
 network tests.  Works the same as the C<-L> flag to C<spamassassin(1)>.
 
-=item B<-S>
+=item B<-S>, B<--stop-at-threshold>
 
 Stop spam checking as soon as the spam threshold is reached, to increase
 performance. This option also turns off Razor reporting.
 
-=item B<-P>
+=item B<-P>, B<--paranoid>
 
 Die on user errors (for the user passed from spamc) instead of falling back to
 user I<nobody> and using the default configuration.
 
-=item B<-F> I<0 | 1>
+=item B<-F> I<0 | 1>, B<--add-from>, B<--noadd-from>
 
 Ensure that the output email message either always starts with a 'From ' line
 (I<1>) for UNIX mbox format, or ensure that this line is stripped from the
 output (I<0>).  (default: 1)
 
-=item B<-m> I<number>
+=item B<-m> I<number>, B<--max-children>=I<number>
 
 Specify a maximum number of children to spawn. Spamd will wait until another
 child finishes before forking again. Meanwhile, incoming connections will be
@@ -774,6 +853,7 @@ the changes to take effect.
 spamc(1)
 spamassassin(1)
 Mail::SpamAssassin(3)
+Mail::SpamAssassin::Conf(3)
 
 =head1 AUTHOR
 

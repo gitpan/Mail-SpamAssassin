@@ -45,8 +45,9 @@ use strict;
 use vars	qw{
   	@ISA $type_body_tests $type_head_tests $type_head_evals
 	$type_body_evals $type_full_tests $type_full_evals
-	$type_rawbody_tests $type_rawbody_evals
-    $type_uri_tests $type_uri_evals
+	$type_rawbody_tests $type_rawbody_evals 
+	$type_uri_tests $type_uri_evals
+	$type_rbl_evals $type_rbl_res_evals
 };
 
 @ISA = qw();
@@ -61,6 +62,8 @@ $type_rawbody_tests = 107;
 $type_rawbody_evals = 108;
 $type_uri_tests  = 109;
 $type_uri_evals  = 110;
+$type_rbl_evals  = 120;
+$type_rbl_res_evals  = 121;
 
 ###########################################################################
 
@@ -94,12 +97,23 @@ sub new {
   $self->{regression_tests} = { };
 
   $self->{required_hits} = 5.0;
-  $self->{auto_report_threshold} = 25.0;
   $self->{report_template} = '';
   $self->{terse_report_template} = '';
   $self->{spamtrap_template} = '';
 
+  # What different RBLs consider a dialup IP -- Marc
+  $self->{dialup_codes} = { 
+			    "dialups.mail-abuse.org." => "127.0.0.3",
+			   # For DUL + other codes, we ignore that it's on DUL
+			    "rbl-plus.mail-abuse.org." => "127.0.0.2",
+			    "relays.osirusoft.com." => "127.0.0.3",
+			  };
+
+  $self->{num_check_received} = 2;
+
   $self->{razor_config} = $main->sed_path ("~/razor.conf");
+  $self->{razor_timeout} = 10;
+  $self->{rbl_timeout} = 30;
 
   # this will be sedded by whitelist implementations, so ~ is OK
   $self->{auto_whitelist_path} = "~/.spamassassin/auto-whitelist";
@@ -108,6 +122,7 @@ sub new {
 
   $self->{rewrite_subject} = 1;
   $self->{spam_level_stars} = 1;
+  $self->{spam_level_char} = '*';
   $self->{subject_tag} = '*****SPAM*****';
   $self->{report_header} = 0;
   $self->{use_terse_report} = 0;
@@ -116,7 +131,15 @@ sub new {
   $self->{check_mx_attempts} = 2;
   $self->{check_mx_delay} = 5;
   $self->{ok_locales} = '';
+  $self->{ok_languages} = '';
   $self->{allow_user_rules} = 0;
+  $self->{user_rules_to_compile} = 0;
+
+  $self->{dcc_body_max} = 999999;
+  $self->{dcc_fuz1_max} = 999999;
+  $self->{dcc_fuz2_max} = 999999;
+  $self->{dcc_add_header} = 0;
+  $self->{dcc_timeout} = 10;
 
   $self->{whitelist_from} = { };
   $self->{blacklist_from} = { };
@@ -193,13 +216,34 @@ Whitelist and blacklist addresses are now file-glob-style patterns, so
 C<friend@somewhere.com>, C<*@isp.com>, or C<*.domain.net> will all work.
 Regular expressions are not used for security reasons.
 
-Multiple addresses per line is OK.  Multiple C<whitelist_from> lines is also
+Multiple addresses per line, separated by spaces, is OK.  Multiple C<whitelist_from> lines is also
 OK.
+
+eg.
+whitelist_from joe@example.com fred@example.com
+whitelist_from simon@example.com
+
 
 =cut
 
     if (/^whitelist[-_]from\s+(.+)\s*$/) {
       $self->add_to_addrlist ('whitelist_from', split (' ', $1)); next;
+    }
+
+=item unwhitelist_from add@ress.com
+
+Used to override a default whitelist_from entry, so for example a distribution whitelist_from
+can be overriden in a local.cf file, or an individual user can override a whitelist_from entry
+in their own .user_prefs file.
+
+eg.
+unwhitelist_from joe@example.com fred@example.com
+unwhitelist_from *@amazon.com
+
+=cut
+
+    if (/^unwhitelist[-_]from\s+(.+)\s*$/) {
+      $self->remove_from_addrlist ('whitelist_from', split (' ', $1)); next;
     }
 
 =item blacklist_from add@ress.com
@@ -212,6 +256,23 @@ non-spam, but which the user doesn't want.  Same format as C<whitelist_from>.
     if (/^blacklist[-_]from\s+(.+)\s*$/) {
       $self->add_to_addrlist ('blacklist_from', split (' ', $1)); next;
     }
+
+=item unblacklist_from add@ress.com
+
+Used to override a default blacklist_from entry, so for example a distribution blacklist_from
+can be overriden in a local.cf file, or an individual user can override a blacklist_from entry
+in their own .user_prefs file.
+
+eg.
+unblacklist_from joe@example.com fred@example.com
+unblacklist_from *@spammer.com
+
+=cut
+
+    if (/^unblacklist[-_]from\s+(.+)\s*$/) {
+      $self->remove_from_addrlist ('blacklist_from', split (' ', $1)); next;
+    }
+
 
 =item whitelist_to add@ress.com
 
@@ -254,18 +315,6 @@ be an integer or a real number.
       $self->{required_hits} = $1+0.0; next;
     }
 
-=item auto_report_threshold n.nn   (default: 30)
-
-How many hits before a mail is automatically reported to blacklisting services
-like Razor.  Be very careful with this; you really should manually verify the
-spamminess of a mail before reporting it.
-
-=cut
-
-    if (/^auto[-_]report[-_]threshold\s+(\S+)$/) {
-      $self->{auto_report_threshold} = $1+0; next;
-    }
-
 =item score SYMBOLIC_TEST_NAME n.nn
 
 Assign a score to a given test.  Scores can be positive or negative real
@@ -303,6 +352,22 @@ This can be useful for MUA rule creation.
 
    if(/^spam[-_]level[-_]stars\s+(\d+)$/) {
       $self->{spam_level_stars} = $1+0; next;
+   }
+
+=item spam_level_char { x (some character, unquoted) }        (default: *)
+
+By default, the "X-Spam-Level" header will use a '*' character
+with its length equal to the score of the message.
+In other words, for a message scoring 7.2 points with this option set to .
+
+X-Spam-Level: .......
+
+Some people don't like escaping *'s though, so you can set the character to anything with this option.
+
+=cut
+
+   if(/^spam[-_]level[-_]char\s+(.)$/) {
+      $self->{spam_level_char} = $1; next;
    }
 
 =item subject_tag STRING ... 		(default: *****SPAM*****)
@@ -385,6 +450,171 @@ How many seconds to wait before retrying an MX check.
       $self->{check_mx_delay} = $1+0; next;
     }
 
+=item ok_languages xx [ yy zz ... ]		(default: all)
+
+Which languages are considered OK to receive mail from.  Mail using
+character sets used by these languages will not be marked as possibly
+being spam in an undesired language.
+
+The following languages are recognized.  In your configuration, you must
+use the language specifier located in the first column, not the English
+name for the language.  You may also specify "all" if your language is
+not listed or if you want to allow any language.
+
+=over 4
+
+=item af	afrikaans
+
+=item am	amharic
+
+=item ar	arabic
+
+=item be	byelorussian
+
+=item bg	bulgarian
+
+=item bs	bosnian
+
+=item ca	catalan
+
+=item cs	czech
+
+=item cy	welsh
+
+=item da	danish
+
+=item de	german
+
+=item el	greek
+
+=item en	english
+
+=item eo	esperanto
+
+=item es	spanish
+
+=item et	estonian
+
+=item eu	basque
+
+=item fa	persian
+
+=item fi	finnish
+
+=item fr	french
+
+=item fy	frisian
+
+=item ga	irish
+
+=item gd	scots
+
+=item he	hebrew
+
+=item hi	hindi
+
+=item hr	croatian
+
+=item hu	hungarian
+
+=item hy	armenian
+
+=item id	indonesian
+
+=item is	icelandic
+
+=item it	italian
+
+=item ja	japanese
+
+=item ka	georgian
+
+=item ko	korean
+
+=item la	latin
+
+=item lt	lithuanian
+
+=item lv	latvian
+
+=item mr	marathi
+
+=item ms	malay
+
+=item ne	nepali
+
+=item nl	dutch
+
+=item no	norwegian
+
+=item pl	polish
+
+=item pt	portuguese
+
+=item qu	quechua
+
+=item rm	rhaeto-romance
+
+=item ro	romanian
+
+=item ru	russian
+
+=item sa	sanskrit
+
+=item sco	scots
+
+=item sk	slovak
+
+=item sl	slovenian
+
+=item sq	albanian
+
+=item sr	serbian
+
+=item sv	swedish
+
+=item sw	swahili
+
+=item ta	tamil
+
+=item th	thai
+
+=item tl	tagalog
+
+=item tr	turkish
+
+=item uk	ukrainian
+
+=item vi	vietnamese
+
+=item yi	yiddish
+
+=item zh	chinese
+
+=back
+
+Note that the language cannot always be recognized.  In that case, no
+points will be assigned.
+
+=cut
+
+    if (/^ok[-_]languages\s+(.+)$/) {
+      $self->{ok_languages} = $1; next;
+    }
+
+=item rbl_timeout n		(default 30)
+
+All RBL queries are started at the beginning and we try to read the results
+at the end. In case some of them are hanging or not returning, you can specify
+here how long you're willing to wait for them before deciding that they timed
+out
+
+=cut
+
+    if (/^rbl[-_]timeout\s+(\d+)$/) {
+      $self->{rbl_timeout} = $1+0; next;
+    }
+
 =item ok_locales xx [ yy zz ... ]		(default: en)
 
 Which locales (country codes) are considered OK to receive mail from.  Mail
@@ -424,9 +654,9 @@ Chinese (both simplified and traditional)
 
 =back
 
-So to simply allow all character sets through without giving them points, use
+To simply allow all character sets through without giving them points, use
 
-	ok_locales	ja ko ru th zh
+	ok_locales	all
 
 =cut
 
@@ -448,8 +678,8 @@ If C<factor> = 0.3, then we'll move about 1/3 of the way from the score toward t
 C<factor> = 1 means just use the long-term mean; C<factor> = 0 mean just use the calculated score.
 
 =cut
-    if (/^auto[-_]whitelist[-_]threshold\s*(.*)\s*$/) {
-      $self->{auto_whitelist_threshold} = $1; next;
+    if (/^auto[-_]whitelist[-_]factor\s*(.*)\s*$/) {
+      $self->{auto_whitelist_factor} = $1; next;
     }
 
 =item describe SYMBOLIC_TEST_NAME description ...
@@ -553,10 +783,158 @@ Clear the spamtrap template.
       $self->{spamtrap_template} = ''; next;
     }
 
+=item dcc_body_max NUMBER
+
+=item dcc_fuz1_max NUMBER
+
+=item dcc_fuz2_max NUMBER
+
+DCC (Distributed Checksum Clearinghouse) is a system similar to Razor.
+This option sets how often a message's body/fuz1/fuz2 checksum must have been
+reported to the DCC server before SpamAssassin will consider the DCC check as
+matched.
+
+As nearly all DCC clients are auto-reporting these checksums you should set 
+this to a relatively high value, e.g. 999999 (this is DCC's MANY count).
+
+The default is 999999 for all these options.
+
+=cut
+
+    if (/^dcc_body_max\s+(\d+)/) {
+      $self->{dcc_body_max} = $1+0; next;
+    }
+
+    if (/^dcc_fuz1_max\s+(\d+)/) {
+      $self->{dcc_fuz1_max} = $1+0; next;
+    }
+
+    if (/^dcc_fuz2_max\s+(\d+)/) {
+      $self->{dcc_fuz2_max} = $1+0; next;
+    }
+
+=item dcc_add_header { 0 | 1 }   (default: 0)
+
+DCC processing creates a message header containing the statistics for the
+message.  This option sets whether SpamAssassin will add the heading to
+messages it processes.
+
+The default is to not add the header.
+
+=cut
+
+    if (/^dcc_add_header\s+(\d+)$/) {
+      $self->{dcc_add_header} = $1+0; next;
+    }
+
+=item dcc_timeout n              (default: 10)
+
+How many seconds you wait for dcc to complete before you go on without 
+the results
+
+=cut
+
+    if (/^dcc[-_]timeout\s*(\d+)\s*$/) {
+      $self->{dcc_timeout} = $1+0; next;
+    }
+
+
+=item num_check_received { integer }   (default: 2)
+
+How many received lines from and including the original mail relay
+do we check in RBLs (you'd want at least 1 or 2).
+Note that for checking against dialup lists, you can call check_rbl
+with a special set name of "set-firsthop" and this rule will only
+be matched against the first hop if there is more than one hop, so 
+that you can set a negative score to not penalize people who properly
+relayed through their ISP.
+See dialup_codes for more details and an example
+
+=cut
+
+    if (/^num[-_]check[-_]received\s+(\d+)$/) {
+      $self->{num_check_received} = $1+0; next;
+    }
+
 ###########################################################################
     # SECURITY: no eval'd code should be loaded before this line.
     #
     if ($scoresonly && !$self->{allow_user_rules}) { goto failed_line; }
+
+
+# If you think, this is complex, you should have seen the four previous
+# implementations that I scratched :-)
+# Once you understand this, you'll see it's actually quite flexible -- Marc
+
+=item dialup_codes { "domain1" => "127.0.x.y", "domain2" => "127.0.a.b" }
+
+Default:
+{ "dialups.mail-abuse.org." => "127.0.0.3", 
+# For DUL + other codes, we ignore that it's on DUL
+  "rbl-plus.mail-abuse.org." => "127.0.0.2",
+  "relays.osirusoft.com." => "127.0.0.3" };
+
+WARNING!!! When passing a reference to a hash, you need to put the whole hash in
+one line for the parser to read it correctly (you can check with spamassassin -D
+< mesg)
+
+Set this to what your RBLs return for dialup IPs
+It is used by dialup-firsthop and relay-firsthop rules so that you can match
+DUL codes and compensate DUL checks with a negative score if the IP is a dialup
+IP the mail originated from and it was properly relayed by a hop before reaching
+you (hopefully not your secondary MX :-D)
+The trailing "-firsthop" is magic, it's what triggers the RBL to only be run
+on the originating hop
+The idea is to not penalize (or penalize less) people who properly relayed
+through their ISP's mail server
+
+Here's an example showing the use of Osirusoft and MAPS DUL, as well as the use
+of check_two_rbl_results to compensate for a match in both RBLs
+
+header RCVD_IN_DUL		rbleval:check_rbl('dialup', 'dialups.mail-abuse.org.')
+describe RCVD_IN_DUL		Received from dialup, see http://www.mail-abuse.org/dul/
+score RCVD_IN_DUL		4
+
+header X_RCVD_IN_DUL_FH		rbleval:check_rbl('dialup-firsthop', 'dialups.mail-abuse.org.')
+describe X_RCVD_IN_DUL_FH	Received from first hop dialup, see http://www.mail-abuse.org/dul/
+score X_RCVD_IN_DUL_FH		-3
+
+header RCVD_IN_OSIRUSOFT_COM    rbleval:check_rbl('osirusoft', 'relays.osirusoft.com.')
+describe RCVD_IN_OSIRUSOFT_COM  Received via an IP flagged in relays.osirusoft.com
+
+header X_OSIRU_SPAM_SRC         rbleval:check_rbl_results_for('osirusoft', '127.0.0.4')
+describe X_OSIRU_SPAM_SRC       DNSBL: sender is Confirmed Spam Source, penalizing further
+score X_OSIRU_SPAM_SRC          3.0
+
+header X_OSIRU_SPAMWARE_SITE    rbleval:check_rbl_results_for('osirusoft', '127.0.0.6')
+describe X_OSIRU_SPAMWARE_SITE  DNSBL: sender is a Spamware site or vendor, penalizing further
+score X_OSIRU_SPAMWARE_SITE     5.0
+
+header X_OSIRU_DUL_FH		rbleval:check_rbl('osirusoft-dul-firsthop', 'relays.osirusoft.com.')
+describe X_OSIRU_DUL_FH		Received from first hop dialup listed in relays.osirusoft.com
+score X_OSIRU_DUL_FH		-1.5
+
+header Z_FUDGE_DUL_MAPS_OSIRU	rblreseval:check_two_rbl_results('osirusoft', "127.0.0.3", 'dialup', "127.0.0.3")
+describe Z_FUDGE_DUL_MAPS_OSIRU	Do not double penalize for MAPS DUL and Osirusoft DUL
+score Z_FUDGE_DUL_MAPS_OSIRU	-2
+
+header Z_FUDGE_RELAY_OSIRU	rblreseval:check_two_rbl_results('osirusoft', "127.0.0.2", 'relay', "127.0.0.2")
+describe Z_FUDGE_RELAY_OSIRU	Do not double penalize for being an open relay on Osirusoft and another DNSBL
+score Z_FUDGE_RELAY_OSIRU	-2
+
+header Z_FUDGE_DUL_OSIRU_FH	rblreseval:check_two_rbl_results('osirusoft-dul-firsthop', "127.0.0.3", 'dialup-firsthop', "127.0.0.3")
+describe Z_FUDGE_DUL_OSIRU_FH	Do not double compensate for MAPS DUL and Osirusoft DUL first hop dialup
+score Z_FUDGE_DUL_OSIRU_FH	1.5
+
+=cut
+
+    if (/^dialup_codes\s+(.*)$/) {
+	$self->{dialup_codes} = eval $1;
+	next;
+    }
+
+
+    if ($scoresonly) { dbg("Checking privileged commands in user config"); }
 
 =back
 
@@ -573,18 +951,23 @@ then, they may only add rules from below).
 
 =item allow_user_rules { 0 | 1 }		(default: 0)
 
-This setting allows users to create rules (and only rules) in their C<user_prefs> files for
-use with C<spamd>. It defaults to off, because this could be a
-severe security hole. It may be possible for users to gain root level access
-if C<spamd> is run as root. It is NOT a good idea, unless you have some
-other way of ensuring that users' tests are safe. Don't use this unless you
-are certain you know what you are doing.
+This setting allows users to create rules (and only rules) in their
+C<user_prefs> files for use with C<spamd>. It defaults to off, because
+this could be a severe security hole. It may be possible for users to
+gain root level access if C<spamd> is run as root. It is NOT a good
+idea, unless you have some other way of ensuring that users' tests are
+safe. Don't use this unless you are certain you know what you are
+doing. Furthermore, this option causes spamassassin to recompile all
+the tests each time it processes a message for a user with a rule in
+his/her C<user_prefs> file, which could have a significant effect on
+server load. It is not recommended.
 
 =cut
 
 
     if (/^allow[-_]user[-_]rules\s+(\d+)$/) {
-      $self->{allow_user_rules} = $1+0; next;
+      $self->{allow_user_rules} = $1+0; 
+      dbg("Allowing user rules!"); next;
     }
 
 
@@ -603,6 +986,12 @@ C<modifiers> as regexp modifiers in the usual style.
 If the C<[if-unset: STRING]> tag is present, then C<STRING> will
 be used if the header is not found in the mail message.
 
+=item header SYMBOLIC_TEST_NAME exists:name_of_header
+
+Define a header existence test.  C<name_of_header> is the name of a
+header to test for existence.  This is just a very simple version of
+the above header tests.
+
 =item header SYMBOLIC_TEST_NAME eval:name_of_eval_method([arguments])
 
 Define a header eval test.  C<name_of_eval_method> is the name of 
@@ -610,11 +999,32 @@ a method on the C<Mail::SpamAssassin::EvalTests> object.  C<arguments>
 are optional arguments to the function call.
 
 =cut
+    if (/^header\s+(\S+)\s+rbleval:(.*)$/) {
+      $self->add_test ($1, $2, $type_rbl_evals); next;
+    }
+    if (/^header\s+(\S+)\s+rblreseval:(.*)$/) {
+      $self->add_test ($1, $2, $type_rbl_res_evals); next;
+    }
     if (/^header\s+(\S+)\s+eval:(.*)$/) {
-      $self->add_test ($1, $2, $type_head_evals); next;
+      my ($name,$rule) = ($1, $2);
+      # Backward compatibility with old rule names -- Marc
+      if ($name =~ /^RCVD_IN/) {
+        $self->add_test ($name, $rule, $type_rbl_evals); next;
+      } else {
+       $self->add_test ($name, $rule, $type_head_evals); next;
+      }
+      $self->{user_rules_to_compile} = 1 if $scoresonly;
+      next;
+    }
+    if (/^header\s+(\S+)\s+exists:(.*)$/) {
+      $self->add_test ($1, "$2 =~ /./", $type_head_tests);
+      $self->{descriptions}->{$1} = "Found a $2 header";
+      next;
     }
     if (/^header\s+(\S+)\s+(.*)$/) {
-      $self->add_test ($1, $2, $type_head_tests); next;
+      $self->add_test ($1, $2, $type_head_tests);
+      $self->{user_rules_to_compile} = 1 if $scoresonly;
+      next;
     }
 
 =item body SYMBOLIC_TEST_NAME /pattern/modifiers
@@ -632,10 +1042,14 @@ Define a body eval test.  See above.
 
 =cut
     if (/^body\s+(\S+)\s+eval:(.*)$/) {
-      $self->add_test ($1, $2, $type_body_evals); next;
+      $self->add_test ($1, $2, $type_body_evals);
+      $self->{user_rules_to_compile} = 1 if $scoresonly;
+      next;
     }
     if (/^body\s+(\S+)\s+(.*)$/) {
-      $self->add_test ($1, $2, $type_body_tests); next;
+      $self->add_test ($1, $2, $type_body_tests);
+      $self->{user_rules_to_compile} = 1 if $scoresonly;
+      next;
     }
 
 =item uri SYMBOLIC_TEST_NAME /pattern/modifiers
@@ -651,10 +1065,14 @@ points of the URI, and will also be faster.
 =cut
 # we don't do URI evals yet - maybe later
 #    if (/^uri\s+(\S+)\s+eval:(.*)$/) {
-#      $self->add_test ($1, $2, $type_uri_evals); next;
+#      $self->add_test ($1, $2, $type_uri_evals);
+#      $self->{user_rules_to_compile} = 1 if $scoresonly;
+#      next;
 #    }
     if (/^uri\s+(\S+)\s+(.*)$/) {
-      $self->add_test ($1, $2, $type_uri_tests); next;
+      $self->add_test ($1, $2, $type_uri_tests);
+      $self->{user_rules_to_compile} = 1 if $scoresonly;
+      next;
     }
 
 =item rawbody SYMBOLIC_TEST_NAME /pattern/modifiers
@@ -671,10 +1089,14 @@ Define a raw-body eval test.  See above.
 
 =cut
     if (/^rawbody\s+(\S+)\s+eval:(.*)$/) {
-      $self->add_test ($1, $2, $type_rawbody_evals); next;
+      $self->add_test ($1, $2, $type_rawbody_evals);
+      $self->{user_rules_to_compile} = 1 if $scoresonly;
+      next;
     }
     if (/^rawbody\s+(\S+)\s+(.*)$/) {
-      $self->add_test ($1, $2, $type_rawbody_tests); next;
+      $self->add_test ($1, $2, $type_rawbody_tests);
+      $self->{user_rules_to_compile} = 1 if $scoresonly;
+      next;
     }
 
 =item full SYMBOLIC_TEST_NAME /pattern/modifiers
@@ -691,14 +1113,18 @@ Define a full-body eval test.  See above.
 
 =cut
     if (/^full\s+(\S+)\s+eval:(.*)$/) {
-      $self->add_test ($1, $2, $type_full_evals); next;
+      $self->add_test ($1, $2, $type_full_evals);
+      $self->{user_rules_to_compile} = 1 if $scoresonly;
+      next;
     }
     if (/^full\s+(\S+)\s+(.*)$/) {
-      $self->add_test ($1, $2, $type_full_tests); next;
+      $self->add_test ($1, $2, $type_full_tests);
+      $self->{user_rules_to_compile} = 1 if $scoresonly;
+      next;
     }
 
 ###########################################################################
-    # SECURITY: allow_user_prefs is only in affect until here.
+    # SECURITY: allow_user_rules is only in affect until here.
     #
     if ($scoresonly) { goto failed_line; }
 
@@ -728,6 +1154,32 @@ Currently this is the same value Razor itself uses: C<~/razor.conf>.
       $self->{razor_config} = $1; next;
     }
 
+=item razor_timeout n		(default 10)
+
+How many seconds you wait for razor to complete before you go on without 
+the results
+
+=cut
+
+    if (/^razor[-_]timeout\s*(\d+)\s*$/) {
+      $self->{razor_timeout} = $1; next;
+    }
+
+=item dcc_options options
+
+Specify additional options to the dccproc(8) command. Please note that only
+[A-Z -] is allowed (security).
+
+The default is '-R'
+
+=cut
+
+    if (/^dcc_options\s+[A-Z -]+/) {
+      $self->{dcc_options} = $1; next;
+    } else {
+      $self->{dcc_options} = '-R';
+    }
+
 =item auto_whitelist_path /path/to/file	(default: ~/.spamassassin/auto-whitelist)
 
 Automatic-whitelist directory or file.  By default, each user has their own, in
@@ -738,6 +1190,22 @@ SpamAssassin use, you may want to share this across all users.
 
     if (/^auto[-_]whitelist[-_]path\s*(.*)\s*$/) {
       $self->{auto_whitelist_path} = $1; next;
+    }
+
+=item timelog_path /path/to/dir		(default: NULL)
+
+If you set this value, razor will try to create logfiles for each message I
+processes and dump information on how fast it ran, and in which parts of the
+code the time was spent.
+The files will be named: unixdate_mesgid (i.e 1023257504_chuvn31gdu@4ax.com)
+
+Make sure  SA can write  the log file, if  you're not sure  what permissions
+needed, make the log directory chmod'ed 1777, and adjust later.
+
+=cut
+
+    if (/^timelog[-_]path\s*(.*)\s*$/) {
+      $Mail::SpamAssassin::TIMELOG->{logpath}=$1; next;
     }
 
 =item auto_whitelist_file_mode		(default: 0700)
@@ -846,6 +1314,8 @@ sub finish_parsing {
     my $text = $self->{tests}->{$name};
 
     if ($type == $type_body_tests) { $self->{body_tests}->{$name} = $text; }
+    elsif ($type == $type_rbl_evals) { $self->{rbl_evals}->{$name} = $text; }
+    elsif ($type == $type_rbl_res_evals) { $self->{rbl_res_evals}->{$name} = $text; }
     elsif ($type == $type_head_tests) { $self->{head_tests}->{$name} = $text; }
     elsif ($type == $type_head_evals) { $self->{head_evals}->{$name} = $text; }
     elsif ($type == $type_body_evals) { $self->{body_evals}->{$name} = $text; }
@@ -873,6 +1343,14 @@ sub add_to_addrlist {
     $re =~ s/([^\*_a-zA-Z0-9])/\\$1/g;		# escape any possible metachars
     $re =~ s/\*/\.\*/g;				# "*" -> "any string"
     $self->{$singlelist}->{$addr} = qr/^${re}$/;
+  }
+}
+
+sub remove_from_addrlist {
+  my ($self, $singlelist, @addrs) = @_;
+  
+  foreach my $addr (@addrs) {
+	delete($self->{$singlelist}->{$addr});
   }
 }
 

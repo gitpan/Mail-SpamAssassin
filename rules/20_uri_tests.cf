@@ -2,7 +2,6 @@
 
 uri NUMERIC_HTTP_ADDR   /^https?\:\/\/\d{7,}/is
 describe NUMERIC_HTTP_ADDR  Uses a numeric IP address in URL
-test NUMERIC_HTTP_ADDR ok http://123456789/foo/bar
 
 uri NORMAL_HTTP_TO_IP   /^https?\:\/\/\d+\.\d+\.\d+\.\d+/is
 describe NORMAL_HTTP_TO_IP  Uses a dotted-decimal IP address in URL
@@ -33,8 +32,8 @@ uri FREEWEBHOSTINGCENTRAL       /freewebhostingcentral/i
 describe FREEWEBHOSTINGCENTRAL      Frequent SPAM content
 uri FREEWEBCO_NET_URL       /freewebco\.net/i
 describe FREEWEBCO_NET_URL      Frequent SPAM content
-uri 25FREEMEGS_URL          /25freemegs\.com/i
-describe 25FREEMEGS_URL         Frequent SPAM content
+uri FREEMEGS_URL          /25freemegs\.com/i
+describe FREEMEGS_URL         Frequent SPAM content
 uri WEB4PORNO_URL           /web4porno\.com/i
 describe WEB4PORNO_URL          Frequent SPAM content
 uri CLICKSFORMONEY_NET      /clicksformoney\.net/i
@@ -87,5 +86,9 @@ describe JAVASCRIPT_URI	Javascript protocol in a URI
 uri URI_IS_POUND	m{\#$}
 describe URI_IS_POUND	Filename is just a '\#'; probably a JS trick
 
-uri      WEIRD_PORT             m{https?://[^/]+:\d+/}
+uri      WEIRD_PORT             m{https?:\/\/[^/:\s]+:\d+}
 describe WEIRD_PORT             Uses non-standard port number for HTTP
+
+uri             SPAM_REDIRECTOR /https?\:.*(?:rd\.yahoo\.com|wwp\.icq\.com)/is
+describe        SPAM_REDIRECTOR Uses open redirection service
+

@@ -1,35 +1,62 @@
-#!/usr/bin/perl
+#!/usr/bin/perl -w
+
+# options
+#
+# -c=file       set $cffile
+# -f            use fork-based model to save RAM (used for mailbox files)
+# --all         don't skip big messages
+# --mh          use mh-style folder (directory of messages named with numbers)
+# --mn          find_missed('nonspam.log')
+# --ms          find_missed('spam.log')
+# --single      folder is a single mail message
+#
+# options for maildir and mh-style folders
+# --head=N      only check first N messages
+# --sort        sort contents of folders
+# --tail=N      only check last N messages
+#
+# all following arguments are used as the name of mail folders
+
+use vars qw($opt_c $opt_f $opt_all $opt_head $opt_mh $opt_ms $opt_mn
+	    $opt_single $opt_sort $opt_tail);
 
 use FindBin;
 use lib "$FindBin::Bin/../lib";
 use Mail::SpamAssassin;
 use Mail::SpamAssassin::NoMailAudit;
+use Getopt::Long;
+
+# flush buffer immediately so if mass-check fails or stops we don't get a corrupt line
+$|++;
+
+GetOptions("c=s", "f", "all", "head=i", "mh", "ms", "mn", "single", "sort",
+	   "tail=i");
 
 #use Devel::Peek;
 
-$cffile = "$FindBin::Bin/../rules";
-
-if (defined $ARGV[0] && $ARGV[0] eq '-c') {
-  shift; $cffile = $ARGV[0]; shift;
+if ($opt_c) {
+  $cffile = $opt_c;
+}
+else {
+  $cffile = "$FindBin::Bin/../rules";
 }
 
-if (defined $ARGV[0] && $ARGV[0] eq '-ms') {
-  shift; find_missed('spam.log');
+if ($opt_ms) {
+  find_missed('spam.log');
 }
-
-if (defined $ARGV[0] && $ARGV[0] eq '-mn') {
-  shift; find_missed('nonspam.log');
+elsif ($opt_mn) {
+  find_missed('nonspam.log');
 }
 
 my $FORK = 0;
-if (defined $ARGV[0] && $ARGV[0] eq '-f') { $FORK = 1; }
+if ($opt_f) { $FORK = 1; }
 
 $spamtest = new Mail::SpamAssassin ({
   'rules_filename'      => $cffile,
-  'userprefs_filename'  => "../spamassassin.prefs",
+  'userprefs_filename'  => "$FindBin::Bin/spamassassin.prefs",
   'local_tests_only'    => 1
 });
-$spamtest->compile_now();
+$spamtest->compile_now(1);
 
 my $count = 0;
 
@@ -43,6 +70,7 @@ sub wanted {
   my $ma = Mail::SpamAssassin::NoMailAudit->new ('data' => $dataref);
 
   $ma->{noexit} = 1;
+  $spamtest->remove_spamassassin_markup($ma);
   my $status = $spamtest->check ($ma);
   $status->rewrite_mail ();
 
@@ -71,14 +99,14 @@ sub mass_check_all_folders {
   my $sub = shift;
 
   foreach my $folder (@_) {
-    if ($folder =~ /.tar$/)
+    if ($folder =~ /\.tar$/)
     {
 	# it's an MH or Cyrus folder or Maildir in a tar file
 	use Archive::Tar;
 	mass_check_tar_file($sub, $folder);
     }
     elsif (-d $folder &&
-	  (-f "$folder/1" || -f "$folder/1.gz" || -f "$folder/cyrus.index"))
+	   ($opt_mh || -f "$folder/1" || -f "$folder/1.gz" || -f "$folder/cyrus.index"))
     {
       # it's an MH folder or a Cyrus mailbox
       mass_check_mh_folder($sub, $folder);
@@ -87,8 +115,13 @@ sub mass_check_all_folders {
     {
       # Maildir!
       mass_check_maildir($sub, $folder);
-   
-    } elsif (-f $folder) {
+    }
+    elsif (-f $folder && $opt_single)
+    {
+      # single message (for testing that variables are cleared appropriately)
+      mass_check_single($sub, $folder);
+    }
+    elsif (-f $folder) {
       mass_check_mailbox($sub, $folder);
     }
   }
@@ -112,25 +145,25 @@ sub mass_check_tar_file {
 sub mass_check_mh_folder {
   my $sub = shift;
   my $folder = shift;
-  my @files = <$folder/[0-9]*>;
+  opendir(DIR, $folder) || die "Can't open $folder dir: $!";
+  my @files = grep { -f } map { "$folder/$_" } grep { /^[0-9]/ } readdir(DIR);
+  closedir(DIR);
+
+  @files = sortbynum(@files) if $opt_sort;
+  splice(@files, $opt_head) if $opt_head;
+  splice(@files, 0, -$opt_tail) if $opt_tail;
   foreach my $mail (@files)
   {
-    # jm: commented size checks here; I can't see how they could be working,
-    # as "250_000" is not an int.  New size check implemented below
-
     if ($mail =~ /\.gz$/) {
-      # next if `gunzip -c $mail|wc -c` > 250_000; #skip messages bigger than 250k
       open (STDIN, "gunzip -cd $mail |") or warn "gunzip $mail failed: $@";
     } elsif ($mail =~ /\.bz2$/) {
-      # next if `bzip2 -dc $mail|wc -c` > 250_000; #skip messages bigger than 250k
       open (STDIN, "bzip2 -cd $mail |") or warn "bunzip2 $mail failed: $@";
     } else {
-      # next if `wc -c $mail` > 250_000; #skip messages bigger than 250k
       open (STDIN, "<$mail") or warn "open $mail failed: $@";
     }
 
     # skip too-big mails
-    if (-s STDIN > 250*1024) { close STDIN; next; }
+    if (! $opt_all && -s STDIN > 250*1024) { close STDIN; next; }
     my @msg = (<STDIN>);
     close STDIN;
 
@@ -141,25 +174,29 @@ sub mass_check_mh_folder {
 sub mass_check_maildir {
   my $sub = shift;
   my $folder = shift;
-  my @files = <$folder/{cur,new}/*>;
+  opendir(CURDIR, "$folder/cur") || die "Can't open $folder/cur dir: $!";
+  opendir(NEWDIR, "$folder/new") || die "Can't open $folder/new dir: $!";
+  my @files;
+  push @files, grep { -f } map { "$folder/cur/$_" } readdir(CURDIR);
+  push @files, grep { -f } map { "$folder/new/$_" } readdir(NEWDIR);
+  closedir(CURDIR);
+  closedir(NEWDIR);
+
+  @files = sortbynum(@files) if $opt_sort;
+  splice(@files, $opt_head) if $opt_head;
+  splice(@files, 0, -$opt_tail) if $opt_tail;
   foreach my $mail (@files)
   {
-    # jm: commented size checks here; I can't see how they could be working,
-    # as "250_000" is not an int.  New size check implemented below
-
     if ($mail =~ /\.gz$/) {
-      # next if `gunzip -c $mail|wc -c` > 250_000; #skip messages bigger than 250k
       open (STDIN, "gunzip -cd $mail |") or warn "gunzip $mail failed: $@";
     } elsif ($mail =~ /\.bz2$/) {
-      # next if `bzip2 -dc $mail|wc -c` > 250_000; #skip messages bigger than 250k
       open (STDIN, "bzip2 -cd $mail |") or warn "bunzip2 $mail failed: $@";
     } else {
-      # next if `wc -c $mail` > 250_000; #skip messages bigger than 250k
       open (STDIN, "<$mail") or warn "open $mail failed: $@";
     }
 
     # skip too-big mails
-    if (-s STDIN > 250*1024) { close STDIN; next; }
+    if (! $opt_all && -s STDIN > 250*1024) { close STDIN; next; }
     my @msg = (<STDIN>);
     close STDIN;
 
@@ -167,6 +204,25 @@ sub mass_check_maildir {
   }
 }
 
+sub mass_check_single {
+  my $sub = shift;
+  my $folder = shift;
+
+  if ($folder =~ /\.gz$/) {
+    open (STDIN, "gunzip -cd $folder |") or warn "gunzip $folder failed: $@";
+  } elsif ($folder =~ /\.bz2$/) {
+    open (STDIN, "bzip2 -cd $folder |") or warn "bunzip2 $folder failed: $@";
+  } else {
+    open (STDIN, "<$folder") or warn "open $folder failed: $@";
+  }
+
+  # skip too-big mails
+  if (! $opt_all && -s STDIN > 250*1024) { close STDIN; next; }
+  my @msg = (<STDIN>);
+  close STDIN;
+
+  &$sub ($folder, \@msg);
+}
 
 sub mass_check_mailbox {
   my $sub = shift;
@@ -202,12 +258,12 @@ sub mass_check_mailbox {
       push (@msg, $_);
     }
 
-    if (scalar @msg > 1000) { next; }	# too big
+    if (! $opt_all && scalar @msg > 1000) { next; }	# too big
 
     # switch to a fork-based model to save RAM
     if ($FORK && fork()) { wait; next; }
 
-    $msgid = "$folder:$msgid";		# so we can find it again
+    $msgid = "$folder:$msgid";	# so we can find it again
     $msgid =~ s/\s/_/gs;	# make safe
 
     &$sub ($msgid, \@msg);
@@ -217,9 +273,8 @@ sub mass_check_mailbox {
 }
 
 sub sortbynum {
-  $a =~ m,\/(\d+).*$,; my $anum = $1;
-  $b =~ m,\/(\d+).*$,; my $bnum = $1;
-  ($anum <=> $bnum);
+    return map { $_->[0] }
+	sort { $a->[1] <=> $b->[1] } map { [$_, /\/(\d+).*$/] } @_;
 }
 
 ############################################################################
@@ -255,7 +310,7 @@ sub find_missed {
     } elsif (!$shouldbespam && $score > $threshold) {
       found_missed ($score, $id, $_);
     }
-  } 
+  }
   close IN;
 }
 
@@ -289,5 +344,3 @@ sub found_missed {
 
   print "$score $id $tests\n";
 }
-
-

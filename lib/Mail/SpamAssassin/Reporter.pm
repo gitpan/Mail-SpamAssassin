@@ -45,6 +45,15 @@ sub report {
       dbg ("SpamAssassin: spam reported to Razor.");
     }
   }
+  if (!$self->{main}->{local_tests_only}
+  	&& !$self->{options}->{dont_report_to_dcc}
+    && !$self->{main}->{stop_at_threshold}
+	&& $self->is_dcc_available())
+  {
+    if ($self->dcc_report($text)) {
+      dbg ("SpamAssassin: spam reported to DCC.");
+    }
+  }
 }
 
 ###########################################################################
@@ -99,7 +108,7 @@ sub razor_report {
     alarm 10;
 
     my $rc = Razor::Client->new ($config, %options);
-    die "undefined Razor::Client\n" if (!$rc);
+    die "Problem while loading Razor: $!" if (!$rc);
 
     my $ver = $Razor::Client::VERSION;
     if ($ver >= 1.12) {
@@ -136,6 +145,69 @@ sub razor_report {
   }
 }
 
+sub is_dcc_available {
+  my ($self) = @_;
+  my (@resp);
+
+  if ($self->{main}->{local_tests_only}) {
+    dbg ("local tests only, ignoring DCC");
+    return 0;
+  }
+
+  if (!open(DCCHDL, "dccproc -V 2>&1 |")) {
+    dbg ("DCC is not available");
+    return 0;
+  } 
+  else {
+    @resp = <DCCHDL>;
+    close DCCHDL;
+    dbg ("DCC is available: ".join(" ", @resp));
+    return 1;
+  }
+}
+
+use Symbol qw(gensym);
+
+sub dcc_report {
+  my ($self, $fulltext) = @_;
+
+  eval {
+    use IPC::Open2;
+    my ($dccin, $dccout, $pid);
+
+    local $SIG{ALRM} = sub { die "alarm\n" };
+    local $SIG{PIPE} = sub { die "brokenpipe\n" };
+
+    alarm 10;
+
+    $dccin  = gensym();
+    $dccout = gensym();
+
+    $pid = open2($dccout, $dccin, 'dccproc -t many '.$self->{main}->{conf}->{dcc_options}.' >/dev/null 2>&1');
+
+    print $dccin $fulltext;
+
+    close ($dccin);
+
+    waitpid ($pid, 0);
+
+    alarm(0);
+  };
+
+  if ($@) {
+    if ($@ =~ /alarm/) {
+      dbg ("DCC report timed out after 10 secs.");
+      return 0;
+    } elsif ($@ =~ /brokenpipe/) {
+      dbg ("DCC report failed - Broken pipe.");
+      return 0;
+    } else {
+      warn ("DCC report skipped: $! $@");
+      return 0;
+    }
+  }
+  return 1;
+}
 ###########################################################################
 
 sub dbg { Mail::SpamAssassin::dbg (@_); }

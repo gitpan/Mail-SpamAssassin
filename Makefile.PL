@@ -14,6 +14,9 @@ use ExtUtils::MakeMaker;
 # do this in perl, it's more portable
 my $rulesfiles = join (' ', map { s/rules.//; $_ } (<rules/*.cf>));
 $rulesfiles =~ s/local\.cf//;
+$rulesfiles =~ s/regression_tests\.cf//; # Don't include regression tests
+
+$rulesfiles .= " triplets.txt languages";
 
 sub MY::libscan {
   my($self,$path) = @_;
@@ -47,6 +50,7 @@ WriteMakefile(
 
     'PREREQ_PM' => {
                         'File::Copy' => 0,
+                        'Time::HiRes' => 0,
                   },
 
     'dist' => {

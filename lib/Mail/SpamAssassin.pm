@@ -59,64 +59,71 @@ use File::Copy;
 use Cwd;
 use Config;
 
+# Let's not make this required -- Marc
+#eval { require Time::HiRes };
+#Time::HiRes->import( qw(time) ) unless $@;
+# Unfortunately, the above doesn't work, please FIXME
+use Time::HiRes qw ( time );
+
 use vars	qw{
-  	@ISA $VERSION $SUB_VERSION $HOME_URL $DEBUG
+  	@ISA $VERSION $SUB_VERSION $HOME_URL $DEBUG $TIMELOG
 	@default_rules_path @default_prefs_path
 	@default_userprefs_path @default_userstate_dir
 	@site_rules_path @old_site_rules_path
 };
 
+# Create the hash so that it really points to something, otherwise we can't
+# get a reference to it -- Marc
+$TIMELOG->{dummy}=0;
 @ISA = qw();
 
-$VERSION = "2.20";
-$SUB_VERSION = 'devel $Id: SpamAssassin.pm,v 1.77 2002/04/06 19:28:30 hughescr Exp $';
+$VERSION = "2.30";
+$SUB_VERSION = 'devel $Id: SpamAssassin.pm,v 1.94 2002/06/14 23:17:15 hughescr Exp $';
 
 sub Version { $VERSION; }
 
 $HOME_URL = "http://spamassassin.org/";
 
-$DEBUG = 0;
-
 #__installsitelib__/spamassassin.cf
 #__installvendorlib__/spamassassin.cf
-@default_rules_path = qw(
-        __prefix__/share/spamassassin
-        /usr/local/share/spamassassin
-  	/usr/share/spamassassin
-	./rules
-	../rules
+@default_rules_path = (
+        '__prefix__/share/spamassassin',
+        '/usr/local/share/spamassassin',
+  	'/usr/share/spamassassin',
+	'./rules',
+	'../rules',
 );
 
 # first 3 are BSDish, latter 2 Linuxish
-@site_rules_path = qw(
-        __prefix__/etc/mail/spamassassin
-        __prefix__/etc/spamassassin
-        /usr/local/etc/spamassassin
-	/usr/pkg/etc/spamassassin
-        /usr/etc/spamassassin
-  	/etc/mail/spamassassin
-  	/etc/spamassassin
+@site_rules_path = (
+        '__prefix__/etc/mail/spamassassin',
+        '__prefix__/etc/spamassassin',
+        '/usr/local/etc/spamassassin',
+	'/usr/pkg/etc/spamassassin',
+        '/usr/etc/spamassassin',
+  	'/etc/mail/spamassassin',
+  	'/etc/spamassassin',
 );
 
-@old_site_rules_path = qw(
-  	/etc/mail/spamassassin.cf
-  	/etc/spamassassin.cf
+@old_site_rules_path = (
+  	'/etc/mail/spamassassin.cf',
+  	'/etc/spamassassin.cf',
 );
     
-@default_prefs_path = qw(
-        __prefix__/etc/mail/spamassassin/user_prefs.template
-        __prefix__/share/spamassassin/user_prefs.template
-        /etc/mail/spamassassin/user_prefs.template
-        /usr/local/share/spamassassin/user_prefs.template
-        /usr/share/spamassassin/user_prefs.template
+@default_prefs_path = (
+        '__prefix__/etc/mail/spamassassin/user_prefs.template',
+        '__prefix__/share/spamassassin/user_prefs.template',
+        '/etc/mail/spamassassin/user_prefs.template',
+        '/usr/local/share/spamassassin/user_prefs.template',
+        '/usr/share/spamassassin/user_prefs.template',
 );
 
-@default_userprefs_path = qw(
-        ~/.spamassassin/user_prefs
+@default_userprefs_path = (
+        '~/.spamassassin/user_prefs',
 );
 
-@default_userstate_dir = qw(
-        ~/.spamassassin
+@default_userstate_dir = (
+        '~/.spamassassin',
 );
 
 ###########################################################################
@@ -172,7 +179,26 @@ sub new {
   if (!defined $self) { $self = { }; }
   bless ($self, $class);
 
-  if (defined $self->{debug}) { $DEBUG = $self->{debug}+0; }
+  $DEBUG->{enabled} = 0;
+  if (defined $self->{debug} and $self->{debug}) { $DEBUG->{enabled} = 1 }
+
+  # This should be moved elsewhere, I know, but SA really needs debug sets 
+  # I'm putting the intialization here for now, move it if you want
+
+  # For each part of the code, you can set debug levels. If the level is
+  # progressive, use negative numbers (the more negative, the move debug info
+  # is put out), and if you want to use bit fields, use positive numbers
+  # All code path debug codes should be listed here with a value of 0 if you
+  # want them disabled -- Marc
+
+  $DEBUG->{datediff}=-1;
+  $DEBUG->{razor}=-3;
+  $DEBUG->{rbl}=0;
+  $DEBUG->{timelog}=0;
+  # Bitfield:
+  # header regex: 1 | body-text: 2 | uri tests: 4 | raw-body-text: 8
+  # full-text regexp: 16 | run_eval_tests: 32 | run_rbl_eval_tests: 64
+  $DEBUG->{rulesrun}=64;
 
   $self->{conf} ||= new Mail::SpamAssassin::Conf ($self);
   $self;
@@ -199,10 +225,19 @@ sub check {
   my ($self, $mail_obj) = @_;
   local ($_);
 
+  timelog("Starting SpamAssassin Check", "SAfull", 1);
   $self->init(1);
+  timelog("Init completed");
   my $mail = $self->encapsulate_mail_object ($mail_obj);
   my $msg = Mail::SpamAssassin::PerMsgStatus->new($self, $mail);
+  chomp($TIMELOG->{mesgid} = ($mail_obj->get("Message-Id") || 'nomsgid'));
+  $TIMELOG->{mesgid} =~ s#<(.*)>#$1#;
+  # Message-Id is used for a filename on disk, so we can't have '/' in it.
+  $TIMELOG->{mesgid} =~ s#/#-#g;
+  timelog("Created message object, checking message", "msgcheck", 1);
   $msg->check();
+  timelog("Done checking message", "msgcheck", 2);
+  timelog("Done running SpamAssassin", "SAfull", 2);
   $msg;
 }
 
@@ -426,6 +461,10 @@ sub read_scoreonly_config {
   close IN;
 
   $self->{conf}->parse_scores_only ($text);
+  if ($self->{conf}->{allow_user_rules}) {
+      dbg("finishing parsing!");
+      $self->{conf}->finish_parsing();
+  }
 }
 
 ###########################################################################
@@ -465,7 +504,7 @@ sub set_persistent_address_list_factory {
 
 ###########################################################################
 
-=item $f->compile_now ()
+=item $f->compile_now ($use_user_prefs)
 
 Compile all patterns, load all configuration files, and load all
 possibly-required Perl modules.
@@ -477,22 +516,25 @@ this is suboptimal, as each process/thread will have to perform these actions.
 Call this function in the master thread or process to perform the actions
 straightaway, so that the sub-processes will not have to.
 
-Note that this will initialise the SpamAssassin configuration without reading
-the per-user configuration file; it assumes that you will call
-C<read_scoreonly_config> at a later point.
+If C<$use_user_prefs> is 0, this will initialise the SpamAssassin
+configuration without reading the per-user configuration file and it will
+assume that you will call C<read_scoreonly_config> at a later point.
 
 =cut
 
 sub compile_now {
-  my ($self) = @_;
+  my ($self, $use_user_prefs) = @_;
 
   # note: this may incur network access. Good.  We want to make sure
   # as much as possible is preloaded!
-  my @testmsg = ("From: ignore\@compiling.spamassassin.taint.org\n",
-  			"\n", "x\n");
+  # Timelog uses the Message-ID for the filename on disk, so let's set that
+  # to a value easy to recognize. It'll show when spamd was restarted -- Marc
+  my @testmsg = ("From: ignore\@compiling.spamassassin.taint.org\n", 
+    "Message-Id:  <".time."\@spamassassin_spamd_init>\n", "\n",
+    "I need to make this message body somewhat long so TextCat preloads\n"x20);
 
   dbg ("ignore: test message to precompile patterns and load modules");
-  $self->init(0);
+  $self->init($use_user_prefs);
   my $mail = Mail::SpamAssassin::NoMailAudit->new(data => \@testmsg);
   $self->check($mail)->finish();
 
@@ -525,9 +567,17 @@ sub init {
     my $fname = $self->first_existing_path (@default_rules_path);
     $self->{rules_filename} or $self->{config_text} .= $self->read_cf ($fname, 'default rules dir');
 
+    if (-f "$fname/languages") {
+	$self->{languages_filename} = "$fname/languages";
+    }
+
     $fname = $self->{rules_filename};
     $fname ||= $self->first_existing_path (@site_rules_path);
     $self->{config_text} .= $self->read_cf ($fname, 'site rules dir');
+
+    if (-f "$fname/languages") {
+	$self->{languages_filename} = "$fname/languages";
+    }
 
     if ( $use_user_pref != 0 ) {
       $self->create_dotsa_dir_if_needed();
@@ -666,7 +716,8 @@ sub create_default_prefs {
 			 "\"$fname\" from default \"$defprefs\".\n";
    }
  }
-
+ elsif ($self->{dont_copy_prefs}) { return 1; }
+ 
  return(0);
 }
 
@@ -674,9 +725,12 @@ sub create_default_prefs {
 
 sub expand_name ($) {
   my ($self, $name) = @_;
-  return $ENV{HOME} if $ENV{HOME} =~ /\//;
-  return (getpwnam($name))[7] if ($name ne '');
-  return (getpwuid($>))[7];
+  if ($name eq '') {
+      return $ENV{HOME} if ($ENV{HOME} && $ENV{HOME} =~ /\//);
+      return (getpwuid($>))[7];
+  } else {
+      return (getpwnam($name))[7];
+  }
 }
 
 sub sed_path {
@@ -813,8 +867,91 @@ sub find_all_addrs_in_line {
   return @addrs;
 }
 
+# First argument is the message you want to log for that time
+# wheredelta is 1 for starting a split on the stopwatch, and 2 for showing the
+# instant delta (used to show how long a specific routine took to run)
+# deltaslot says which stopwatch you are working with (needs to match for begin
+# and end obviously)
+sub timelog {
+  my ($msg, $deltaslot, $wheredelta) = @_;
+  my $now=time;
+  my $tl=$Mail::SpamAssassin::TIMELOG;
+  my $dbg=$Mail::SpamAssassin::DEBUG;
+
+  if (defined($deltaslot) and ($deltaslot eq "SAfull") and defined($wheredelta) and ($wheredelta eq 1)) {
+    $tl->{'start'}=$now;
+    # Because spamd is long running, we need to close and re-open the log file
+    if ($tl->{flushedlogs}) {
+	$tl->{flushedlogs}=0;
+	$tl->{mesgid}="";
+	@{$tl->{keeplogs}} = ();
+	close(LOG);
+    }
+  } 
+
+  if (defined $wheredelta) {
+    $tl->{stopwatch}->{$deltaslot}=$now if ($wheredelta eq 1);
+    if ($wheredelta eq 2) {
+      if (not defined $tl->{stopwatch}->{$deltaslot}) {
+	warn("Error: got end of time log for $deltaslot but never got the start\n");
+      } else {
+	$msg.=sprintf(" (Delta: %.3fs)", 
+	  $now - $tl->{stopwatch}->{$deltaslot} );
+      }
+    }
+  }
+
+  $msg=sprintf("%.3f: $msg\n", $now - ($tl->{start}||0));
+
+  if (not ($tl->{logpath} and $tl->{mesgid})) {
+    push (@{$tl->{keeplogs}}, $msg);
+    print $msg if ($dbg->{timelog});
+    dbg("Log not yet opened, continuing", "timelog", -2);
+    return;
+  } 
+  if (not $tl->{flushedlogs} and $tl->{logpath} and $tl->{mesgid}) {
+    my $file="$tl->{logpath}/".sprintf("%.4f",time)."_$tl->{mesgid}";
+
+    $tl->{flushedlogs}=1;
+    dbg("Flushing logs to $file", "timelog", -2);
+    open (LOG, ">>$file") or warn("Can't open $file: $!");
+
+    while (defined ($_ = shift(@{$tl->{keeplogs}})))
+    {
+      print LOG $_;
+    }
+    dbg("Done flushing logs", "timelog", -2);
+  }
+  print LOG $msg;
+  print $msg if ($dbg->{timelog});
+}
+
+
+# Only the first argument is needed, and it can be a reference to a list if
+# you want
 sub dbg {
-  if ($Mail::SpamAssassin::DEBUG > 0) { warn "debug: ".join('',@_)."\n"; }
+  my $dbg=$Mail::SpamAssassin::DEBUG;
+
+  return unless $dbg->{enabled};
+
+  my ($msg, $codepath, $level) = @_;
+
+  $msg=join('',@{$msg}) if (ref $msg);
+
+  if (defined $codepath) {
+    if (not defined $dbg->{$codepath}) {
+      warn("dbg called with codepath $codepath, but it's not defined, skipping (message was \"$msg\"\n");
+      return 0;
+    } elsif (not defined $level) {
+      warn("dbg called with codepath $codepath, but no level threshold (message was \"$msg\"\n");
+    }
+  }
+  # Negative levels are just level numbers, the more negative, the more debug
+  return if (defined $level and $level<0 and not $dbg->{$codepath} <= $level);
+  # Positive levels are bit fields
+  return if (defined $level and $level>0 and not $dbg->{$codepath} & $level);
+
+  warn "debug: $msg\n";
 }
 
 # sa_die -- used to die with a useful exit code.
@@ -847,6 +984,7 @@ See also http://spamassassin.org/ for more information.
 
 =head1 SEE ALSO
 
+C<Mail::SpamAssassin::Conf>
 C<Mail::SpamAssassin::PerMsgStatus>
 C<spamassassin>
 

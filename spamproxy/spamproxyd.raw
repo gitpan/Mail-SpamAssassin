@@ -1,4 +1,5 @@
-#!/usr/bin/perl
+#!/usr/bin/perl -w
+
 
 eval 'exec /usr/bin/perl  -S $0 ${1+"$@"}'
     if 0; # not running under some shell
@@ -13,6 +14,10 @@ eval 'exec /usr/bin/perl  -S $0 ${1+"$@"}'
 my $children = 4;
 my $minperchild = 5;
 my $maxperchild = 10;
+my $shared=0;
+my $debug=0;
+my $recipient_mapping=0; # name of the file which will be used 
+my %recipient_mapping;
 
 # This file is based largely on example code bundled with MacGyver's
 # Net::SMTP::Server kit, but with some additional stuff to use
@@ -28,6 +33,8 @@ my $maxperchild = 10;
 #
 # --Ian R. Justman <ianj@esper.net>, 11/21/2001
 
+use Sys::Syslog qw(:DEFAULT setlogsock);
+
 use Carp;
 use Net::SMTP::Server;
 use Net::SMTP::Server::Client;
@@ -36,9 +43,10 @@ use Mail::SpamAssassin::NoMailAudit;
 use Mail::SpamAssassin;
 use Net::DNS;
 use Getopt::Long;
+use strict;
 
 my $spamtest = Mail::SpamAssassin->new();
-$spamtest->compile_now();       # ensure all modules etc. are preloaded
+$spamtest->compile_now(0);      # ensure all modules etc. are preloaded
 $/ = "\n";                      # argh, Razor resets this!  Bad Razor!
 
 # This is the preforking and option-parsiong section taken from the MSDW
@@ -54,30 +62,72 @@ $/ = "\n";                      # argh, Razor resets this!  Bad Razor!
 # --irj
 
 my $syntax = "syntax: $0 [--children=$children] [--minperchild=$minperchild] ".
-             "[--maxperchild=$maxperchild] ".
-             "listen.addr:port talk.addr:port spamaddr\@example.com\n";
+             "[--maxperchild=$maxperchild] [--shared] [--debug] [--recipient_mapping=file]".
+             "listen.addr:port talk.addr:port [spamaddr\@example.com]\n";
 
-GetOptions("children=n" => \$children,
-           "minperchild=n" => \$minperchild,
-           "maxperchild=n" => \$maxperchild) or die $syntax;
-
-die $syntax unless @ARGV == 2;
-my ($srcaddr, $srcport) = split /:/, $ARGV[0];
-my ($dstaddr, $dstport) = split /:/, $ARGV[1];
-if(@ARGV == 3) {
-  my $spamaddr = $ARGV[2];
-} else {
-  my $spamaddr = "recipient";
+sub stop{
+    my $message=$_;
+    print $message;
+    die $syntax;
 }
 
-print "Trying to start using source $srcaddr port $srcport, " .
-      "destination $dstaddr port $dstport, " . 
-      "reporting e-mail address $spamaddr.\n";
+GetOptions("children=n" => \$children,
+	   "shared" => \$shared,
+	   "debug+" => \$debug,
+	   "recipient_mapping=s" => \$recipient_mapping,
+           "minperchild=n" => \$minperchild,
+           "maxperchild=n" => \$maxperchild) or &stop("can't get the options !\n");
 
-die $syntax unless defined($srcport) and defined($dstport)
+&stop("Numbers of arguments must be at least two !\n") unless @ARGV == 2;
+
+my ($srcaddr, $srcport) = split /:/, $ARGV[0];
+my ($dstaddr, $dstport) = split /:/, $ARGV[1];
+my $spamaddr;
+if(@ARGV == 3) {
+  $spamaddr = $ARGV[2];
+} else {
+  $spamaddr = "recipient";
+}
+
+if ($recipient_mapping)
+{
+
+    print "opening file $recipient_mapping ...\n" if $debug;
+    open(RECIPIENT_MAPPING,$recipient_mapping) || die "can't open $recipient_mapping, $!";
+    my @recipient_mapping=<RECIPIENT_MAPPING>;
+    close RECIPIENT_MAPPING;
+    foreach (@recipient_mapping)
+    {
+	next if /^\s*\#/;
+	if (/([\w\-@\.\+<>]+)\s+([\w\-@\.\+<>]+)/)
+	{
+	    my $destination=$1;
+	    my $rewrite=$2;
+	    print "$destination -> $rewrite\n" if $debug;
+	    $recipient_mapping{$destination}=$rewrite;
+	}
+    }
+}
+
+
+my $trying_message="Trying to start using source $srcaddr port $srcport, " .
+    "destination $dstaddr port $dstport, " . 
+    "reporting e-mail address $spamaddr.".
+    " shared : $shared".
+    " recipient_mapping file : $recipient_mapping".
+    " debug : $debug\n";
+
+print $trying_message;
+
+setlogsock 'unix';
+openlog('spamassassin', 'nowait', 'local3');
+syslog('notice', $trying_message);
+closelog();
+
+&stop("srcport or dstport not defined !\n") unless defined($srcport) and defined($dstport)
   and defined($spamaddr);
 
-$smarthost=$dstaddr . ":" . $dstport;
+my $smarthost=$dstaddr . ":" . $dstport;
 
 # Set up the server using the IP address and port specified on the command
 # line by the user.
@@ -86,11 +136,18 @@ $smarthost=$dstaddr . ":" . $dstport;
 # I'll spare everyone those details here as that info is in his code. 
 # Instead,  I'll be concentrating on the message-handling portion. --irj
 
-$server = new Net::SMTP::Server($srcaddr, $srcport) ||
+my $server = new Net::SMTP::Server($srcaddr, $srcport) ||
   croak("Unable to create server: $!\n");
 
-print "Server started on address $srcaddr port $srcport " .
-      "with destination address $dstaddr port $dstport";
+my $startup_message= "Server started on address $srcaddr port $srcport " .
+      "with destination address $dstaddr port $dstport\n";
+
+print $startup_message;
+
+setlogsock 'unix';
+openlog('spamassassin', 'nowait', 'local3');
+syslog('notice', $startup_message);
+closelog();
 
 # [MSDW]
 # This should allow a kill on the parent to also blow away the
@@ -127,7 +184,9 @@ PARENT: while (1) {
 my $lives = $minperchild + (rand($maxperchild - $minperchild));
 my %opts;
 
-while($conn = $server->accept()) {
+while(my $conn = $server->accept()) {
+    my $port=$conn->peerport();
+    print "getting connection port $port\n" if $debug; 
     my $client = new Net::SMTP::Server::Client($conn) ||
       croak("Unable to handle client connection: $!\n");
 
@@ -144,11 +203,19 @@ while($conn = $server->accept()) {
     # handed to a new Mail::SpamAssassin::NoMailAudit object.
     # --irj
 
-    $message = $client->{MSG};
-    @msg = split ("\r\n", $message);
-    $arraycont = @msg; for(0..$arraycont) { $msg[$_] .= "\r\n"; }
-    %args = (data => \@msg);
-    $mail = Mail::SpamAssassin::NoMailAudit->new(%args);
+    # perldoc -f split
+    #split   Splits a string into a list of strings and returns
+    #           that list.  By default, empty leading fields are
+    #           preserved, and empty trailing ones are deleted.
+    #
+    # so, it removes last empty lines !!! -> hence the last argument, -1
+    
+
+    my $message = $client->{MSG};
+    my @msg = split ("\r\n", $message,'-1');
+    my $arraycont = @msg; for(0..$arraycont) { $msg[$_] .= "\r\n"; }
+    my %args = (data => \@msg);
+    my $mail = Mail::SpamAssassin::NoMailAudit->new(%args);
 
     # At some point, I may also put some other code so I can go grab
     # preferences, e.g. via MySQL, e.g. scoring parameters, or even whether to
@@ -164,19 +231,81 @@ while($conn = $server->accept()) {
     # instead, pass the original message to the smarthost code below.
     # --irj
 
+    my $recips;
+    my $msg;
     my $status = $spamtest->check($mail);
+    my @msg_debug;
+
     if ($status->is_spam ()) {
+        $msg = sprintf("    SPAM[%6.1f]: %s", $status->get_hits(), $status->get_names_of_tests_hit());
+	# add headers
         $status->rewrite_mail ();
-        $message = join ("",$mail->header(),@{$mail->body()});
+	
+	my $header=join("",$mail->header());
+	my $body=join("",@{$mail->body()});
+        $message = join ("\r\n",$header,$body);
+
+        # $message = join ("",$mail->header(),@{$mail->body()}); # original
+	print $message,"\n" if $debug>=2;
+
+	# check if the mail goes to one address
         if($spamaddr ne "recipient") {
-          @recipients = ("$spamaddr");
+          my @recipients = ("$spamaddr");
           $recips = \@recipients;
         } else {
-          $recips = $client->{TO};
+	    $recips = $client->{TO};
+	  
+
+	    if ($shared)
+	    {
+		my @rewrite=map {my $init=$_;s/<(.*?)(\@.*)/<shared+user.$1.spam$2/g;
+			     push @msg_debug,"rewrite shared $init -> $_";$shared} @{$client->{TO}};
+		
+		$recips=\@rewrite;
+	    }
+	    
+	    
+	    if ($recipient_mapping)
+	    {
+		# if there is an entry in the recipient mapping, replace it by the value
+		# otherwise let it alone.
+		my @rewrite=map { if ($recipient_mapping{$_})
+				  {push @msg_debug,"rewrite $_ -> $recipient_mapping{$_}";
+				   $recipient_mapping{$_}}
+				  else{push @msg_debug,"not rewriting $_";$_}} @{$client->{TO}};
+		
+		$recips=\@rewrite;
+	    }
+	    
+
         }
     } else {
+        $msg = sprintf("NOT_SPAM[%6.1f]: %s", $status->get_hits(), $status->get_names_of_tests_hit());
+
+	# added the next 2 lines so that even if it's not spam we got statistics (xavier renaut)
+
+	$status->rewrite_mail ();
+	my $header=join("",$mail->header());
+	my $body=join("",@{$mail->body()});
+        $message = join ("\r\n",$header,$body);
+	print $message,"\n" if $debug>=2;
+	# end of addition
+
         $recips = $client->{TO};
     }
+
+    setlogsock 'unix';
+    openlog('spamassassin', 'nowait', 'local3');
+    syslog('notice', $msg);
+    if ($debug)
+    {
+	foreach (@msg_debug)
+	{
+	    syslog('notice', $_); 
+	    print $_,"\n";
+	}
+    }
+    closelog();
 
     $status->finish();
 
@@ -198,6 +327,7 @@ while($conn = $server->accept()) {
 
     # Zap this instance if this child's processing limit has been reached.
     # --irj
+    print "mail     delivered port $port\n" if $debug;
     
     delete $server->{"s"};
     exit 0 if $lives-- <= 0;
@@ -220,7 +350,20 @@ spamproxyd - mail filter to identify spam using text analysis
 
 =over 4
 
-F<spamproxyd> currently has no options.
+--shared deliver the spam to shared+user.$user.spam
+   (usefull for imap users (i'm using cyrus))
+
+--debug print the recipient inside of spamproxyd (using twice --debug will increase the debug)
+
+--recipient_mapping=file  reads a file which contains two emails per line
+    (with <> around each email (depending on your mta)), space separated.
+    the spam coming to the first email will be sent to the second email
+    (example : <joe@mydomain.com> <joe-spam@mydomain.com>
+
+
+
+spamproxyd used Mail::Spamassassin, which loads local.cf 
+(in rules directory) as site-wide preferences. You may want to add/modify it.
 
 =back
 
@@ -289,4 +432,35 @@ appropriate credit, but you still deserve it.  You've been a big help.  :)
 C<Mail::SpamAssassin>
 C<Net::SMTP::Server>
 
+=head1 EXAMPLES
+
+here is how i use it (postfix) :
+
+I added in : 
+
+postfix main.cf :
+
+content_filter = smtp:localhost:10025 
+
+postfix master.cf :
+
+localhost:10026     inet  n      -      n      -      10      smtpd
+      -o content_filter=
+      -o local_recipient_maps=
+      -o myhostname=localhost.hansonpublications.com
+
+and i start spamproxyd via :
+
+./spamproxyd.pl --debug 127.0.0.1:10025 127.0.0.1:10026
+
+=head1 TODO
+
+Daemonize it
+
+Add signal catchs (for termination)
+
+Create a pid file
+
 =cut
+
+
