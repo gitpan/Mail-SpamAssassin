@@ -6,6 +6,13 @@ describe NO_REAL_NAME		From: does not include a real name
 
 header FROM_ENDS_IN_NUMS	From =~ /\d\d\@/
 describe FROM_ENDS_IN_NUMS	From: ends in numbers
+test FROM_ENDS_IN_NUMS     ok   matt1234@sergeant.org
+test FROM_ENDS_IN_NUMS     fail matt@sergeant.org
+
+header FROM_STARTS_WITH_NUMS	From =~ /^\d\d/
+describe FROM_STARTS_WITH_NUMS	From: starts with nums
+test FROM_STARTS_WITH_NUMS     ok   1234matt@sergeant.org
+test FROM_STARTS_WITH_NUMS     fail matt@sergeant.org
 
 header FROM_HAS_MIXED_NUMS	From =~ /\d+[a-z]+\d+\S*@/i
 describe FROM_HAS_MIXED_NUMS	From: contains numbers mixed in with letters
@@ -17,13 +24,13 @@ describe FROM_NO_USER		From: has no local-part before @ sign
 header TO_NO_USER		To =~ /(?:^\@|<\@| \@[^<]*$|<>)/ [if-unset: unset@unset.unset]
 describe TO_NO_USER		To: has no local-part before @ sign
 
-header TO_MALFORMED		To !~ /(?:(?:\"[^\"]+\"|\S+)\@\S+\.\S+|undisclosed-recipients:)/ [if-unset: unset@unset.unset]
+header TO_MALFORMED		To !~ /(?:(?:\"[^\"]+\"|\S+)\@\S+\.\S+|undisclosed-recipients:|<\S+(\!\S+){1,}>)/ [if-unset: unset@unset.unset]
 describe TO_MALFORMED		To: has a malformed address
 
 header TO_LOCALPART_EQ_REAL     To =~ /^\s*(\"?)([\w%\+\-=_\.]+)\1\s*<\2\@[\w%\+\-=_\.]+>/i
 describe TO_LOCALPART_EQ_REAL   To: repeats local-part as real name
 
-header FROM_MALFORMED		From !~ /(?:\"[^\"]+\"|\S+)\@\S+\.\S+/ [if-unset: unset@unset.unset]
+header FROM_MALFORMED		From !~ /(?:\"[^\"]+\"|\S+)\@\S+\.\S+|<\S+(\!\S+){1,}>/ [if-unset: unset@unset.unset]
 describe FROM_MALFORMED		From: has a malformed address
 
 header PLING			Subject =~ /\!/
@@ -47,8 +54,11 @@ describe FAKED_UNDISC_RECIPS	Faked To "Undisclosed-Recipients"
 header TO_INVESTORS		To =~ /\bInvestors\@/
 describe TO_INVESTORS		To: non-existent 'Investors' address
 
-header SUBJ_ALL_CAPS		Subject =~ /^[^a-z]*$/
+header SUBJ_ALL_CAPS		eval:subject_is_all_caps()
 describe SUBJ_ALL_CAPS		Subject is all capitals
+
+header SUBJ_MISSING            eval:subject_missing()
+describe SUBJ_MISSING          Subject: is empty or missing
 
 # (allow this test to pass if there's no Message-Id header)
 header MSGID_HAS_NO_AT		Message-Id !~ /\@/ [if-unset: NO@MSGID]
@@ -74,7 +84,7 @@ header INVALID_DATE_ODD_MONTH	Date =~ /\d+ [^A-Z]{3,} \d\d\d\d/i
 describe INVALID_DATE_ODD_MONTH Invalid Date: header (wierd month)
 
 header DATE_IN_FUTURE		eval:check_for_forward_date()
-describe DATE_IN_FUTURE		Date: is in the future or unparseable
+describe DATE_IN_FUTURE		Date: Differs by more than 4 days from current date
 
 header SUBJ_HAS_Q_MARK		Subject =~ /\?.{2,}$/
 describe SUBJ_HAS_Q_MARK	Subject: contains a question mark
@@ -87,6 +97,9 @@ describe ADVERT_CODE		Subject: contains advertising tag
 
 header FRIEND_AT_PUBLIC	To =~ /(yourdomain|you|your|public).(com|org|net)/i
 describe FRIEND_AT_PUBLIC	sent to you@you.com or similar
+
+header DOMAIN_SUBJECT		Subject =~ /(\s(\.|dot\s+)(info|biz|name)|domain)\b.*(extension|info|regist(ry|ration|er)|submission)/i
+describe DOMAIN_SUBJECT		Subject: domain registration spam subject
 
 header TO_EMPTY			To =~ /^(?:\@|\s*$)/ [if-unset: UNSET]
 describe TO_EMPTY		To: is empty
@@ -143,8 +156,9 @@ describe RCVD_IN_RELAYS_ORDB_ORG Received via a relay in relays.ordb.org
 header RCVD_IN_OSIRUSOFT_COM	eval:check_rbl('relay', 'relays.osirusoft.com.')
 describe RCVD_IN_OSIRUSOFT_COM	Received via a relay in relays.osirusoft.com
 
-header RCVD_IN_ORBZ		eval:check_rbl('relay', 'inputs.orbz.org.')
-describe RCVD_IN_ORBZ		Received via a relay in inputs.orbz.org
+# ORBZ is indifinitely suspended
+#header RCVD_IN_ORBZ		eval:check_rbl('relay', 'inputs.orbz.org.')
+#describe RCVD_IN_ORBZ		Received via a relay in inputs.orbz.org
 
 header RCVD_IN_VISI		eval:check_rbl('relay', 'relays.visi.com.')
 describe RCVD_IN_VISI		Received via a relay in relays.visi.com
@@ -212,6 +226,9 @@ describe FORGED_EUDORAMAIL_RCVD	Forged eudoramail.com 'Received:' header found
 
 header FORGED_YAHOO_RCVD	eval:check_for_forged_yahoo_received_headers()
 describe FORGED_YAHOO_RCVD	Forged yahoo.com 'Received:' header found
+
+header FORGED_JUNO_RCVD		eval:check_for_forged_juno_received_headers()
+describe FORGED_JUNO_RCVD	Forged juno.com 'Received:' header found
 
 header FORGED_GW05_RCVD		eval:check_for_forged_gw05_received_headers()
 describe FORGED_GW05_RCVD	Forged 'by gw05' 'Received:' header found
@@ -324,3 +341,13 @@ describe IN_REP_TO		'In-Reply-To' line found
 header GAPPY_SUBJECT            Subject =~ /(?:[a-z][-_\.\,\:\;\'\~]{1,3}){5,}/i
 describe GAPPY_SUBJECT          'Subject' contains G.a.p.p.y-T.e.x.t
 
+# This is a Bugzilla bug status report e-mail and probably OK
+header BUGZILLA_BUG		Subject =~ /\[Bug \d+\]/
+describe BUGZILLA_BUG		Looks like a Bugzilla bug
+
+# give a negative score to Majordomo results.
+header   MAJORDOMO              Subject =~ /Majordomo (?:request )?results/
+describe MAJORDOMO              From Majordomo
+
+header   PLEASE_READ            Subject =~ /please read/i
+describe PLEASE_READ            Please read this!  Please oh please oh please!

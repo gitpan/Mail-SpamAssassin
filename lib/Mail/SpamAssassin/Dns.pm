@@ -176,30 +176,35 @@ sub razor_lookup {
     require Razor::Client;
     require Razor::Agent;
     local ($^W) = 0;		# argh, warnings in Razor
-    local ($/);			# argh, bugs in Razor
 
     local $SIG{ALRM} = sub { die "alarm\n" };
     alarm 10;
 
     my $rc = Razor::Client->new ($config, %options);
-    die "undefined Razor::Client\n" if (!$rc);
 
-    my $ver = $Razor::Client::VERSION;
-    if ($ver >= 1.12) {
-      my $respary = $rc->check ('spam' => \@msg);
-      # response can be "0" or "1". there can be many responses.
-      # so if we get 5 responses, and one of them's 1, we
-      # wind up with "00010", which +0 below turns to 10, ie. != 0.
-      for my $resp (@$respary) { $response .= $resp; }
+    if ($rc) {
+      my $ver = $Razor::Client::VERSION;
+      if ($ver >= 1.12) {
+        my $respary = $rc->check ('spam' => \@msg);
+        # response can be "0" or "1". there can be many responses.
+        # so if we get 5 responses, and one of them's 1, we
+        # wind up with "00010", which +0 below turns to 10, ie. != 0.
+        for my $resp (@$respary) { $response .= $resp; }
 
-    } else {
-      $response = $rc->check (\@msg);
+      }
+      else {
+          $response = $rc->check (\@msg);
+      }
     }
-
+    else {
+        warn "undefined Razor::Client\n";
+    }
+    
     alarm 0;
   };
 
   if ($@) {
+    $response = undef;
     if ($@ =~ /alarm/) {
       dbg ("razor check timed out after $timeout secs.");
     } else {

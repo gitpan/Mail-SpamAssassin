@@ -60,6 +60,7 @@ sub new {
   };
 
   $self->{conf} = $self->{main}->{conf};
+  $self->{stop_at_threshold} = $self->{main}->{stop_at_threshold};
 
   bless ($self, $class);
   $self;
@@ -90,6 +91,7 @@ sub check {
       # warn "JMD ". join ("", @{$decoded}). "\n";
       $self->do_body_tests($decoded);
       $self->do_body_eval_tests($decoded);
+      $self->do_body_uri_tests($decoded);
       undef $decoded;
     }
 
@@ -115,7 +117,7 @@ sub check {
 
     # Do AWL tests last, since these need the score to have already been calculated
     $self->do_awl_tests();
-}
+  }
 
   dbg ("is spam? score=".$self->{hits}.
   			" required=".$self->{conf}->{required_hits});
@@ -150,7 +152,8 @@ spam-like.
 
 sub is_spam {
   my ($self) = @_;
-  return $self->{is_spam};
+  # changed to test this so sub-tests can ask "is_spam" during a run
+  return ($self->{hits} >= $self->{conf}->{required_hits});
 }
 
 ###########################################################################
@@ -328,6 +331,7 @@ sub rewrite_as_spam {
     $self->{msg}->delete_header ("X-Spam-Flag");
     $self->{msg}->delete_header ("X-Spam-Checker-Version");
     $self->{msg}->delete_header ("X-Spam-Prev-Content-Type");
+    $self->{msg}->delete_header ("X-Spam-Prev-Content-Transfer-Encoding");
     $self->{msg}->delete_header ("X-Spam-Report");
   }
 
@@ -358,6 +362,10 @@ sub rewrite_as_spam {
 
   $self->{msg}->put_header ("X-Spam-Status", $_);
   $self->{msg}->put_header ("X-Spam-Flag", 'YES');
+  if($self->{main}->{conf}->{spam_level_stars} == 1) 
+  {
+      $self->{msg}->put_header("X-Spam-Level", "*"x int($self->{hits}));
+  }
 
   $self->{msg}->put_header ("X-Spam-Checker-Version",
   	"SpamAssassin $Mail::SpamAssassin::VERSION ".
@@ -370,6 +378,14 @@ sub rewrite_as_spam {
     if (defined $ct && $ct ne '' && $ct ne 'text/plain') {
       $self->{msg}->replace_header ("Content-Type", "text/plain");
       $self->{msg}->replace_header ("X-Spam-Prev-Content-Type", $ct);
+
+    }
+
+    my $cte = $srcmsg->get_header ("Content-Transfer-Encoding");
+
+    if (defined $cte && $cte ne '' && $ct ne '7bit') {
+      $self->{msg}->replace_header ("Content-Transfer-Encoding", "7bit");
+      $self->{msg}->replace_header ("X-Spam-Prev-Content-Transfer-Encoding", $cte);
     }
   }
 
@@ -400,8 +416,35 @@ sub rewrite_as_spam {
       $rep =~ s/=/=3D/gs;               # quote the = chars
     }
 
-    unshift (@{$lines}, split (/$/, $rep));
-    $lines->[0] =~ s/\n//;
+    my $content_type = $self->{msg}->get_header('Content-Type');
+    if (defined($content_type) and $content_type =~ /boundary\s*=\s*["']?(.*)["']?(?:;|$)/i) {
+      # Deal with MIME "null block".  If this is a multipart MIME mail,
+      # peel off the MIME header for the main part of the message,
+      # stick in the report, then put the MIME header back in front,
+      # so that the report is *after* the MIME header.
+      my $boundary = "--" . quotemeta($1);
+      my @main_part;
+
+      if (grep(/^$boundary/i, @{$lines})) {
+        # If, for some reason, the boundry marker doesn't appear in the
+        # body of the text, don't bother with the following three lines,
+        # because otherwise @{$lines} will go down to zero size, so
+        # $lines->[0] will be undefined, and Perl (or at least some versions
+        # of it) will go into an infinite loop of throwing warnings.
+        push(@main_part, shift(@{$lines})) while ($lines->[0] !~ /^$boundary/i);
+        push(@main_part, shift(@{$lines})) while ($lines->[0] !~ /^$/);
+        push(@main_part, shift(@{$lines}));
+      }
+
+      unshift (@{$lines}, split (/$/, $rep));
+      $lines->[0] =~ s/\n//;
+      unshift (@{$lines}, @main_part);
+    }
+    else {
+      unshift (@{$lines}, split (/$/, $rep));
+      $lines->[0] =~ s/\n//;
+    }
+
     $self->{msg}->replace_body ($lines);
   }
 
@@ -419,6 +462,10 @@ sub rewrite_as_non_spam {
 	$Mail::SpamAssassin::VERSION);
 
   $self->{msg}->put_header ("X-Spam-Status", $_);
+  if($self->{main}->{conf}->{spam_level_stars} == 1)
+  {
+	  $self->{msg}->put_header("X-Spam-Level", "*"x int($self->{hits}));
+  }
   $self->{msg}->get_mail_object;
 }
 
@@ -440,7 +487,7 @@ authors of scripts which use SpamAssassin.
 
 sub get_full_message_as_text {
   my ($self) = @_;
-  return join ("", $self->{msg}->get_all_headers(),
+  return join ("", $self->{msg}->get_all_headers(), "\n",
 			@{$self->{msg}->get_body()});
 }
 
@@ -534,7 +581,7 @@ sub get_raw_body_text_array {
   # just assemble the body array from the text bits.
   my $multipart_boundary;
   my $end_boundary;
-  if ($ctype =~ /boundary="(.*)"/) {
+  if ($ctype =~ /boundary\s*=\s*"(.*)"/) {
     $multipart_boundary = "--$1\n";
     $end_boundary = "--$1--\n";
   }
@@ -574,6 +621,7 @@ sub get_raw_body_text_array {
     }
 
     if ($multipart_boundary eq $_) {
+      my $starting_line = $line;
       for ($line++; defined($_ = $bodyref->[$line]); $line++) {
 	push (@{$self->{body_text_array}}, $_);
 
@@ -588,6 +636,8 @@ sub get_raw_body_text_array {
 	  }
 	}
       }
+
+      $line = $starting_line;
 
       last unless defined $_;
 
@@ -621,14 +671,32 @@ sub get_decoded_body_text_array {
   if ($self->{found_encoding_base64}) {
     $_ = '';
     my $foundb64 = 0;
+    my $lastlinelength = 0;
+    my $b64lines = 0;
     foreach my $line (@{$textary}) {
-      if (length($line) != 77) {	# 76 + newline
-	if ($foundb64) {
-	  $_ .= $line;		# last line of block is usually short
-	  last;
-	}
-      } else {
-	$_ .= $line; $foundb64 = 1;
+      if ($line =~ /[ \t]/ or $line =~ /^--/) {  # base64 can't have whitespace on the line or start --
+        $_ = "";
+        $foundb64 = 0;
+        next;
+      }
+
+      if (length($line) != $lastlinelength && !$foundb64) { # This line is a different length from the last one
+        $_ = $line;                                         # Could be the first line of a base 64 part
+        $lastlinelength = length($line);
+        next;
+      }
+
+      if ($lastlinelength == length ($line)) {              # Same length as the last line.  Starting to look like a base64 encoding
+        if ($b64lines++ == 5) {                             # Five lines the same length, with no spaces in them
+          $foundb64 = 1;                                    # Sounds like base64 to me!
+        }
+        $_ .= $line;
+        next;
+      }
+
+      if ($foundb64) {                                      # Last line is shorter, so we are done.
+        $_ .= $line;
+        last;
       }
     }
 
@@ -651,18 +719,46 @@ sub get_decoded_body_text_array {
 
 ###########################################################################
 
+# A URI can be like:
+#
+#   href=foo.htm
+#   href = foo.htm
+#   href="foo.htm"
+#   href='foo.htm'
+#   href = 'foo.htm'
+#   href = ' foo.htm '
+#
+# and such.  Have to deal with all of it.
+#
+# Also, mail with non-Quoted-Printable encoding might still have the
+# "=3D" obfuscation trick, since many email clients will decode
+# QP escape codes regardless of where and when they occur.
+#
+my $URI_in_tag = qr/\s*=(?:3[Dd])?\s*["']?\s*([^'">\s]*)\s*["']?[^>]*/;
+
 sub get_decoded_stripped_body_text_array {
   my ($self) = @_;
   local ($_);
 
   my $bodytext = $self->get_decoded_body_text_array();
 
-  my $text = '';
+   my $ctype = $self->{msg}->get_header ('Content-Type');
+   $ctype ||=  '';
+ 
+   # if it's a multipart MIME message, skip the MIME-definition stuff
+   my $boundary;
+   if ($ctype =~ /boundary="(.*)"/) {
+     $boundary = $1;
+   }
+ 
+  my $text = "Subject: " . $self->get('subject', '') . "\n\n";
   my $lastwasmime = 0;
   foreach $_ (@{$bodytext}) {
     /^SPAM: / and next;         # SpamAssassin markup
 
-    /^--/ and $lastwasmime=1 and next;		# MIME bits
+    defined $boundary and $_ eq "--$boundary\n" and $lastwasmime=1 and next;           # MIME start
+    defined $boundary and $_ eq "--$boundary--\n" and next;                            # MIME end
+
     if ($lastwasmime) {
       /^$/ and $lastwasmime=0;
       /Content-.*: / and next;
@@ -671,28 +767,71 @@ sub get_decoded_stripped_body_text_array {
 
     $text .= $_;
   }
-  $text =~ s/=\r?\n//gis;	# QP line endings
 
-  # sort out escaped QP markup
-  $text =~ s/=20/ /gis;
-  $text =~ s/=3E/>/gis;         # spam trick, disguise HTML
-  $text =~ s/=[0-9a-f][0-9a-f]//gis;
+  # Get rid of comments.  Isn't the non-greedy ".*?" awful expensive?
+  #
+  # There might be things in comments we'd want to look at, like
+  # SCRIPT and STYLE content, but that can be taken care of with
+  # rawbody tests.
+  $text =~ s/<!--.*?-->//gs;
 
-  $text =~ s/\n\n+/<p>/gs;	# keep paragraph breaks
+  # Try to put paragraph breaks where'd they'd be in HTML.  There's
+  # an optional "/" before the ends of some tags in case it's XML style.
+  $text =~ s/<BR\/?>\s*<BR\/?>/\n\n/gis; # Two line breaks
+  $text =~ s/<HR\/?>/\n\n/gis;           # Horizontal line
 
-  # strip HTML tags and entities
-  $text =~ s/(?:\&\#0147;|\&\#0148;|\&quot;)/"/gs;
-  $text =~ s/\&\#0146;/'/gs;
+  # Keep paragraph breaks
+  $text =~ s/\n\n+/<p>/gs;
+
+  # Convert hex entities to decimal equivalents, so that the specific
+  # decimal regexps will match
+  $text =~ s/\&\#x([a-f0-9]+);/"&#" . hex($1) . ";"/ieg;
+
+  # Convert specific HTML entities
+  $text =~ s/(?:\&nbsp;|\&\#0?160;)/ /gis;
+  $text =~ s/(?:\&reg;|\&\#0?174;)/(R)/gis;
+  $text =~ s/(?:\&copy;|\&\#0?169;)/(C)/gis;
+  $text =~ s/\&\#0?153;/(TM)/gs;
+  $text =~ s/(?:\&\#0?147;|\&\#0?148;|\&\#0?132|\&quot;)/"/gis;
+  $text =~ s/\&\#0?146;/'/gs;
+  $text =~ s/\&\#0?145;/`/gs;
+  $text =~ s/\&\#0?150;/-/gs;  # En-dash
+  $text =~ s/\&\#0?151;/--/gs; # Em-dash
+  $text =~ s/\&\#0?152;/~/gs;
   $text =~ s/\&\#82(?:16|17|20|11);//gs;
+  
+  # Convert <Q> tags
+  $text =~ s/<\/?Q\b[^>]*>/"/gis;
+    
+  # Convert decimal entities to their characters
+  $text =~ s/\&\#(\d+);/chr($1)/eg;
+  
+  # Strip all remaining HTML entities
   $text =~ s/\&[-_a-zA-Z0-9]+;/ /gs;
-  $text =~ s/\s+/ /gs;
+  
+  # join all consecutive whitespace into a single space
+  $text =~ s/\s+/ /sg;
+  
+  # reinsert para breaks
+  $text =~ s/<p>/\n\n/gis;
 
-  $text =~ s/<p>/\n\n/gis;	# reinsert para breaks
+  # Get rid of "BASEURI:" in case spammers insert it raw to try to
+  # mess us up
+  $text =~ s/BASEURI://sg;
 
+  # Extract URIs from various HTML tags, so that they'll still be there
+  # when the URI tests are done.
+  # <A>, <AREA>, <BASE> and <LINK> use "href=URI".
+  # <IMG>, <FRAME>, <IFRAME>, <EMBED> and <SCRIPT> use "src=URI"
+  # <FORM> uses "action=URI"
+  $text =~ s/<base\s[^>]*\bhref$URI_in_tag>/BASEURI:$1 /ogis;
+  $text =~ s/<(?:a|area|link)\s[^>]*\bhref$URI_in_tag>/URI:$1 /ogis;
+  $text =~ s/<(?:img|i?frame|embed|script)\s[^>]*\bsrc$URI_in_tag>/URI:$1 /ogis;
+  $text =~ s/<form\s[^>]*\baction$URI_in_tag>/URI:$1 /ogis;
+  
+  # Get rid of all remaing HTML and XML tags
   $text =~ s/<[?!\s]*[:a-z0-9]+\b[^>]*>//gis;
   $text =~ s/<\/[:a-z0-9]+>//gis;
-
-  #print "JMD $text";
 
   my @textary = split (/^/, $text);
   return \@textary;
@@ -708,6 +847,9 @@ sub get {
 
   my $getaddr = 0;
   if ($hdrname =~ s/:addr$//) { $getaddr = 1; }
+
+  my $getname = 0;
+  if ($hdrname =~ s/:name$//) { $getname = 1; }
 
   my @hdrs = $self->{msg}->get_header ($hdrname);
   if ($#hdrs >= 0) {
@@ -733,8 +875,13 @@ sub get {
 
   if ($getaddr) {
     chomp; s/\r?\n//gs;
-    s/^.*?<(.+)>\s*$/$1/g		# Foo Blah <jm@foo>
-    	or s/^(.+)\s\(.*?\)\s*$/$1/g;	# jm@foo (Foo Blah)
+    s/\(.*?\)//g;               # strip out the (comments)
+    s/^.*?<(.*?)>\s*$/$1/;      # "Foo Blah" <jm@foo> or <jm@foo>
+
+  } elsif ($getname) {
+    chomp; s/\r?\n//gs;
+    s/^[\'\"]*(.*?)[\'\"]*\s*<.+>\s*$/$1/g # Foo Blah <jm@foo>
+    	or s/^.+\s\((.*?)\)\s*$/$1/g;	   # jm@foo (Foo Blah)
 
   } else {
     $_ = $self->mime_decode_header ($_);
@@ -760,17 +907,46 @@ sub mime_decode_header {
   # Latin1: =?ISO-8859-1?Q?Keld_J=F8rn_Simonsen?= <keld@dkuug.dk>
   # Latin1: =?ISO-8859-1?Q?Andr=E9_?= Pirard <PIRARD@vm1.ulg.ac.be>
 
-  if ($enc =~ s{=\?([^\?]+)\?Q\?([^\?]+)\?=}{
+  if ($enc =~ s{\s*=\?([^\?]+)\?[Qq]\?([^\?]+)\?=}{
     		$self->decode_mime_bit ($1, $2);
 	      }eg)
   {
+    my $rawenc = $enc;
+
+    # Sitck lines back together when the encoded header wraps a line eg:
+    #
+    # Subject: =?iso-2022-jp?B?WxskQjsoM1gyI0N6GyhCIBskQk4iREwkahsoQiAy?=
+    #   =?iso-2022-jp?B?MDAyLzAzLzE5GyRCOWYbKEJd?=
+
+    $enc = "";
+    my $splitenc;
+
+    foreach $splitenc (split (/\n/, $rawenc)) {
+      $enc .= $splitenc;
+    }
     dbg ("decoded MIME header: \"$enc\"");
   }
 
-  # TODO: handle base64-encoded headers. eg:
+  # handle base64-encoded headers. eg:
   # =?UTF-8?B?Rlc6IFBhc3NpbmcgcGFyYW1ldGVycyBiZXR3ZWVuIHhtbHMgdXNp?=
   # =?UTF-8?B?bmcgY29jb29uIC0gcmVzZW50IA==?=   (yuck)
-  # not high-priorty as they're still very rare.
+
+  if ($enc =~ s{\s*=\?([^\?]+)\?[Bb]\?([^\?]+)\?=}{
+    		$self->generic_base64_decode ($2);
+	      }eg)
+  {
+    my $rawenc = $enc;
+
+    # Sitck lines back together when the encoded header wraps a line
+
+    $enc = "";
+    my $splitenc;
+
+    foreach $splitenc (split (/\n/, $rawenc)) {
+      $enc .= $splitenc;
+    }
+    dbg ("decoded MIME header: \"$enc\"");
+  }
 
   return $enc;
 }
@@ -780,8 +956,11 @@ sub decode_mime_bit {
   local ($_) = $text;
 
   if ($encoding =~ /^US-ASCII$/i
+  	|| $encoding =~ /^ISO646-US/i
   	|| $encoding =~ /^ISO-8859-\d+$/i
   	|| $encoding =~ /^UTF-8$/i
+	|| $encoding =~ /KOI8-\w$/i
+	|| $encoding =~ /^WINDOWS-125\d$/i
       )
   {
     # keep 8-bit stuff. forget mapping charsets though
@@ -806,7 +985,7 @@ sub do_head_tests {
   # note: we do this only once for all head pattern tests.  Only
   # eval tests need to use stuff in here.
   $self->clear_test_state();
- 
+
   dbg ("running header regexp tests; score so far=".$self->{hits});
 
   # speedup code provided by Matt Sergeant
@@ -818,10 +997,26 @@ sub do_head_tests {
   my ($rulename, $rule);
   my $evalstr = '';
 
-  while (($rulename, $rule) = each %{$self->{conf}->{head_tests}}) {
+  my @tests = keys %{$self->{conf}{head_tests}};
+  my @negative_tests;
+  my @positive_tests;
+  # add negative tests;
+  foreach my $test (@tests) {
+    if ($self->{conf}{scores}{$test} < 0) {
+      push @negative_tests, $test;
+    }
+    else {
+      push @positive_tests, $test;
+    }
+  }
+  @negative_tests = sort { $self->{conf}{scores}{$a} <=> $self->{conf}{scores}{$b} } @negative_tests;
+  @positive_tests = sort { $self->{conf}{scores}{$b} <=> $self->{conf}{scores}{$a} } @positive_tests;
+
+  foreach $rulename (@negative_tests, @positive_tests) {
+    $rule = $self->{conf}->{head_tests}->{$rulename};
     my $def = '';
-    my ($hdrname, $testtype, $pat) = 
-    		$rule =~ /^\s*(\S+)\s*(\=|\!)\~\s*(\S.*?\S)\s*$/;
+    my ($hdrname, $testtype, $pat) =
+        $rule =~ /^\s*(\S+)\s*(\=|\!)\~\s*(\S.*?\S)\s*$/;
 
     if ($pat =~ s/\s+\[if-unset:\s+(.+)\]\s*$//) { $def = $1; }
     $hdrname =~ s/#/[HASH]/g;		# avoid probs with eval below
@@ -829,10 +1024,12 @@ sub do_head_tests {
 
     # dbg ("header regexp test '.$rulename.'");
     $evalstr .= '
+      return if $self->{stop_at_threshold} && $self->is_spam;
       if ($self->{conf}->{scores}->{q#'.$rulename.'#}) {
-	if ($self->get(q#'.$hdrname.'#, q#'.$def.'#) '.$testtype.'~ '.$pat.') {
-	  $self->got_hit (q#'.$rulename.'#, q{});
-	}
+        # warn("testing: ", $self->get(q#'.$hdrname.'#,q#'.$def.'#), " vs '.$rulename.' ($self->{conf}->{scores}->{q{'.$rulename.'}})\n");
+        if ($self->get(q#'.$hdrname.'#, q#'.$def.'#) '.$testtype.'~ '.$pat.') {
+          $self->got_hit (q#'.$rulename.'#, q{});
+        }
       }
     ';
   }
@@ -852,7 +1049,7 @@ sub do_head_tests {
 EOT
 
   eval $evalstr;
-  
+
   if ($@) {
     warn "Failed to run header SpamAssassin tests, skipping some: $@\n";
   }
@@ -877,10 +1074,27 @@ sub do_body_tests {
 
   # build up the eval string...
   my $evalstr = '';
-  while (($rulename, $pat) = each %{$self->{conf}->{body_tests}}) {
+  my @tests = keys %{$self->{conf}{body_tests}};
+  my @negative_tests;
+  my @positive_tests;
+  # add negative tests;
+  foreach my $test (@tests) {
+    if ($self->{conf}{scores}{$test} < 0) {
+      push @negative_tests, $test;
+    }
+    else {
+      push @positive_tests, $test;
+    }
+  }
+  @negative_tests = sort { $self->{conf}{scores}{$a} <=> $self->{conf}{scores}{$b} } @negative_tests;
+  @positive_tests = sort { $self->{conf}{scores}{$b} <=> $self->{conf}{scores}{$a} } @positive_tests;
+
+  foreach $rulename (@negative_tests, @positive_tests) {
+    $pat = $self->{conf}->{body_tests}->{$rulename};
     $evalstr .= '
+      return if $self->{stop_at_threshold} && $self->is_spam;
       if ($self->{conf}->{scores}->{q{'.$rulename.'}}) {
-	if ('.$pat.') { $self->got_body_pattern_hit (q{'.$rulename.'}); }
+        if ('.$pat.') { $self->got_body_pattern_hit (q{'.$rulename.'}); }
       }
     ';
   }
@@ -913,6 +1127,182 @@ EOT
   }
 }
 
+# Taken from URI and URI::Find
+my $reserved   = q(;/?:@&=+$,[]\#);
+my $mark       = q(-_.!~*'());                                    #'; emacs
+my $unreserved = "A-Za-z0-9\Q$mark\E";
+my $uricSet = quotemeta($reserved) . $unreserved . "%";
+
+my $schemeRE = '[a-zA-Z][a-zA-Z0-9.+\-]*';
+
+my $uricCheat = $uricSet;
+$uricCheat =~ tr/://d;
+
+my $schemelessRE = qr/(?<!\.)(?:www\.|ftp\.)/;
+my $uriRe = qr/(?:$schemeRE:[$uricCheat]|$schemelessRE)[$uricSet#]*/;
+
+# Taken from Email::Find (thanks Tatso!)
+# This is the BNF from RFC 822
+my $esc         = '\\\\';
+my $period      = '\.';
+my $space       = '\040';
+my $open_br     = '\[';
+my $close_br    = '\]';
+my $nonASCII    = '\x80-\xff';
+my $ctrl        = '\000-\037';
+my $cr_list     = '\n\015';
+my $qtext       = qq/[^$esc$nonASCII$cr_list\"]/; #"
+my $dtext       = qq/[^$esc$nonASCII$cr_list$open_br$close_br]/;
+my $quoted_pair = qq<$esc>.qq<[^$nonASCII]>;
+my $atom_char   = qq/[^($space)<>\@,;:\".$esc$open_br$close_br$ctrl$nonASCII]/;
+#"
+my $atom        = qq<$atom_char+(?!$atom_char)>;
+my $quoted_str  = qq<\"$qtext*(?:$quoted_pair$qtext*)*\">; #"
+my $word        = qq<(?:$atom|$quoted_str)>;
+my $local_part  = qq<$word(?:$period$word)*>;
+
+# This is a combination of the domain name BNF from RFC 1035 plus the
+# domain literal definition from RFC 822, but allowing domains starting
+# with numbers.
+my $label       = q/[A-Za-z\d](?:[A-Za-z\d-]*[A-Za-z\d])?/;
+my $domain_ref  = qq<$label(?:$period$label)*>;
+my $domain_lit  = qq<$open_br(?:$dtext|$quoted_pair)*$close_br>;
+my $domain      = qq<(?:$domain_ref|$domain_lit)>;
+
+# Finally, the address-spec regex (more or less)
+my $Addr_spec_re   = qr<$local_part\s*\@\s*$domain>;
+
+sub do_body_uri_tests {
+  my ($self, $textary) = @_;
+  my ($rulename, $pat, @uris);
+  local ($_);
+
+  dbg ("running uri tests; score so far=".$self->{hits});
+  
+  my $text = join('', @$textary);
+  # warn("spam: /$uriRe/ $text\n");
+
+  my $base_uri = "http://";
+  while ($text =~ /\G.*?(<$uriRe>|$uriRe)/gsoc) {
+      my $uri = $1;
+
+      $uri =~ s/^<(.*)>$/$1/;
+
+      # Use <BASE HREF="URI"> to turn relative links into
+      # absolute links.
+      #
+      # Even If it is a base URI, Leave $uri alone, and test it like a
+      # normal in case our munging of $base_uri messes something up
+      if ($uri =~ s/^BASEURI://i) {
+        # A base URI will be ignored by browsers unless it is an
+        # absolute URI of a standrd protocol
+        if ($uri =~ m{^(?:ftp|https?)://}i) {
+          $base_uri = $uri;
+
+          # Remove trailing filename, if any; base URIs can have the
+          # form of "http://foo.com/index.html"
+          $base_uri =~ s{^([a-z]+://[^/]+/.*?)[^/\.]+\.[^/\.]{2,4}$} {$1}i;
+
+          # Make sure it ends in a slash
+          $base_uri .= "/" unless($base_uri =~ m{/$});
+        } # if ($uri =~ m{^(?:ftp|https?)://})
+      } # if ($uri =~ s/^BASEURI://i)
+
+      $uri =~ s/^URI://i;
+
+      # Does the uri start with "http://", "mailto:", "javascript:" or
+      # such?  If not, we probaly need to put the base URI in front
+      # of it.
+      if ($uri !~ /^[a-z]+:/i) {
+        # If it's a hostname that was just sitting out in the
+        # open, without a protocol, and not inside of an HTML tag,
+        # the we should add the proper protocol in front, rather
+        # than using the base URI.
+        if ($uri =~ /^www\d?\./i) {
+          $uri = "http://$uri";
+        }
+        elsif ($uri =~ /^ftp\./i) {
+          $uri = "ftp://$uri";
+        }
+        else {
+          $uri = "${base_uri}$uri";
+        }
+      } # if ($uri !~ /^[a-z]+:/i)
+
+      # warn("Got URI: $uri\n");
+      push @uris, $uri;
+  }
+  
+  while ($text =~ /\G.*?($Addr_spec_re)/gsoc) {
+      my $uri = $1;
+      $uri =~ s/^URI://i;
+      $uri = "mailto:$uri";
+      # warn("Got URI: $uri\n");
+      push @uris, $uri;
+  }
+
+  $self->clear_test_state();
+  if ( defined &Mail::SpamAssassin::PerMsgStatus::_body_uri_tests ) {
+    # ok, we've compiled this before.
+    Mail::SpamAssassin::PerMsgStatus::_body_uri_tests($self, @uris);
+    return;
+  }
+
+  # otherwise build up the eval string...
+  my $evalstr = '';
+  my @tests = keys %{$self->{conf}{uri_tests}};
+  my @negative_tests;
+  my @positive_tests;
+  # add negative tests;
+  foreach my $test (@tests) {
+    if ($self->{conf}{scores}{$test} < 0) {
+      push @negative_tests, $test;
+    }
+    else {
+      push @positive_tests, $test;
+    }
+  }
+  @negative_tests = sort { $self->{conf}{scores}{$a} <=> $self->{conf}{scores}{$b} } @negative_tests;
+  @positive_tests = sort { $self->{conf}{scores}{$b} <=> $self->{conf}{scores}{$a} } @positive_tests;
+
+  foreach $rulename (@negative_tests, @positive_tests) {
+    $pat = $self->{conf}->{uri_tests}->{$rulename};
+    $evalstr .= '
+      return if $self->{stop_at_threshold} && $self->is_spam;
+      if ($self->{conf}->{scores}->{q{'.$rulename.'}}) {
+        if ('.$pat.') { $self->got_uri_pattern_hit (q{'.$rulename.'}); }
+      }
+    ';
+  }
+
+  # generate the loop that goes through each line...
+  $evalstr = <<"EOT";
+{
+  package Mail::SpamAssassin::PerMsgStatus;
+
+  sub _body_uri_tests {
+    my \$self = shift;
+    foreach (\@_) {
+        $evalstr
+    ;
+    }
+  }
+
+  1;
+}
+EOT
+
+  # and run it.
+  eval $evalstr;
+  if ($@) {
+      warn("Failed to compile URI SpamAssassin tests, skipping:\n".
+          "\t($@)\n");
+  }
+  else {
+    Mail::SpamAssassin::PerMsgStatus::_body_uri_tests($self, @uris);
+  }
+}
+
 sub do_rawbody_tests {
   my ($self, $textary) = @_;
   my ($rulename, $pat);
@@ -929,10 +1319,27 @@ sub do_rawbody_tests {
 
   # build up the eval string...
   my $evalstr = '';
-  while (($rulename, $pat) = each %{$self->{conf}->{rawbody_tests}}) {
+  my @tests = keys %{$self->{conf}{rawbody_tests}};
+  my @negative_tests;
+  my @positive_tests;
+  # add negative tests;
+  foreach my $test (@tests) {
+    if ($self->{conf}{scores}{$test} < 0) {
+      push @negative_tests, $test;
+    }
+    else {
+      push @positive_tests, $test;
+    }
+  }
+  @negative_tests = sort { $self->{conf}{scores}{$a} <=> $self->{conf}{scores}{$b} } @negative_tests;
+  @positive_tests = sort { $self->{conf}{scores}{$b} <=> $self->{conf}{scores}{$a} } @positive_tests;
+
+  foreach $rulename (@negative_tests, @positive_tests) {
+    $pat = $self->{conf}->{rawbody_tests}->{$rulename};
     $evalstr .= '
+      return if $self->{stop_at_threshold} && $self->is_spam;
       if ($self->{conf}->{scores}->{q{'.$rulename.'}}) {
-	if ('.$pat.') { $self->got_body_pattern_hit (q{'.$rulename.'}); }
+        if ('.$pat.') { $self->got_body_pattern_hit (q{'.$rulename.'}); }
       }
     ';
   }
@@ -981,8 +1388,25 @@ sub do_full_tests {
 
   # build up the eval string...
   my $evalstr = '';
-  while (($rulename, $pat) = each %{$self->{conf}->{full_tests}}) {
+  my @tests = keys %{$self->{conf}{full_tests}};
+  my @negative_tests;
+  my @positive_tests;
+  # add negative tests;
+  foreach my $test (@tests) {
+    if ($self->{conf}{scores}{$test} < 0) {
+      push @negative_tests, $test;
+    }
+    else {
+      push @positive_tests, $test;
+    }
+  }
+  @negative_tests = sort { $self->{conf}{scores}{$a} <=> $self->{conf}{scores}{$b} } @negative_tests;
+  @positive_tests = sort { $self->{conf}{scores}{$b} <=> $self->{conf}{scores}{$a} } @positive_tests;
+  
+  foreach $rulename (@negative_tests, @positive_tests) {
+    $pat = $self->{conf}->{full_tests}->{$rulename};
     $evalstr .= '
+      return if $self->{stop_at_threshold} && $self->is_spam;
       if ($self->{conf}->{scores}->{q{'.$rulename.'}}) {
 	if ($$fullmsgref =~ '.$pat.') {
 	  $self->got_body_pattern_hit (q{'.$rulename.'});
@@ -1089,6 +1513,7 @@ sub run_eval_tests {
 
   foreach my $rulename (sort keys %{$evalhash}) {
     next unless ($self->{conf}->{scores}->{$rulename});
+    return if $self->{stop_at_threshold} && $self->is_spam;
     my $evalsub = $evalhash->{$rulename};
 
     my $result;
@@ -1123,6 +1548,17 @@ sub got_body_pattern_hit {
   $self->{tests_already_hit}->{$rulename} = 1;
 
   $self->got_hit ($rulename, 'BODY: ');
+}
+
+sub got_uri_pattern_hit {
+  my ($self, $rulename) = @_;
+
+  # only allow each test to hit once per mail
+  # TODO: Move this into the rule matcher
+  return if (defined $self->{tests_already_hit}->{$rulename});
+  $self->{tests_already_hit}->{$rulename} = 1;
+
+  $self->got_hit ($rulename, 'URI: ');
 }
 
 ###########################################################################

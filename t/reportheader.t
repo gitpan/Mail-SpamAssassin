@@ -2,7 +2,7 @@
 
 use lib '.'; use lib 't';
 use SATest; sa_t_init("reportheader");
-use Test; BEGIN { plan tests => 31 };
+use Test; BEGIN { plan tests => 15 };
 
 # ---------------------------------------------------------------------------
 
@@ -28,7 +28,7 @@ q{ Says: "to be removed, reply via email" }, 'removesubj',
 q{ BODY: Nobody's perfect }, 'remove',
 q{ Message-Id is not valid, according to RFC-2822 }, 'msgidnotvalid',
 q{ Message-Id has no @ sign }, 'msgidnoat',
-q{ BODY: Uses a dotted-decimal IP address in URL }, 'dotteddec',
+q{ URI: Uses a dotted-decimal IP address in URL }, 'dotteddec',
 
 ); #'
 
@@ -36,5 +36,5 @@ tstprefs ("
 	report_header 1
 	");
 
-ok (sarun ("-t < data/spam/001", \&patterns_run_cb));
+sarun ("-L -t < data/spam/001", \&patterns_run_cb);
 ok_all_patterns();

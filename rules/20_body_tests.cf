@@ -13,8 +13,8 @@ describe FREQ_SPAM_PHRASE	Contains phrases frequently found in spam
 
 full SPAM_PHRASES_020		eval:check_for_spam_phrases_scoring("20")
 describe SPAM_PHRASES_020	spam-phrase score is over 20
-full SPAM_PHRASES_030		eval:check_for_spam_phrases_scoring("40")
-describe SPAM_PHRASES_030	spam-phrase score is over 30
+full SPAM_PHRASES_040		eval:check_for_spam_phrases_scoring("40")
+describe SPAM_PHRASES_040	spam-phrase score is over 40
 full SPAM_PHRASES_100		eval:check_for_spam_phrases_scoring("100")
 describe SPAM_PHRASES_100	spam-phrase score is over 100
 
@@ -29,15 +29,18 @@ describe REPLY_REMOVE_SUBJECT	List removal information
 body REMOVE_IN_QUOTES		/\"remove\"/i
 describe REMOVE_IN_QUOTES	List removal information
 
-rawbody JAVASCRIPT			/<SCRIPT.*LANGUAGE.*JavaScript/i
+rawbody JAVASCRIPT			/<SCRIPT/i
 describe JAVASCRIPT			JavaScript code
-rawbody REALLY_UNSAFE_JAVASCRIPT	/<body .*onLoad/i
+rawbody REALLY_UNSAFE_JAVASCRIPT	/<(?:body|frame) [^>]*on(?:Load|UnLoad|BeforeUnload)/is
 describe REALLY_UNSAFE_JAVASCRIPT	Auto-executing JavaScript code
-rawbody SLIGHTLY_UNSAFE_JAVASCRIPT	/on(?:Blur|Error|KeyDown|KeyUp|Load|MouseOver|Resize|Unload)/i
+rawbody SLIGHTLY_UNSAFE_JAVASCRIPT	/\bon(?:Blur|Change|Focus|Error|Key(?:Press|Down|Up)|Mouse(?:Down|Up|Over|Move|Out)|Resize|Move|Scroll|Stop|Click)\b/i
 describe SLIGHTLY_UNSAFE_JAVASCRIPT	JavaScript code which can easily be executed
 
-rawbody HTML_WITH_BGCOLOR	/<body .*bgcolor[=3d\"\'\#]+[0-9a-e][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/i
+rawbody HTML_WITH_BGCOLOR	/<body [^>]*bgcolor[=3d\"\'\#]+[0-9a-e][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/is
 describe HTML_WITH_BGCOLOR	HTML mail with non-white background
+
+rawbody  BIG_FONT               /<\s*FONT\s[^>]*size\s*=(?:3D)?\s*['\"]?\s*(?:\+[23456789]|(?:[3456789]|\d{2,}))/is
+describe BIG_FONT               FONT Size +2 and up or 3 and up
 
 rawbody SPAM_FORM		/CHANGE EMAIL ADDRESS IN ACTION OF FORM/
 describe SPAM_FORM		Form for changing email address
@@ -63,7 +66,7 @@ describe BUGGY_CGI_PT		Broken Portuguese CGI script message
 
 # these are now full tests instead of body tests, to catch QP-encoded
 # split lines
-body SENT_IN_COMPLIANCE		/message .{0,10}sen(?:d|t) in compliance (?:of|with)/
+body SENT_IN_COMPLIANCE		/message .{0,10}sen(?:d|t) in compliance (?:of|with)/i
 describe SENT_IN_COMPLIANCE	Claims compliance with SPAM regulations
 body PARA_A_2_C_OF_1618		/Paragraph .a.{0,10}2.{0,10}C. of S. 1618/i
 describe PARA_A_2_C_OF_1618	Claims compliance with senate bill 1618
@@ -84,45 +87,31 @@ describe POPLAUNCH		SPAM software
 body CHECK_OR_MONEY_ORDER	/check or money order/i
 describe CHECK_OR_MONEY_ORDER	Talk about a check or money order
 
-rawbody NUMERIC_HTTP_ADDR	/http\:\/\/\d{7,}/is
-describe NUMERIC_HTTP_ADDR	Uses a numeric IP address in URL
-rawbody NORMAL_HTTP_TO_IP	/http\:\/\/\d+\.\d+\.\d+\.\d+/is
-describe NORMAL_HTTP_TO_IP	Uses a dotted-decimal IP address in URL
-rawbody LONG_NUMERIC_HTTP_ADDR	/http\:\/\/000\d+/is
-describe LONG_NUMERIC_HTTP_ADDR	Uses a long numeric IP address in URL
-rawbody HTTP_USERNAME_USED	/http\:\/\/[^\s\/]+\@/is
-describe HTTP_USERNAME_USED	Uses a username in a URL
-rawbody HTTP_WITH_EMAIL_IN_URL	/http\:\/\/\S+=[-_\+a-z0-9\.]+\@[-_\+a-z0-9\.]+\.[-_\+a-z0-9]{2,3}(?:\&|\s)/
-describe HTTP_WITH_EMAIL_IN_URL	'remove' URL contains an email address
-rawbody HTTP_ESCAPED_HOST       /http\:\/\/[^\/]*%/
-describe HTTP_ESCAPED_HOST      Uses %-escapes inside a URL's hostname
-
-# note: do not match \r or \n
-rawbody HTTP_CTRL_CHARS_HOST    /http\:\/\/[^\/]*[\x00-\x08\x0b\x0c\x0e-\x1f]/
-describe HTTP_CTRL_CHARS_HOST   Uses control sequences inside a URL's hostname
-
 rawbody SUPERLONG_LINE		/^[^<]{199,}$/m
 describe SUPERLONG_LINE		Contains a line >=199 characters long
 
-rawbody ASCII_FORM_ENTRY	/[^<][A-Za-z][A-Za-z]+.{1,15}?\s+_{30,}/
+# fixed by ms to not allow entry field onto next line
+rawbody ASCII_FORM_ENTRY	/[^<][A-Za-z][A-Za-z]+.{1,15}?[\x09\x20]*_{30,}/
 describe ASCII_FORM_ENTRY	Contains an ASCII-formatted form
 body PRINT_OUT_AND_FAX		/print\s+out\s+and\s+fax/i
 describe PRINT_OUT_AND_FAX	Contains words 'print out and fax'
 
 body AMAZING			/AMAZING/
-describe AMAZING		Contains word 'AMAZING'
+describe AMAZING		Contains word 'AMAZING' in all-caps
 body GUARANTEE			/GUARANTEE/
 describe GUARANTEE		Contains word 'guarantee' in all-caps
 body PROFITS			/PROFITS/
 describe PROFITS		Contains word 'profits' in all-caps
-body NO_QS_ASKED		/NO QUESTIONS ASKED/
+body NO_QS_ASKED		/NO QUESTIONS ASKED/i
 describe NO_QS_ASKED		Doesn't ask any questions
-body FULL_REFUND		/FULL REFUND/
+body FULL_REFUND		/FULL REFUND/i
 describe FULL_REFUND		Offers a full refund
-body FOR_FREE			/for FREE/
-describe FOR_FREE		No such thing as a free lunch
-body ONE_HUNDRED_PC_FREE	/100% FREE/
-describe ONE_HUNDRED_PC_FREE	No such thing as a free lunch
+body FOR_FREE			/\bfor FREE\b/i
+describe FOR_FREE		No such thing as a free lunch (1)
+body ONE_HUNDRED_PC_FREE	/(?:100%|completely|totally|absolutely) FREE/i
+describe ONE_HUNDRED_PC_FREE	No such thing as a free lunch (2)
+body NO_COST                    /\bno (?:cost|charge)\b/i
+describe NO_COST                No such thing as a free lunch (3)
 body ONE_HUNDRED_PC_GUAR	/100% GUARANTEED/i
 describe ONE_HUNDRED_PC_GUAR	One hundred percent guaranteed
 body MONEY_MAKING		/money making/i
@@ -133,9 +122,9 @@ body DEAR_FRIEND		/Dear Friend/
 describe DEAR_FRIEND		How dear can you be if you don't know my name?
 body CASHCASHCASH		/\${3,}/
 describe CASHCASHCASH		Contains at least 3 dollar signs in a row
-body CALL_NOW			/CALL NOW/
+body CALL_NOW			/CALL NOW/i
 describe CALL_NOW		Urges you to call now
-body CALL_FREE			/(?:call|dial).{1,15}8(?:00|88|77|66|55|44|33|22)[\s-][\dA-Z]+[\s-]?[\dA-Z]+/i
+body CALL_FREE			/(?:call|dial|toll free).{1,15}8(?:00|88|77|66|55|44|33|22)[\)\s-]*[\dA-Z]+[\s-]?[\dA-Z]+/i
 describe CALL_FREE		Contains a tollfree number
 body ONLINE_BIZ_OPS		/online business opportunities/i
 describe ONLINE_BIZ_OPS		Wants you to do business online
@@ -149,7 +138,7 @@ body MASS_EMAIL			/mass e-*mail/i
 describe MASS_EMAIL		Talks about mass email
 body EMAIL_MARKETING		/e-*mail marketing/i
 describe EMAIL_MARKETING	Talks about email marketing
-body PRODUCED_AND_SENT_OUT	/This a.?d is produced and sent out by/
+body PRODUCED_AND_SENT_OUT	/This a.?d is produced and sent out by/i
 describe PRODUCED_AND_SENT_OUT	Tells you it's an ad
 body INCREASE_TRAFFIC		/increase.{1,15} traffic\b/i
 describe INCREASE_TRAFFIC	Instructions on how to boost traffic
@@ -179,7 +168,7 @@ describe ADDRESSES_ON_CD	Only thing addresses on CD are useful for is SPAM
 body SHOES_GUY			/(?:\b(?:Lingui|Guilin)\b.{1,30}){2,}/i
 describe SHOES_GUY		Want some shoes?
 
-body EXCUSE_1			/You (?:were sent|have received) this message because/i
+body EXCUSE_1			/(?:You (?:were sent|have received|are receiving)|You're receiving).{0,15}(?:message|e-?mail)s? because/i
 describe EXCUSE_1		Gives a lame excuse about why you were sent this SPAM
 body EXCUSE_2			/If you did not opt.in/i
 describe EXCUSE_2		Claims you actually asked for this SPAM
@@ -191,12 +180,12 @@ body EXCUSE_5			/that your email address is removed/i
 describe EXCUSE_5		Claims you can be removed from the list
 
 # strange pattern because otherwise it matches the std. majordomo line
-body EXCUSE_6			/(?:wish to|click to|To) remove yourself/
+body EXCUSE_6			/(?:wish to|click to|To) remove yourself/i
 describe EXCUSE_6		Claims you can be removed from the list
 
 body EXCUSE_7			/you (?:wish|want|would like|desire) to be removed/i
 describe EXCUSE_7		Claims you can be removed from the list
-body EXCUSE_8			/requests to be taken off our mailing list/
+body EXCUSE_8			/requests to be taken off our mailing list/i
 describe EXCUSE_8		Claims you can be removed from the list
 body EXCUSE_9			/If you do.{0,3}n.{0,3}t (?:want|wish|care) to receive emails (?:on this subject|in the future)/i
 describe EXCUSE_9		Claims you can be removed from the list
@@ -214,7 +203,7 @@ body EXCUSE_14			/you (?:do not|no longer) wish to receive/i
 describe EXCUSE_14		Tells you how to stop further SPAM
 body EXCUSE_15			/this (?:|e?-?mail|message )(?:is|was) (?:not|never) (?:spam|(?:sent |)unsolicited)/i
 describe EXCUSE_15		Claims to be legitimate email
-body EXCUSE_16			/received this.{1,10}in error/
+body EXCUSE_16			/received this.{1,10}in error/i
 describe EXCUSE_16		I wonder how many emails they sent in error...
 body EXCUSE_17			/received.{0,15} by mistake/i
 describe EXCUSE_17		Suspect you might have received the message by mistake
@@ -240,7 +229,7 @@ describe LIMITED_TIME_ONLY	Offers a limited time offer
 body STRONG_BUY			/strong buy/i
 describe STRONG_BUY		Tells you about a strong buy
 
-body WE_HONOR_ALL		/we (?:honou?r|respect)(?: all|) remov[eal] requests/i
+body WE_HONOR_ALL		/we (?:honou?r|respect)(?: all)? remov(?:e|al) requests/i
 describe WE_HONOR_ALL		Claims to honor removal requests
 body FILTERED_BY_WORLDREMOVE	/filtered by WorldRemove/
 describe FILTERED_BY_WORLDREMOVE Claims to listen to some removal request list
@@ -254,15 +243,12 @@ describe AUTO_EMAIL_REMOVAL	Claims auto-email removal
 
 body PORN_1			/\bbarely\b.{0,15}\blegal\b/i
 describe PORN_1			Uses words and phrases which indicate porn (1)
-body PORN_2			/\bwild\b.{0,15}\bhardcore\b/i
+body PORN_2			/\bwild\b.{0,15}\bhard[ -]?core\b/i
 describe PORN_2			Uses words and phrases which indicate porn (2)
 
 # updated by: skod & Craig & jm
-body PORN_3			/(?:(?:\bcum|\borg[iy]|\bwild|fuck|\bteen|\baction\b|spunk|\bpussy\b|\bpussies\b|suck\b|sucking\b|\bhot\b|\bhottest\b|\bvoyeur|\ble[sz]b(?:ian|o)|\banal\b|\binterracial|\basian\b|\bamateur|\bsex+\b|\bslut|explicit|xxx[^x]|\blive\b|celebrity|\blick|\bsuck|\bdorm\b|webcam|\bass\b|\bschoolgirl\b|\bstrip|\bhorny\b|\bhorniest\b|\berotic|\boral\b|\bpenis\b|\bhardcore\b|\bblow[ -]*job|\bnast(?:y|iest)\b|\bporn).{0,15}){3,}/i
+body PORN_3			/(?:(?:\blolita|\bcum|\borg[iy]|\bwild|fuck|\bteen|\baction\b|spunk|\bpussy\b|\bpussies\b|suck\b|sucking\b|\bhot\b|\bhottest\b|\bvoyeur|\ble[sz]b(?:ian|o)|\banal\b|\binterracial|\basian\b|\bamateur|\bsex+\b|\bslut|explicit|(?:[^x]|\b)xxx(?:[^x]|\b)|\blive\b|celebrity|\blick|\bsuck|\bdorm\b|webcam|\bass\b|\bschoolgirl\b|\bstrip|\bhorny\b|\bhorniest\b|\berotic|\boral\b|\bpenis\b|\bhardcore\b|\bblow[ -]*job|\bnast(?:y|iest)\b|\bporn).{0,15}){3,}/i
 describe PORN_3			Uses words and phrases which indicate porn (3)
-
-rawbody PORN_4 	/http:\/\/[\w\.]*(?:xxx|sex|anal|slut|pussy|cum|nympho|suck|porn|hardcore|taboo|whore|voyeur|lesbian|gurlpages|naughty|lolita|teen|schoolgirl|kooloffer|erotic)\w*\./
-describe PORN_4			Uses words and phrases which indicate porn (4)
 
 # (contrib: skod)
 body PORN_6			/(?:\d+\+? xxx pictures|xxx photos?)/i
@@ -274,7 +260,30 @@ describe PORN_7			Uses words and phrases which indicate porn (7)
 body PORN_8			/(?:video|movie|teen|ware|mp3)z/
 describe PORN_8			Uses words and phrases which indicate porn (8)
 
-body SEXY_PICS                  /sexy pictures/
+# Words which will almost never be seen outside of porn spam
+body     PORN_9                 /(?:sex|gay|slut|whore|cum|f.ck|adult|xxx)[ -]?fest|cum[ -]?shot|cum[ -]?dumpster/i
+describe PORN_9                 Uses words and phrases which indicate porn (9)
+
+# Words which mainly show up in porn spam
+body     PORN_10                /\blolita|\bslut|\bwhore|(?:[^x]|\b)xxx(?:[^x]|\b)|\bporn|\b(?:Asian|Japanese|oriental)\s+(?:girls|schoolgirls)\b|\bbabes\b|gang[ -]?bang|\bskank|\btits\b|\btitties\b|\bpussy\b|\bpussies\b/i
+describe PORN_10                Uses words and phrases which indicate porn (10)
+
+# Words which often show up in spam, but also show up somewhat often in
+# non-spam
+body     PORN_11                /hard[ -]?core|web[ -]?cam/i
+describe PORN_11                Uses words and phrases which indicate porn (11)
+
+# Like PORN_3, but it only needs to match two terms intead of three. To
+# compensate for only matching two terms, so as to not generate too many
+# false positives, there can only be up to seven characters between terms,
+# rather than the 15 for PORN_3; it also uses a shorter list of terms.
+body     PORN_12                /(?:(?:\blolita|(?:[^x]|\b)xxx(?:[^x]|\b)|\bsex|\bslut|\bwhore|\bhottest\b|hard-?core|\bhorny\b|\bhorniest\b|\bvirgin|\bnaughty\b|\bnaughtiest\b|\bweb.?cam|\ble[sz]b(?:ian|o)|\bskank|\btits\b|\btitties\b|\bpussy\b|\bpussies\b|\badult\b|\bfuck).{0,7}){2,}/i
+describe PORN_12                Uses words and phrases which indicate porn (12)
+
+body     PORN_13                /must be (?:at least|over) 18/i
+describe PORN_13                Uses words and phrases which indicate porn (13)
+
+body SEXY_PICS                  /sexy pictures/i
 describe SEXY_PICS              Sexy pictures
 
 rawbody TRACKER_ID		/^\W{4,6} (?:[a-z]{10,}|[A-Z]{10,}) \W{4,6}\s*$/
@@ -282,9 +291,9 @@ describe TRACKER_ID		Incorporates a tracking ID number
 
 body OPPORTUNITY		/OPPORTUNITY/
 describe OPPORTUNITY		Gives information about an opportunity
-body PURE_PROFIT		/PURE PROFIT/
+body PURE_PROFIT		/PURE PROFIT/i
 describe PURE_PROFIT		Profit is dirty, not pure
-body STOCK_PICK			/STOCK PICK/
+body STOCK_PICK			/STOCK PICK/i
 describe STOCK_PICK		Offers a stock pick
 body STOCK_ALERT		/stock alert/i
 describe STOCK_ALERT		Offers a stock alert
@@ -292,34 +301,6 @@ body MICRO_CAP_WARNING		/Investing in micro-cap securities is highly speculative
 describe MICRO_CAP_WARNING	SEC-mandated penny-stock warning -- thanks SEC
 body INVESTOR_SPEC_SHEET	/Investor Spec Sheet/i
 describe INVESTOR_SPEC_SHEET	Standard investment opportunity spam
-
-# some frequently-advertised URLs
-rawbody E_WEBHOSTCENTRAL_URL		/http:\/\/.*e-webhostcentral\.com/i
-describe E_WEBHOSTCENTRAL_URL		Frequent SPAM content
-rawbody FREEWEBHOSTINGCENTRAL		/http:\/\/.*freewebhostingcentral/i
-describe FREEWEBHOSTINGCENTRAL		Frequent SPAM content
-rawbody FREEWEBCO_NET_URL		/http:\/\/.*freewebco\.net/i
-describe FREEWEBCO_NET_URL		Frequent SPAM content
-rawbody 25FREEMEGS_URL			/http:\/\/.*25freemegs\.com/i
-describe 25FREEMEGS_URL			Frequent SPAM content
-rawbody WEB4PORNO_URL			/http:\/\/.*web4porno\.com/i
-describe WEB4PORNO_URL			Frequent SPAM content
-rawbody CLICKSFORMONEY_NET		/http:\/\/.*clicksformoney\.net/i
-describe CLICKSFORMONEY_NET		Frequent SPAM content
-rawbody YELLOWSUN			/yellowsun01\.com/i
-describe YELLOWSUN			Frequent SPAM content
-rawbody WWW_REMOVEYOU_COM		/http:\/\/.*removeyou\.com/i
-describe WWW_REMOVEYOU_COM		Frequent SPAM content
-rawbody WWW_AUTOREMOVE_COM		/http:\/\/.*autoremove\.com/i
-describe WWW_AUTOREMOVE_COM		Frequent SPAM content
-rawbody WWW_CLIK4YOU_COM		/http:\/\/.*clik4you\.com/i
-describe WWW_CLIK4YOU_COM		Frequent SPAM content
-rawbody WWW_DIRECTFORCEMARKETING_COM	/http:\/\/.*directforcemarketing\.com/i
-describe WWW_DIRECTFORCEMARKETING_COM	Frequent SPAM content
-rawbody WWW_TRAFFICWOW_NET		/http:\/\/.*trafficwow\.net/i
-describe WWW_TRAFFICWOW_NET     	Frequent SPAM content
-rawbody WWW_NETSITESFORFREE_NET		/http:\/\/.*netsitesforfree\.net/i
-describe WWW_NETSITESFORFREE_NET	Frequent SPAM content
 
 body FREE_CONSULTATION		/FREE CONSULTATION/i
 describe FREE_CONSULTATION	Offers a free consultation
@@ -343,10 +324,15 @@ describe ASKS_BILLING_ADDRESS   Asks for a billing address
 body CYBER_FIRE_POWER           /(?:by|for) Cyber FirePower\!/
 describe CYBER_FIRE_POWER       mentions Cyber FirePower!, a spam-tool
 
-# (contrib: WW)
-# modified by jm to stop it matching on all-space lines
-rawbody LINE_OF_YELLING		/^[A-Z0-9\$\.,\'\!\?\s]{20,}[A-Z\$\.,\'\!\?]{5,}[A-Z0-9\$\.,\'\!\?\s]{20,}$/
-describe LINE_OF_YELLING        A WHOLE LINE OF YELLING DETECTED
+# converted to use eval method by Matthew Cline
+body LINES_OF_YELLING		eval:check_for_yelling()
+describe LINES_OF_YELLING        A WHOLE LINE OF YELLING DETECTED
+
+body     LINES_OF_YELLING_2     eval:check_for_num_yelling_lines("2")
+describe LINES_OF_YELLING_2     2 WHOLE LINES OF YELLING DETECTED
+
+body     LINES_OF_YELLING_3     eval:check_for_num_yelling_lines("3")
+describe LINES_OF_YELLING_3     3 WHOLE LINES OF YELLING DETECTED
 
 ###########################################################################
 # some full-text matches; note the [3D=\s"']* bits of the patterns, which
@@ -377,7 +363,7 @@ body FOR_INSTANT_ACCESS		/INSTANT ACCESS/i
 describe FOR_INSTANT_ACCESS	Instant Access button
 
 # (contrib: skod)
-body NO_SELLING			/absolutely NO selling/
+body NO_SELLING			/absolutely NO selling/i
 describe NO_SELLING		Claims not to be selling anything
 
 # (contrib: skod)
@@ -391,19 +377,22 @@ describe PREST_NON_ACCREDITED	'Prestigious Non-Accredited Universities'
 body NEW_DOMAIN_EXTENSIONS	/new\s*domain\s*extension/i
 describe NEW_DOMAIN_EXTENSIONS	Possible registry spammer
 
+body DOMAIN_BODY		/\s(\.|dot\s+)(info|biz|name)\s/i
+describe DOMAIN_BODY		Domain registration spam body
+
 # (contrib: skod)
 rawbody MONSTERHUT		/monsterhut.com/
-describe MONSTERHUT		mentions monsterhut.com
+describe MONSTERHUT		Mentions monsterhut.com
 
 # (contrib: skod)
 body EMAIL_HARVEST		/email harvest/
 describe EMAIL_HARVEST		Email harvest leads to SPAM for thanksgiving
 
 # (contrib: WW)
-rawbody CLICK_TO_REMOVE_MAILTO     /\bclick to.{0,30}remove.{0,50}mailto:/is
+body CLICK_TO_REMOVE_MAILTO        /\bclick to.{0,30}remove.{0,50}mailto:/is
 describe CLICK_TO_REMOVE_MAILTO    Click-to-remove with mailto: found
 
-rawbody CLICK_TO_REMOVE_2       /href.{0,50}mailto:.{0,50}click.{0,50}remove/is
+body CLICK_TO_REMOVE_2          /mailto:.{0,50}click.{0,50}remove/is
 describe CLICK_TO_REMOVE_2      Click-to-remove with mailto: found beforehand
 
 # (contrib: WW, mod by David Hull)
@@ -417,7 +406,7 @@ body REMOVAL_INSTRUCTIONS	/REMOVAL INSTRUCTIONS/i
 describe REMOVAL_INSTRUCTIONS	Gives instructions for removal from list
 
 # (contrib: WW)
-body THIS_AINT_SPAM             /This.{0,30}is not spam/is
+body THIS_AINT_SPAM             /This.{0,30}is not (?:a )?spam/is
 describe THIS_AINT_SPAM         Claims "This is not spam"
 
 # (contrib: WW)
@@ -434,17 +423,29 @@ describe HR_3113                Mentions Spam law "H.R. 3113"
 body UCE_MAIL_ACT               /Unsolicited Commercial Electronic Mail Act/
 describe UCE_MAIL_ACT           Mentions Spam Law "UCE-Mail Act"
 
-body PENIS_ENLARGE		/(?:(?:\bpenis\b|\benlarge).{0,50}){2,}/is
+body PENIS_ENLARGE		/\b(?:add\b|enlarge|increase|grow|lengthen|larger\b|bigger\b|longer\b|thicker\b).{0,50}\b:penis\b/i
 describe PENIS_ENLARGE		Information on getting a larger penis
 
-body PENIS_ENLARGE2		/(?:(?:\bpenis\b|\bincrease).{0,50}){2,}/is
+body PENIS_ENLARGE2		/\bpenis\b.{0,50}\b(?:add\b|enlarge|increase|grow|lengthen|larger\b|bigger\b|longer\b|thicker\b)/i
 describe PENIS_ENLARGE2		Information on getting a larger penis
 
-body WORK_AT_HOME		/(?:(?:WORK|MAKE (?:MONEY|\${1,})) (?:AT|FROM) HOME|HOME.?WORKER)/
-describe WORK_AT_HOME		Information on how to work at home
+body     EJACULATION            /(?:increase|improve).{0,10}ejaculation/i
+describe EJACULATION            Increase your ejaculation!
 
-body HOME_EMPLOYMENT		/HOME EMPLOYMENT/i
-describe HOME_EMPLOYMENT	Information on how to work at home
+body     IMPOTENCE              /(?:impotence (?:problem|cure|solution)|Premature Ejaculation|erectile dysfunction)/i
+describe IMPOTENCE              Impotence cure
+
+body WORK_AT_HOME		/(?:WORK|(?:MAKE|EARN).{1,10}(?:MONEY|\$+|BUCKS|CASH)).{1,10}(?:AT|FROM) (?:YOUR )?HOME/i
+describe WORK_AT_HOME		Information on how to work at home (1)
+
+body HOME_EMPLOYMENT		/HOME.{0,10}(?: EMPLOYMENT|WORKER|BUSINESS)/i
+describe HOME_EMPLOYMENT	Information on how to work at home (2)
+
+body     NO_EXPERIENCE          /\bNo EXPERIENCE/i
+describe NO_EXPERIENCE          No experience needed!
+
+body     FREE_MONEY             /\b(:?fast|free|easy|big)\s*(?:money|\$+|bucks|cash)/i
+describe FREE_MONEY             Free money!
 
 body MORTGAGE_RATES		/Mortgage rates/i
 describe MORTGAGE_RATES		Information on mortgage rates
@@ -452,60 +453,32 @@ describe MORTGAGE_RATES		Information on mortgage rates
 body TAKE_ACTION_NOW		/take action now!/i
 describe TAKE_ACTION_NOW	Tells you to 'take action now!'
 
-body THE_FOLLOWING_FORM		/the following form\b/
+body THE_FOLLOWING_FORM		/the following form\b/i
 describe THE_FOLLOWING_FORM	Asks you to fill out a form
 
 # suggested by Nick Rothwell
-body HUNZA_DIET_BREAD		/HUNZA DIET BREAD/
+body HUNZA_DIET_BREAD		/HUNZA/i
 describe HUNZA_DIET_BREAD	Offers a tasty-sounding dietary product
-
-rawbody A_HREF_TO_UNSUB		/href[3D=\s\"\']*\S+unsubscribe/i
-describe A_HREF_TO_UNSUB	Link to a URL containing "unsubscribe"
-
-rawbody UNSUB_SCRIPT		/https?:\/\/.*cgi.*\/unsubscribe\./
-describe UNSUB_SCRIPT		URL of CGI script called "unsubscribe"
-
-rawbody UNSUB_PAGE		/https?:\/\/[^\/]+\/unsubscribe/
-describe UNSUB_PAGE		URL of page called "unsubscribe"
-
-rawbody A_HREF_TO_OPT_OUT	/href[3D=\s\"\']*\S+opt(?:-in|-out|in|out)/i
-describe A_HREF_TO_OPT_OUT	Link to a URL containing "opt-in" or "opt-out"
-
-rawbody A_HREF_TO_REMOVE	/href[3D=\s\"\']*\S+remove/i
-describe A_HREF_TO_REMOVE	Link to a URL containing "remove"
-
-rawbody REMOVE_SCRIPT		/https?:\/\/.*cgi.*\/remove\./
-describe REMOVE_SCRIPT		URL of CGI script called "remove"
-
-rawbody REMOVE_PAGE		/https?:\/\/[^\/]+\/remove/
-describe REMOVE_PAGE		URL of page called "remove"
 
 # include the \n\n so we don't match mailto's in the headers!  Some list software
 # uses these to handle auto-subscribe/unsubscribe features
 rawbody MAILTO_LINK		/=[3D=\s"']*mailto:/is
 describe MAILTO_LINK		Includes a URL link to send an email
-rawbody MAILTO_WITH_SUBJ_REMOVE	/mailto:\S+\?subject=[3D=\s"']*remove/is
-describe MAILTO_WITH_SUBJ_REMOVE Includes a URL link to send an email with the subject 'remove'
-rawbody MAILTO_WITH_SUBJ	/mailto:\S+\?subject=/is
-describe MAILTO_WITH_SUBJ	Includes a link to send a mail with a subject
 rawbody FORM_W_MAILTO_ACTION	/action=[3D=\s"']*mailto:/is
 describe FORM_W_MAILTO_ACTION	Includes a form which will send an email
 body AOL_USERS_LINK		/AOL\s+Users\s+Click/is
 describe AOL_USERS_LINK		Includes a link for AOL users to click
-
-rawbody MAILTO_TO_SPAM_ADDR	/mailto:[a-z]+\d{2,}\@/is
-describe MAILTO_TO_SPAM_ADDR	Includes a link to a likely spammer email address
-
-rawbody MAILTO_TO_REMOVE	/remove\S*\@\S+\.\S\S/is
-describe MAILTO_TO_REMOVE	Includes a 'remove' email address
 
 rawbody WEB_BUGS		/<\s*img\s[^>]*src[^>]+\?/i
 describe WEB_BUGS		Image tag with an ID code to identify you
 
 # many spammers seem to do this nowadays (and probably track
 # their customers with it).  (contrib: WW)
-rawbody RELAYING_FRAME		/<frame\b[^>]+\bsrc=[3D=\s"']*http:\/\//is
+rawbody RELAYING_FRAME		/<i?frame\s/i
 describe RELAYING_FRAME		Frame wanted to load outside URL
+
+rawbody HTML_EMBEDS		/<(?:object|embed)\s/i
+describe HTML_EMBEDS		HTML with embedded plugin object
 
 # Cyber FirePower! rants about 'Internet terrorists' aka spam fighters
 # (contrib: WW)
@@ -518,28 +491,36 @@ describe BASE64_ENC_TEXT	Message text disguised using base-64 encoding
 full CHARSET_FARAWAY_BODY	eval:check_for_faraway_charset_in_body()
 describe CHARSET_FARAWAY_BODY	Character set indicates foreign language body
 
-body NIGERIAN_SCAM		/BASED ON INFORMATION GATHERED ABOUT YOU, WE BELIEVE\s*YOU WOULD BE IN A POSITION TO HELP US IN TRANSFER/
+body NIGERIAN_SCAM		/BASED ON INFORMATION GATHERED ABOUT YOU, WE BELIEVE\s*YOU WOULD BE IN A POSITION TO HELP US IN TRANSFER/i
 describe NIGERIAN_SCAM		Nigerian scam, cf http://www.snopes2.com/inboxer/scams/nigeria.htm
 
 # (contrib: skod)
-body NIGERIAN_SCAM_2		/(?:Government of Nigeria|NIGERIAN? NATIONAL|Nigerian? Government)/
-describe NIGERIAN_SCAM_2	Mutated Nigerian scams
+body NIGERIAN_SCAM_2		/(?:Government of Nigeria|NIGERIAN? NATIONAL|Nigerian? Government|Federal Republic of Nigeria)/i
+describe NIGERIAN_SCAM_2	Mutated Nigerian scams, cf http://www.snopes2.com/inboxer/scams/nigeria.htm
 
-body US_DOLLARS			/Million\b.{0,40}\b(?:United States Dollars|USD)/i
+body NIGERIAN_SCAM_3            /(?:Bank of Nigeria|Nigerian? National Petroleum)/i
+describe NIGERIAN_SCAM_3        Nigerian Bank or Petroleum scam, cf http://www.snopes2.com/inboxer/scams/nigeria.htm
+
+body NIGERIAN_SCAM_4            /\b(wife|widow|son|husband)\b.{0,60}Sann?i Abacha/
+describe NIGERIAN_SCAM_4        Nigerian widow needs your help, cf http://www.snopes2.com/inboxer/scams/nigeria.htm
+
+body NIGERIAN_SCAM_5            /Sann?i Abacha.{0,60}\b(wife|widow|son|husband)\b/
+describe NIGERIAN_SCAM_5        Nigerian widow needs your help, cf http://www.snopes2.com/inboxer/scams/nigeria.htm
+
+body US_DOLLARS			/Million\b.{0,40}\b(?:United States Dollars|USD|U\. ?S\. Dollars)/i
 describe US_DOLLARS		Nigerian scam key phrase
+
+body US_DOLLARS_2               /(?:\$|usd)\d{2,3}(?:\.\d)?m\b/i
+describe US_DOLLARS_2           Nigerian scam key phrase ($NN.Nm/USDNN.Nm)
+
+body US_DOLLARS_3               /(?:\$|usd ?)\d{1,3},\d{3},\d{3}(?:\.\d\d)?/i
+describe US_DOLLARS_3           Nigerian scam key phrase ($NN,NNN,NNN.NN)
 
 rawbody UNNEEDED_HTML_ENCODING	/font=3E/i
 describe UNNEEDED_HTML_ENCODING	Unneeded encoding of HTML tags
 
-###########################################################################
-# not quite spam, but dangerous/irritating nonetheless, and easy to catch.
-
-full SIRCAM_SIGNATURE		/Content-Disposition: attachment;\s+filename=.[^\n]+\.\S\S\S\.(bat|com|lnk|pif)./s
-describe SIRCAM_SIGNATURE	SECURITY: The Sircam worm
-
-# contrib: skod
-full BADTRANS_WORM              /Content-ID: <EA4DMGBP9p>/
-describe BADTRANS_WORM          SECURITY: The BadTrans worm, see http://securityresponse.symantec.com/avcenter/venc/data/w32.badtrans.b@mm.html
+rawbody FRONTPAGE		/FrontPage.Editor/
+describe FRONTPAGE		Frontpage used to create the message
 
 ###########################################################################
 # Compensation for signs that the mail is friendly.
@@ -563,10 +544,6 @@ describe PGP_SIGNATURE		Contains a PGP-signed message
 # do not seem to for some reason.  (Kevin Dangoor)
 body COPYRIGHT_CLAIMED		/copyright.{0,100}all rights reserved/is
 describe COPYRIGHT_CLAIMED	Contains a claim of copyright
-
-# one spamhaus uses servers numbered like this:
-rawbody HTTP_NUMBER_WORD	/http\:\/\/(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\./i
-describe HTTP_NUMBER_WORD	URL contains spamhaus signature: numbered servers
 
 # some very frequent spam subjects, based on statistical analysis
 body KIFF			/temple kiff/i
@@ -605,7 +582,7 @@ describe BE_AMAZED		Apparently, you'll be amazed
 body ITS_EFFECTIVE		/\bit's effective\b/i
 describe ITS_EFFECTIVE		Something claims to be effective
 
-body RESISTANCE_IS_FUTILE	/Replying to this email will not unsubscribe you./
+body RESISTANCE_IS_FUTILE	/Replying to this email will not unsubscribe you./i
 describe RESISTANCE_IS_FUTILE	Resistance to this spam is futile
 
 body MAILMAN_CONFIRM            /We have received a request .*subscription of your email address.* to the .* mailing list/
@@ -624,16 +601,16 @@ describe SUBJ_2_CREDIT          Contains 'subject to credit approval'
 body DEAR_SOMEBODY              /Dear [A-Z][a-z]+/
 describe DEAR_SOMEBODY          Contains 'Dear Somebody'
 
-body GAPPY_TEXT                 /(?:[a-z][-_\.\,\:\;\'\~]{1,3}){5,}/i
+body GAPPY_TEXT                 /\b(?:[a-z][-_\.\,\:\;\'\~\s]{1,3}){5,}/i
 describe GAPPY_TEXT             Contains 'G.a.p.p.y-T.e.x.t'
 
 body COPY_DVDS                  /copy.{1,20}dvd/i
 describe COPY_DVDS              Containts 'Copy DVDs'
 
-body URGENT_BIZ                 /URGENT BUSINESS/
+body URGENT_BIZ                 /URGENT BUSINESS/i
 describe URGENT_BIZ             Containts 'URGENT BUSINESS'
 
-body EARN_PER_WEEK              /earn.{1,20}\d\d\d+.{1,30}per week/i
+body EARN_PER_WEEK              /(?:earn|make).{1,20}\d\d\d+.{1,30}(?:per week|per month|weekly|monthly)/i
 describe EARN_PER_WEEK          Contains 'earn $something per week'
 
 # contrib: Wayne A Tucker
@@ -654,3 +631,53 @@ describe SAFEGUARD_NOTICE	Contains signature of unregistered spam tool
 # Evites trigger false positives
 body EVITE			/evite.citysearch.com/
 describe EVITE			Claw back some for evite
+
+# Has a proper .sig - probably clean
+body     SIGNATURE_DELIM        /^-- $/
+describe SIGNATURE_DELIM        Standard signature delimiter present  
+
+body     READ_TO_END            /read this (?:e-?mail )?to the end/i
+describe READ_TO_END            You'd better read all of this spam!
+
+body     DONT_DELETE            /(?:don'?t delete this|do not delete)/i
+describe DONT_DELETE            Don't delete me!  Nooooo!!!!
+
+body     REAL_THING             /the real thing/i
+describe REAL_THING             It's the real thing, baby!
+
+body     ALL_NATURAL            /\b(?:100%|completely|totally|all) natural/i
+describe ALL_NATURAL            Spam is 100% natural?!
+
+body     MONEY_BACK             /money back guarantee/i
+describe MONEY_BACK             Money back guarantee.
+
+body     NO_CATCH               /there is no catch/i
+describe NO_CATCH               There is no catch.
+
+body     NO_OBLIGATION          /no obligation/i
+describe NO_OBLIGATION          There is no obligation.
+
+body     NO_DISSAPOINTMENT      /You won'?t be diss?app?ointed/i
+describe NO_DISSAPOINTMENT      You won't be dissapointed.
+
+body     SERIOUS_ONLY           /Serious [IE]nquiries Only/i
+describe SERIOUS_ONLY           Serious Enquiries Only.
+
+body     RISK_FREE              /risk free/i
+describe RISK_FREE              Risk free.  Suuurreeee....
+
+# "seen on TV", "seen on ABC/NBC/etc", "seen on XYZ TV", or
+# "seen on:"
+body     AS_SEEN_ON             /seen on\b\s*(?:TV|ABC|NBC|CBS|CNN|Oprah|USA Today|48 Hours|New York Times|\w+\s+TV|:)/i
+describe AS_SEEN_ON             As seen on national TV!
+
+body     NOT_INTENDED           /not intended for residents ?(:of|in)/i
+describe NOT_INTENDED           Not intended for residents of XYZ.
+
+# This phrase appears in many pyramid scheme mails in which
+# "My Wife Jody" testimonials are absent
+body     COPY_ACCURATELY        /copy.{1,10}name.{1,10}address.{1,10}ACCURATELY/i
+describe COPY_ACCURATELY        Common pyramid scheme phrase (1)
+
+body     SEE_FOR_YOURSELF       /See (?:for|it) yourself/i
+describe SEE_FOR_YOURSELF       See for yourself

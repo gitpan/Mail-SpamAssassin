@@ -38,6 +38,7 @@ sub report {
 
   if (!$self->{main}->{local_tests_only}
   	&& !$self->{options}->{dont_report_to_razor}
+    && !$self->{main}->{stop_at_threshold}
 	&& $self->is_razor_available())
   {
     if ($self->razor_report($text)) {
@@ -93,7 +94,6 @@ sub razor_report {
     require Razor::Client;
     require Razor::Agent;
     local ($^W) = 0;            # argh, warnings in Razor
-    local ($/);                 # argh, bugs in Razor
 
     local $SIG{ALRM} = sub { die "alarm\n" };
     alarm 10;

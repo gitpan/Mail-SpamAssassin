@@ -46,6 +46,7 @@ use vars	qw{
   	@ISA $type_body_tests $type_head_tests $type_head_evals
 	$type_body_evals $type_full_tests $type_full_evals
 	$type_rawbody_tests $type_rawbody_evals
+    $type_uri_tests $type_uri_evals
 };
 
 @ISA = qw();
@@ -58,6 +59,8 @@ $type_full_tests = 105;
 $type_full_evals = 106;
 $type_rawbody_tests = 107;
 $type_rawbody_evals = 108;
+$type_uri_tests  = 109;
+$type_uri_evals  = 110;
 
 ###########################################################################
 
@@ -77,6 +80,8 @@ sub new {
   # this allows e.g. a full-text test to be rewritten as a body test in
   # the user's ~/.spamassassin.cf file.
   $self->{body_tests} = { };
+  $self->{uri_tests}  = { };
+  $self->{uri_evals}  = { }; # not used/implemented yet
   $self->{head_tests} = { };
   $self->{head_evals} = { };
   $self->{body_evals} = { };
@@ -84,6 +89,9 @@ sub new {
   $self->{full_evals} = { };
   $self->{rawbody_tests} = { };
   $self->{rawbody_evals} = { };
+
+  # testing stuff
+  $self->{regression_tests} = { };
 
   $self->{required_hits} = 5.0;
   $self->{auto_report_threshold} = 25.0;
@@ -99,6 +107,7 @@ sub new {
   $self->{auto_whitelist_factor} = 0.5;
 
   $self->{rewrite_subject} = 1;
+  $self->{spam_level_stars} = 1;
   $self->{subject_tag} = '*****SPAM*****';
   $self->{report_header} = 0;
   $self->{use_terse_report} = 0;
@@ -107,6 +116,7 @@ sub new {
   $self->{check_mx_attempts} = 2;
   $self->{check_mx_delay} = 5;
   $self->{ok_locales} = '';
+  $self->{allow_user_rules} = 0;
 
   $self->{whitelist_from} = { };
   $self->{blacklist_from} = { };
@@ -278,6 +288,22 @@ disabled here.
     if (/^rewrite[-_]subject\s+(\d+)$/) {
       $self->{rewrite_subject} = $1+0; next;
     }
+
+=item spam_level_stars { 0 | 1 }        (default: 1)
+
+By default, a header field called "X-Spam-Level" will be added to the message,
+with its value set to a number of asterisks equal to the score of the message.
+In other words, for a message scoring 7.2 points:
+
+X-Spam-Level: *******
+
+This can be useful for MUA rule creation.
+
+=cut
+
+   if(/^spam[-_]level[-_]stars\s+(\d+)$/) {
+      $self->{spam_level_stars} = $1+0; next;
+   }
 
 =item subject_tag STRING ... 		(default: *****SPAM*****)
 
@@ -530,7 +556,7 @@ Clear the spamtrap template.
 ###########################################################################
     # SECURITY: no eval'd code should be loaded before this line.
     #
-    if ($scoresonly) { goto failed_line; }
+    if ($scoresonly && !$self->{allow_user_rules}) { goto failed_line; }
 
 =back
 
@@ -540,9 +566,28 @@ These settings differ from the ones above, in that they are considered
 'privileged'.  Only users running C<spamassassin> from their procmailrc's or
 forward files, or sysadmins editing a file in C</etc/mail/spamassassin>, can
 use them.   C<spamd> users cannot use them in their C<user_prefs> files, for
-security and efficiency reasons.
+security and efficiency reasons, unless allow_user_rules is enabled (and
+then, they may only add rules from below).
 
 =over 4
+
+=item allow_user_rules { 0 | 1 }		(default: 0)
+
+This setting allows users to create rules (and only rules) in their C<user_prefs> files for
+use with C<spamd>. It defaults to off, because this could be a
+severe security hole. It may be possible for users to gain root level access
+if C<spamd> is run as root. It is NOT a good idea, unless you have some
+other way of ensuring that users' tests are safe. Don't use this unless you
+are certain you know what you are doing.
+
+=cut
+
+
+    if (/^allow[-_]user[-_]rules\s+(\d+)$/) {
+      $self->{allow_user_rules} = $1+0; next;
+    }
+
+
 
 =item header SYMBOLIC_TEST_NAME header op /pattern/modifiers	[if-unset: STRING]
 
@@ -593,6 +638,25 @@ Define a body eval test.  See above.
       $self->add_test ($1, $2, $type_body_tests); next;
     }
 
+=item uri SYMBOLIC_TEST_NAME /pattern/modifiers
+
+Define a uri pattern test.  C<pattern> is a Perl regular expression.
+
+The 'uri' in this case is a list of all the URIs in the body of the email,
+and the test will be run on each and every one of those URIs, adjusting the
+score if a match is found. Use this test instead of one of the body tests
+when you need to match a URI, as it is more accurately bound to the start/end
+points of the URI, and will also be faster.
+
+=cut
+# we don't do URI evals yet - maybe later
+#    if (/^uri\s+(\S+)\s+eval:(.*)$/) {
+#      $self->add_test ($1, $2, $type_uri_evals); next;
+#    }
+    if (/^uri\s+(\S+)\s+(.*)$/) {
+      $self->add_test ($1, $2, $type_uri_tests); next;
+    }
+
 =item rawbody SYMBOLIC_TEST_NAME /pattern/modifiers
 
 Define a raw-body pattern test.  C<pattern> is a Perl regular expression.
@@ -631,6 +695,26 @@ Define a full-body eval test.  See above.
     }
     if (/^full\s+(\S+)\s+(.*)$/) {
       $self->add_test ($1, $2, $type_full_tests); next;
+    }
+
+###########################################################################
+    # SECURITY: allow_user_prefs is only in affect until here.
+    #
+    if ($scoresonly) { goto failed_line; }
+
+
+=item test SYMBOLIC_TEST_NAME (ok|fail) Some string to test against
+
+Define a regression testing string. You can have more than one regression test string
+per symbolic test name. Simply specify a string that you wish the test to match.
+
+These tests are only run as part of the test suite - they should not affect the general
+running of SpamAssassin.
+
+=cut
+
+    if (/^test\s+(\S+)\s+(ok|fail)\s+(.*)$/) {
+      $self->add_regression_test($1, $2, $3); next;
     }
 
 =item razor_config filename
@@ -729,6 +813,31 @@ sub add_test {
   $self->{scores}->{$name} ||= 1.0;
 }
 
+sub add_regression_test {
+  my ($self, $name, $ok_or_fail, $string) = @_;
+  if ($self->{regression_tests}->{$name}) {
+    push @{$self->{regression_tests}->{$name}}, [$ok_or_fail, $string];
+  }
+  else {
+    # initialize the array, and create one element
+    $self->{regression_tests}->{$name} = [ [$ok_or_fail, $string] ];
+  }
+}
+
+sub regression_tests {
+  my $self = shift;
+  if (@_ == 1) {
+    # we specified a symbolic name, return the strings
+    my $name = shift;
+    my $tests = $self->{regression_tests}->{$name};
+    return @$tests;
+  }
+  else {
+    # no name asked for, just return the symbolic names we have tests for
+    return keys %{$self->{regression_tests}};
+  }
+}
+
 sub finish_parsing {
   my ($self) = @_;
 
@@ -744,6 +853,8 @@ sub finish_parsing {
     elsif ($type == $type_rawbody_evals) { $self->{rawbody_evals}->{$name} = $text; }
     elsif ($type == $type_full_tests) { $self->{full_tests}->{$name} = $text; }
     elsif ($type == $type_full_evals) { $self->{full_evals}->{$name} = $text; }
+    elsif ($type == $type_uri_tests)  { $self->{uri_tests}->{$name} = $text; }
+    # elsif ($type == $type_uri_evals)  { $self->{uri_evals}->{$name} = $text; }
     else {
       # 70 == SA_SOFTWARE
       sa_die (70, "unknown type $type for $name: $text");

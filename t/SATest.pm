@@ -18,14 +18,14 @@ sub sa_t_init {
   $scr ||= "../spamassassin";
 
   $spamd = $ENV{'SPAMD_SCRIPT'};
-  $spamd ||= "../spamd/spamd";
+  $spamd ||= "../spamd/spamd -x";
 
   $spamc = $ENV{'SPAMC_SCRIPT'};
   $spamc ||= "../spamd/spamc";
 
   $spamdport = 48373;		# whatever
 
-  $scr_cf_args = "-c ../rules";
+  $scr_cf_args = "-c ../rules -p ../rules/user_prefs.template";
   $scr_pref_args = "";
   $scr_test_args = "";
 
@@ -106,7 +106,15 @@ sub sdrun {
 
   start_spamd ($sdargs);
 
-  my $spamcargs = "$spamc -p $spamdport $args";
+  my $spamcargs;
+  if($args !~ /(?:-p\s*[0-9]+|-o)/)
+  {
+    $spamcargs = "$spamc -p $spamdport $args";
+  }
+  else
+  {
+    $spamcargs = "$spamc $args";
+  }
   $spamcargs =~ s!/!\\!g if ($^O =~ /^MS(DOS|Win)/i);
 
   print ("\t$spamcargs\n");
@@ -128,7 +136,15 @@ sub start_spamd {
     $sdargs = $ENV{'SD_ARGS'} . " ". $sdargs;
   }
 
-  my $spamdargs = "$spamd -D -p $spamdport $sdargs";
+  my $spamdargs;
+  if($sdargs !~ /(?:-p\s*[0-9]+|-o)/)
+  {
+    $spamdargs = "$spamd -D -p $spamdport $sdargs";
+  }
+  else
+  {
+    $spamdargs = "$spamd -D $sdargs";
+  }
   $spamdargs =~ s!/!\\!g if ($^O =~ /^MS(DOS|Win)/i);
 
   print ("\t$spamdargs > log/$testname.spamd 2>&1 &\n");
@@ -159,7 +175,7 @@ sub start_spamd {
 }
 
 sub stop_spamd {
-  kill (15, $spamd_pid);
+  print ("Killed ",kill (15, $spamd_pid)," spamd instances\n");
 }
 
 # ---------------------------------------------------------------------------
@@ -214,7 +230,7 @@ sub ok_all_patterns {
   foreach my $pat (sort keys %patterns) {
     my $type = $patterns{$pat};
     print "\tChecking $type\n";
-    if (ok (defined $found{$type})) {
+    if (defined $found{$type}) {
       ok ($found{$type} == 1) or warn "Found more than once: $type\n";
     } else {
       warn "\tNot found: $type = $pat\n";
@@ -224,8 +240,44 @@ sub ok_all_patterns {
   foreach my $pat (sort keys %anti_patterns) {
     my $type = $anti_patterns{$pat};
     print "\tChecking for anti-pattern $type\n";
-    if (!ok (!defined $found{$type})) {
+    if (defined $found_anti{$type}) {
       warn "\tFound anti-pattern: $type = $pat\n";
+      ok (0);
+    }
+    else
+    {
+      ok (1);
+    }
+  }
+}
+
+sub skip_all_patterns {
+  my $skip = shift;
+  foreach my $pat (sort keys %patterns) {
+    my $type = $patterns{$pat};
+    print "\tChecking $type\n";
+    if (defined $found{$type}) {
+      skip ($skip, $found{$type} == 1) or warn "Found more than once: $type\n";
+      warn "\tThis test should have been skipped: $skip\n" if $skip;
+    } else {
+      if ($skip) {
+        warn "\tTest skipped: $skip\n";
+      } else {
+        warn "\tNot found: $type = $pat\n";
+      }
+      skip ($skip, 0);                     # keep the right # of tests
+    }
+  }
+  foreach my $pat (sort keys %anti_patterns) {
+    my $type = $anti_patterns{$pat};
+    print "\tChecking for anti-pattern $type\n";
+    if (defined $found_anti{$type}) {
+      warn "\tFound anti-pattern: $type = $pat\n";
+      skip ($skip, 0);
+    }
+    else
+    {
+      skip ($skip, 1);
     }
   }
 }

@@ -68,8 +68,8 @@ use vars	qw{
 
 @ISA = qw();
 
-$VERSION = "2.11";
-$SUB_VERSION = 'devel $Id: SpamAssassin.pm,v 1.68 2002/03/04 01:22:24 hughescr Exp $';
+$VERSION = "2.20";
+$SUB_VERSION = 'devel $Id: SpamAssassin.pm,v 1.77 2002/04/06 19:28:30 hughescr Exp $';
 
 sub Version { $VERSION; }
 
@@ -80,7 +80,8 @@ $DEBUG = 0;
 #__installsitelib__/spamassassin.cf
 #__installvendorlib__/spamassassin.cf
 @default_rules_path = qw(
-  	/usr/local/share/spamassassin
+        __prefix__/share/spamassassin
+        /usr/local/share/spamassassin
   	/usr/share/spamassassin
 	./rules
 	../rules
@@ -88,6 +89,8 @@ $DEBUG = 0;
 
 # first 3 are BSDish, latter 2 Linuxish
 @site_rules_path = qw(
+        __prefix__/etc/mail/spamassassin
+        __prefix__/etc/spamassassin
         /usr/local/etc/spamassassin
 	/usr/pkg/etc/spamassassin
         /usr/etc/spamassassin
@@ -101,7 +104,9 @@ $DEBUG = 0;
 );
     
 @default_prefs_path = qw(
-        /etc/spamassassin/user_prefs.template
+        __prefix__/etc/mail/spamassassin/user_prefs.template
+        __prefix__/share/spamassassin/user_prefs.template
+        /etc/mail/spamassassin/user_prefs.template
         /usr/local/share/spamassassin/user_prefs.template
         /usr/share/spamassassin/user_prefs.template
 );
@@ -169,7 +174,7 @@ sub new {
 
   if (defined $self->{debug}) { $DEBUG = $self->{debug}+0; }
 
-  $self->{conf} = new Mail::SpamAssassin::Conf ($self);
+  $self->{conf} ||= new Mail::SpamAssassin::Conf ($self);
   $self;
 }
 
@@ -346,10 +351,22 @@ sub remove_spamassassin_markup {
     $hdrs =~ s/(Content-Type: .*?boundary=\".*?) (.*?\".*?\n)/$1$2/gs;
   }
 
+  # reinstate the old content transfer encoding
+  if ($hdrs =~ /^X-Spam-Prev-Content-Transfer-Encoding: /m) {
+    $hdrs =~ s/\nContent-Transfer-Encoding: [^\n]*?\n/\n/gs;
+    $hdrs =~ s/\nX-Spam-Prev-(Content-Transfer-Encoding: [^\n]*\n)/\n$1/gs;
+  }
+
   # remove the headers we added
   1 while $hdrs =~ s/\nX-Spam-[^\n]*?\n/\n/gs;
 
   my $tag = $self->{conf}->{subject_tag};
+
+  while ( $tag =~ /(_HITS_|_REQD_)/g ) {
+       my $typeoftag = $1;
+       $hdrs =~ s/^Subject: (\D*)\d\d\.\d\d/Subject: $1$typeoftag/m;
+  } # Wow. Very Hackish.
+
   1 while $hdrs =~ s/^Subject: \Q${tag}\E /Subject: /gm;
 
   # ok, next, the report.
@@ -578,11 +595,17 @@ sub read_cf {
 }
 
 sub create_dotsa_dir_if_needed {
-  my ($self) = @_;
+  my ($self,$userdir) = @_;
 
   # user state directory
   my $fname = $self->{userstate_dir};
   $fname ||= $self->first_existing_path (@default_userstate_dir);
+  #
+  # If vpopmail is enabled then set fname to virtual homedir
+  #
+  if (defined $userdir) {
+    $fname = "$userdir/.spamassassin";
+  }
 
   if (defined $fname && !$self->{dont_copy_prefs}) {
     dbg ("using \"$fname\" for user state dir");
@@ -600,11 +623,19 @@ Copy default prefs file into home directory for later use and modification.
 =cut
 
 sub create_default_prefs {
-  my ($self,$fname,$user) = @_;
+  #
+  # $userdir will only exist if vpopmail config is enabled thru spamd
+  # Its value will be the virtual user's maildir
+  #
+  my ($self,$fname,$user,$userdir) = @_;
 
   if (!$self->{dont_copy_prefs} && !-f $fname)
   {
-    $self->create_dotsa_dir_if_needed();
+    #
+    # Pass on the value of $userdir for virtual users in vpopmail
+    # otherwise it is empty and the user's normal homedir is used
+    #
+    $self->create_dotsa_dir_if_needed($userdir);
 
     # copy in the default one for later editing
     my $defprefs = $self->first_existing_path
@@ -643,6 +674,7 @@ sub create_default_prefs {
 
 sub expand_name ($) {
   my ($self, $name) = @_;
+  return $ENV{HOME} if $ENV{HOME} =~ /\//;
   return (getpwnam($name))[7] if ($name ne '');
   return (getpwuid($>))[7];
 }
@@ -650,6 +682,9 @@ sub expand_name ($) {
 sub sed_path {
   my ($self, $path) = @_;
   return undef if (!defined $path);
+  $path =~ s/__prefix__/$Config{prefix}/gs;
+  $path =~ s/__sitelib__/$Config{sitelib}/gs;
+  $path =~ s/__vendorlib__/$Config{vendorlib}/gs;
   $path =~ s/__installsitelib__/$Config{installsitelib}/gs;
   $path =~ s/__installvendorlib__/$Config{installvendorlib}/gs;
   $path =~ s/^\~([^\/]*)/$self->expand_name($1)/es;

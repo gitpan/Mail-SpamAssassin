@@ -40,6 +40,8 @@ sub usage
 {
     warn <<EOUSAGE;
 
+Spamd version $Mail::SpamAssassin::VERSION
+
 Usage: spamd [options]
 
 Options:
@@ -52,6 +54,7 @@ Options:
                   use 0.0.0.0 to listen on all available addresses)
   -p port         Listen on the specific port (default: 783)
   -q              Enable SQL config (only useful with -x)
+  -v              Enable vpopmail config  (only useful with -u set to vpopmail user)
   -s facility     Specify the syslog facility (default: mail)
   -u username     Run as named user, instead of running setuid to spamc user
   -x              Disable user config files
@@ -59,10 +62,11 @@ Options:
                   server (default: 127.0.0.1)
   -D              Print debugging messages
   -L              Use local tests only (no DNS or other network lookups)
+  -S              Stop tests after the spam threshold is reached
   -P              Die upon user errors (does not exist or user = root) instead of
                   running as 'nobody' with defaults.
   -F 0|1          remove/add 'From ' line at start of output (default: 1)
-
+  -m num          allow maximum num children
 
 EOUSAGE
     exit $resphash{EX_USAGE};
@@ -70,10 +74,10 @@ EOUSAGE
 
 use vars qw{
     $opt_d $opt_h $opt_L $opt_p $opt_A $opt_x $opt_s $opt_D $opt_u
-    $opt_P $opt_c $opt_a $opt_i $opt_q $opt_F
+    $opt_P $opt_c $opt_a $opt_i $opt_q $opt_F $opt_S $opt_m $opt_v
 };
 
-getopts('acdhi:p:qs:u:xA:DLPF:') or usage();
+getopts('acdhi:p:qvs:u:xA:DLSPF:m:') or usage();
 
 $opt_h and usage();
 
@@ -102,6 +106,13 @@ else
 my $dontcopy = 1;
 if ($opt_c) { $dontcopy = 0; }
 
+
+my $extrapid = 5000;
+if ($opt_m) {	# Duncan
+    $opt_m =~ /(\d+)/; # Make sure it is numeric!
+	$extrapid = $1;
+}
+
 if (defined $ENV{'HOME'}) {
     delete $ENV{'HOME'}; # we do not want to use this when running spamd
 }
@@ -109,6 +120,7 @@ if (defined $ENV{'HOME'}) {
 my $spamtest = Mail::SpamAssassin->new({
     dont_copy_prefs => $dontcopy,
     local_tests_only => $opt_L,
+    stop_at_threshold => $opt_S,
     debug => $opt_D,
     paranoid => ($opt_P || 0),
 });
@@ -125,6 +137,7 @@ $opt_a and eval
 
 sub spawn;  # forward declaration
 sub logmsg; # forward declaration
+sub cleanupchildren;
 
 setlogsock('unix');
 
@@ -162,11 +175,19 @@ $/ = "\n";			# argh, Razor resets this!  Bad Razor!
 
 $opt_d and daemonize();
 
-my $waitedpid = 0;
 my $current_user;
 my $paddr;
 
-$SIG{CHLD} = 'IGNORE';		# important: avoids perl sighandling bug on BSD
+sub REAPER { # Adapted from the perlipc manpage
+	cleanupchildren;
+	$SIG{CHLD} = \&REAPER;
+}
+if ($opt_m) {
+    $SIG{CHLD} = \&REAPER;
+} else {
+    $SIG{CHLD} = 'IGNORE';
+}
+
 $SIG{INT} = \&kill_handler;
 $SIG{TERM} = \&kill_handler;
 
@@ -178,11 +199,8 @@ if ($opt_D) {
 }
 logmsg "server started on port $port";
 
-for ( $waitedpid = 0;
-      ($paddr = accept(Client,Server)) || $waitedpid;
-      $waitedpid = 0, close Client)
+for ( ; ($paddr = accept(Client,Server)) ; close Client)
 {
-    next if $waitedpid and not $paddr;
 
     my $start = time;
 
@@ -226,9 +244,10 @@ for ( $waitedpid = 0;
 	# It might be a CHECK message, meaning that we should just check
 	# if it's spam or not, then return the appropriate response.
 
-	elsif (/CHECK SPAMC\/(.*)/)
+	elsif (/(CHECK|SYMBOLS|REPORT) SPAMC\/(.*)/)
 	{
-	    my $version = $1;
+	    my $method = $1;
+	    my $version = $2;
 	    my $expected_length;
 
             # Protocol version 1.0 and greater may have "User:" and
@@ -275,17 +294,20 @@ for ( $waitedpid = 0;
                 }
 	    }
 
-            if ($spamtest->{paranoid} && $setuid_to_user && $> == 0)
-            {
-                logmsg "PARANOID: Still running as root, close connection.";
-	    }
-            elsif ( $setuid_to_user && $> == 0 )
-            {
+           if ( $setuid_to_user && $> == 0 )
+           {
+               if ($spamtest->{paranoid}) {
+                   logmsg "PARANOID: still running as root, closing connection.";
+                   die;
+               }
                 logmsg "Still running as root: user not specified, ".
 		    "not found, or set to root.  Fall back to nobody.";
 		my $uid = getpwnam('nobody');
-		if (!defined $uid) { die "no UID for nobody"; }
-                $> = $uid;
+               $> = $uid;
+               if ( !defined($uid) || $> != $uid ) {
+                   logmsg "fatal: setuid to nobody failed";
+                   die;
+               }
             }
 
 	    my $resp = "EX_OK";
@@ -309,8 +331,8 @@ for ( $waitedpid = 0;
 
 	    # Now use copy-on-writed (hopefully) SA object
 	    my $status = $spamtest->check($mail);
-	    my $msg_score = int($status->get_hits);
-	    my $msg_threshold = int($status->get_required_hits);
+	    my $msg_score = sprintf("%.1f",$status->get_hits);
+	    my $msg_threshold = sprintf("%.1f",$status->get_required_hits);
 	    my $was_it_spam;
 	    if ($status->is_spam)
 	    {
@@ -322,6 +344,8 @@ for ( $waitedpid = 0;
 		print "SPAMD/1.1 $resphash{$resp} $resp\r\nSpam: False ; $msg_score / $msg_threshold\r\n\r\n";
 		$was_it_spam = 'clean message';
 	    }
+	    print $status->get_names_of_tests_hit,"\r\n" if ($method eq "SYMBOLS");
+	    print $status->get_report,"\r\n" if ($method eq "REPORT");
 	    $current_user ||= '(unknown)';
 	    logmsg "$was_it_spam ($msg_score/$msg_threshold) for $current_user:$> in ".
 		sprintf("%3d", time - $start) ." seconds.\n";
@@ -382,17 +406,20 @@ for ( $waitedpid = 0;
                 }
 	    }
 
-            if ($spamtest->{paranoid} && $setuid_to_user && $> == 0)
+            if ( $setuid_to_user && $> == 0 )
             {
-                logmsg "PARANOID: Still running as root, close connection.";
-	    }
-            elsif ( $setuid_to_user && $> == 0 )
-            {
+               if ($spamtest->{paranoid}) {
+                   logmsg "PARANOID: still running as root, closing connection.";
+                   die;
+               }
                 logmsg "Still running as root: user not specified, ".
 		    "not found, or set to root.  Fall back to nobody.";
 		my $uid = getpwnam('nobody');
-		if (!defined $uid) { die "no UID for nobody"; }
-                $> = $uid;
+               $> = $uid;
+               if ( !defined($uid) || $> != $uid ) {
+                   logmsg "fatal: setuid to nobody failed";
+                   die;
+               }
             }
 
 	    my $resp = "EX_OK";
@@ -434,8 +461,8 @@ for ( $waitedpid = 0;
 	    }
 	    my $was_it_spam;
 	    if($status->is_spam) { $was_it_spam = 'identified spam'; } else { $was_it_spam = 'clean message'; }
-            my $msg_score = int($status->get_hits);
-            my $msg_threshold = int($status->get_required_hits);
+            my $msg_score = sprintf("%.1f",$status->get_hits);
+            my $msg_threshold = sprintf("%.1f",$status->get_required_hits);
 	    $current_user ||= '(unknown)';
 	    logmsg "$was_it_spam ($msg_score/$msg_threshold) for $current_user:$> in ".
 		sprintf("%3d", time - $start) ." seconds.\n";
@@ -454,10 +481,11 @@ for ( $waitedpid = 0;
     # Clean up any defunct processes.  (Not perfect, as usually leaves at
     # least one around until next connection, but avoids handling SIGCHLD.)
     # Needed on SunOS, where SIGCHLD=IGNORE doesn't make it automatic.
-    my $kid;
-    do {
-        $kid = waitpid(-1,&WNOHANG);
-    } until ($kid <= 0);
+	# Not sure if this is still needed with SIGCHLD=\&REAPER which
+    # essentially does this!
+
+    cleanupchildren;
+
 }
 
 sub protocol_error {
@@ -476,14 +504,22 @@ sub spawn {
     }
 
     my $pid;
+
+    cleanupchildren;
+    wait if ($opt_m && $extrapid <= 0);
+	
+    $extrapid--;
+
     if (!defined($pid = fork)) {
-	logmsg "cannot fork: $!";
-	return;
+       logmsg "cannot fork: $!";
+       $extrapid++;
+       return;
     } elsif ($pid) {
-	return; # I'm the parent
+       return; # I'm the parent
     }
     # else I'm the child -- go spawn
 
+    close Server;
     open(STDIN,  "<&Client")   || die "can't dup client to stdin";
     open(STDOUT, ">&Client")   || die "can't dup client to stdout";
     exit &$coderef();
@@ -494,28 +530,52 @@ sub handle_user
     my $username = shift;
 
     $current_user = $username;
+    #
+    # If vpopmail config enabled then look up userinfo for vpopmail uid
+    # as defined by $opt_u
+    #
+    my $userid = '';
+    if ($opt_v && $opt_u) {
+	$userid = $opt_u;
+    } else {
+	$userid = $username;
+    }
     my ($name,$pwd,$uid,$gid,$quota,$comment,$gcos,$dir,$etc) =
-	getpwnam($username);
+	getpwnam($userid);
 
     if ( !$spamtest->{paranoid} && !defined($uid) ) {
 	#if we are given a username, but can't look it up,
 	#Maybe NIS is down? lets break out here to allow
 	#them to get 'defaults' when we are not running paranoid.
-	logmsg "handle_user() -> unable to find user [$username]!\n";
+	logmsg "handle_user() -> unable to find user [$userid]!\n";
 	return 0;
     }
 
     if ($setuid_to_user) {
 	$> = $uid;
-	if ($> != $uid) {
-	    logmsg "setuid to $uid failed";
+       if ( !defined($uid) || $> != $uid ) {
+           logmsg "fatal: setuid to $username failed";
 	    die;		# make it fatal to avoid security breaches
 	}
     }
 
+    #
+    # If vpopmail config enabled then set $dir to virtual homedir
+    #
+    if ($opt_v && $opt_u) {
+	$dir = `$dir/bin/vuserinfo -d $username`;
+	$dir =~ s/\n//g;
+    }
     my $cf_file = $dir."/.spamassassin/user_prefs";
 
-    create_default_cf_if_needed ($cf_file, $username);
+    #
+    # If vpopmail config enabled then pass virtual homedir onto create_default_cf_needed
+    #
+    if ($opt_v && $opt_u) {
+	create_default_cf_if_needed ($cf_file, $username, $dir);
+    } else {
+	create_default_cf_if_needed ($cf_file, $username);
+    }
     $spamtest->read_scoreonly_config ($cf_file);
     return 1;
 }
@@ -528,14 +588,18 @@ sub handle_user_sql
 }
 
 sub create_default_cf_if_needed {
-    my ($cf_file, $username) = @_;
+    my ($cf_file, $username, $userdir) = @_;
 
     # Parse user scores, creating default .cf if needed:
     if( ! -r $cf_file && ! $spamtest->{dont_copy_prefs})
     {
 	logmsg "Creating default_prefs [$cf_file]";
 
-	$spamtest->create_default_prefs ($cf_file,$username);
+	#
+	# If vpopmail config enabled then pass virtual homedir onto create_default_prefs
+	# via $userdir
+	#
+	$spamtest->create_default_prefs ($cf_file,$username,$userdir);
 
 	if ( ! -r $cf_file )
 	{
@@ -557,6 +621,12 @@ sub kill_handler
     logmsg "server killed by SIG$sig, shutting down";
     close Server;
     exit 0;
+}
+
+sub cleanupchildren {
+	while ( my $kid = waitpid(-1, &WNOHANG) > 0 ) {
+		$extrapid++;
+	}
 }
 
 use POSIX 'setsid';
@@ -620,6 +690,14 @@ with B<-x>. this is useful for spamd hosts which don't have user's
 home directories but do want to load user preferences from an SQL
 database.
 
+=item B<-v>
+
+Enable vpopmail config  (only useful with -u set to vpopmail
+user). This option is useful for vpopmail virtual users who
+do not have an entry in the system /etc/passwd file.  This
+allows spamd to lookup/create user_prefs in the vpopmail users
+own maildir.
+
 =item B<-s> I<facility>
 
 Specify the syslog facility to use (default: mail).
@@ -649,6 +727,11 @@ Print debugging messages
 Perform only local tests on all mail.  In other words, skip DNS and other
 network tests.  Works the same as the C<-L> flag to C<spamassassin(1)>.
 
+=item B<-S>
+
+Stop spam checking as soon as the spam threshold is reached, to increase
+performance. This option also turns off Razor reporting.
+
 =item B<-P>
 
 Die on user errors (for the user passed from spamc) instead of falling back to
@@ -659,6 +742,14 @@ user I<nobody> and using the default configuration.
 Ensure that the output email message either always starts with a 'From ' line
 (I<1>) for UNIX mbox format, or ensure that this line is stripped from the
 output (I<0>).  (default: 1)
+
+=item B<-m> I<number>
+
+Specify a maximum number of children to spawn. Spamd will wait until another
+child finishes before forking again. Meanwhile, incoming connections will be
+queued. Please note that there is a OS specific maximum of connections that
+can be queued. (Try C<perl -MSocket -e'print SOMAXCONN'> to find this
+maximum)
 
 =back
 
@@ -673,6 +764,10 @@ program.
 
 See the README file in the C<spamd> directory of the SpamAssassin distribution
 for more details.
+
+Note: Although spamd will check per-user config files for every message, any
+changes to the system-wide config files will require restarting spamd for
+the changes to take effect.
 
 =head1 SEE ALSO
 

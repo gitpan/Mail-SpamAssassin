@@ -99,7 +99,7 @@ sub check_for_from_to_equivalence {
   my $to = $self->get ('To:addr');
 
   if ($from eq '' && $to eq '') { return 0; }
-  ($from eq $to);
+  return lc($from) eq lc($to);
 }
 
 ###########################################################################
@@ -123,7 +123,7 @@ sub check_for_forged_hotmail_received_headers {
 
   if ($self->gated_through_received_hdr_remover()) { return 0; }
 
-  if ($rcvd =~ /from \S*hotmail.com \(\S+\.hotmail(?:\.msn|)\.com / && $ip)
+  if ($rcvd =~ /from \S*hotmail.com \(\S+\.hotmail(?:\.msn|)\.com[ \)]/ && $ip)
                 { return 0; }
   if ($rcvd =~ /from \S+ by \S+\.hotmail(?:\.msn|)\.com with HTTP\;/ && $ip)
                 { return 0; }
@@ -207,8 +207,30 @@ sub check_for_forged_yahoo_received_headers {
 
   if ($rcvd =~ /by web\S+\.mail\.yahoo\.com via HTTP/) { return 0; }
   if ($rcvd =~ /by smtp\.\S+\.yahoo\.com with SMTP/) { return 0; }
+  if ($rcvd =~
+      /from \[\d+\.\d+\.\d+\.\d+\] by \S+\.(?:groups|grp\.scd)\.yahoo\.com with NNFMP/) {
+    return 0;
+  }
 
   return 1;
+}
+
+sub check_for_forged_juno_received_headers {
+  my ($self) = @_;
+
+  my $from = $self->get('From:addr');
+  if($from !~ /juno.com/) { return 0; }
+
+  if($self->gated_through_received_hdr_remover()) { return 0; }
+
+  my $xmailer = $self->get('X-Mailer');
+  my $xorig = $self->get('X-Originating-IP');
+  my $rcvd = $self->get('Received');
+  if($rcvd !~ /from.*mail\.com.*\[[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\].*by/) { return 1; }
+  if($xorig !~ /[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/) { return 1; }
+  if($xmailer !~ /mail\.com/) { return 1; }
+
+  return 0;   
 }
 
 # ezmlm has a very bad habit of removing Received: headers! bad ezmlm.
@@ -252,7 +274,7 @@ sub check_subject_for_lotsa_8bit_chars {
   $_ = $self->get ('Subject');
 
   # cut [ and ] because 8-bit posts to mailing lists may not get
-  # hit otherwise. e.g.: Subject: [ILUG] 出售傳真號碼 .  Also cut
+  # hit otherwise. e.g.: Subject: [ILUG] X嚙線X .  Also cut
   # *, since mail that goes through spamassassin multiple times will
   # not be tagged on the second pass otherwise.
   s/\[\]\* //g;
@@ -261,7 +283,7 @@ sub check_subject_for_lotsa_8bit_chars {
   return 0;
 }
 
-sub are_more_high_bits_set { 
+sub are_more_high_bits_set {
   my ($self, $str) = @_;
 
   my @highbits = ($str =~ /[\200-\377]/g);
@@ -304,6 +326,18 @@ sub _check_whitelist {
   }
 
   return 0;
+}
+
+###########################################################################
+
+my $obfu_chars = '*_.,/|-+=';
+sub check_obfuscated_words {
+    my ($self, $body) = @_;
+
+    foreach my $line (@$body) {
+        while ($line =~ /[\w$obfu_chars]/) {
+        }
+    }
 }
 
 ###########################################################################
@@ -457,7 +491,22 @@ sub check_for_unique_subject_id {
   if (/[-_\.\s]{7,}([-a-z0-9]{4,})$/
 	|| /\s{3,}[-:\#\(\[]+([-a-z0-9]{4,})[\]\)]+$/
 	|| /\s{3,}[:\#\(\[]*([0-9]{4,})[\]\)]*$/
-	|| /\s{3,}[-:\#]([a-z0-9]{5,})$/)
+	|| /\s{3,}[-:\#]([a-z0-9]{5,})$/
+
+        # (7217vPhZ0-478TLdy5829qicU9-0@26) and similar
+        || /\(([-\w]{7,}\@\d+)\)$/
+
+        # Seven or more digits at the end of a subject is almost certainly
+        # a id.
+        || /\b(\d{7,})\s*$/
+
+        # A number at the end of the subject, if it's after the end of a
+        # sentence (ending in "!" or "?"), is almost certainly an id
+        || /[!\?]\s*(\d{4,})\s*$/
+
+        # 9095IPZK7-095wsvp8715rJgY8-286-28 and similar
+        || /\b(\w{7,}-\w{7,}-\d+-\d+)\s*$/
+     )
   {
     $id = $1;
   }
@@ -531,21 +580,65 @@ sub word_is_in_dictionary {
 sub get_address_commonality_ratio {
   my ($self, $addr1, $addr2) = @_;
 
-  my %counts = ();
-  map { $counts{$_}++; } split (//, lc $addr1);
-  map { $counts{$_}++; } split (//, lc $addr2);
 
-  my $foundonce = 0;
-  my $foundtwice = 0;
-  foreach my $char (keys %counts) {
-    if ($counts{$char} == 1) { $foundonce++; next; }
-    if ($counts{$char} == 2) { $foundtwice++; next; }
+  # Ignore "@" and ".".  "@" will always be the same in both, and the
+  # number of "." will almost always be the same
+  $addr1 =~ s/[\@\.]//g;
+  $addr2 =~ s/[\@\.]//g;
+
+  my %counts1 = ();
+  my %counts2 = ();
+
+  map { $counts1{$_}++; } split (//, lc $addr1);
+  map { $counts2{$_}++; } split (//, lc $addr2);
+
+  my $different = 0;
+  my $same      = 0;
+  my $unique    = 0;
+  my $char;
+  my @chars     = keys %counts1;
+
+  # Extract unique characters, and make the two hashes have the same
+  # set of keys
+  foreach $char (@chars) {
+    if (!defined ($counts2{$char})) {
+      $unique += $counts1{$char};
+      delete ($counts1{$char});
+    }
   }
 
-  $foundtwice ||= 1.0;
-  my $ratio = ($foundonce / $foundtwice);
+  @chars = keys %counts2;
 
-  #print "addrcommonality: $foundonce $foundtwice $addr1/$addr2 $ratio\n";
+  foreach $char (@chars) {
+    if (!defined ($counts1{$char})) {
+      $unique += $counts2{$char};
+      delete ($counts2{$char});
+    }
+  }
+
+  # Hashes now have identical sets of keys; count the differences
+  # between the values.
+  @chars = keys %counts1;
+
+  foreach $char (@chars) {
+    my $count1 = $counts1{$char} || 0.0;
+    my $count2 = $counts2{$char} || 0.0;
+
+    if ($count1 == $count2) {
+      $same += $count1;
+    }
+    else {
+      $different += abs($count1 - $count2);
+    }
+  }
+
+  $different += $unique / 2.0;
+
+  $same ||= 1.0;
+  my $ratio = $different / $same;
+
+  #print STDERR "addrcommonality $addr1/$addr2($different<$unique>/$same)"
+  # . " = $ratio\n";
 
   return $ratio;
 }
@@ -672,10 +765,17 @@ sub check_for_faraway_charset_in_body {
 
 sub check_for_faraway_charset_in_headers {
   my ($self) = @_;
+  my $hdr;
 
   my @locales = $self->get_my_locales();
   for my $h (qw(From Subject)) {
-    my $hdr = $self->get($h);
+# Can't use just get() because it un-mime header
+    my @hdrs = $self->{msg}->get_header ($h);
+    if ($#hdrs >= 0) {
+      $hdr = join (" ", @hdrs);
+    } else {
+      $hdr = '';
+    }
     while ($hdr =~ /=\?(.+?)\?.\?.*?\?=/g) {
       Mail::SpamAssassin::Locales::is_charset_ok_for_locales($1, @locales)
 	  or return 1;
@@ -860,6 +960,23 @@ sub _parse_rfc822_date {
   return $time;
 }
 
+sub subject_is_all_caps {
+   my ($self) = @_;
+   my $subject = $self->get('Subject');
+
+   return 0 if subject_missing($self);
+
+   $subject =~ s/[^a-zA-Z]//;
+   return length($subject) && ($subject eq uc($subject));
+}
+
+sub subject_missing {
+   my ($self) = @_;
+   my $subject = $self->get('Subject');
+   chomp($subject);
+   return length($subject) ? 0 : 1;
+}
+
 ###########################################################################
 # BODY TESTS:
 ###########################################################################
@@ -873,6 +990,31 @@ sub check_for_very_long_text {
   }
   if ($count > 500) { return 1; }
   return 0;
+}
+
+sub check_for_yelling {
+    my ($self, $body) = @_;
+
+  # Make local copy of lines in the body that have some non-letters
+    my @lines = grep(/[^A-Za-z]/, @{$body});
+
+  # Get rid of everything but upper AND lower case letters
+    map (s/[^A-Za-z]//sg, @lines);
+
+  # Now that we have a mixture of upper and lower case, see if it's
+  # 1) All upper case
+  # 2) 20 or more characters in length
+    my $num_lines = scalar grep(/^[A-Z]{20,}$/, @lines);
+
+    $self->{num_yelling_lines} = $num_lines;
+
+    return ($num_lines > 0);
+}
+
+sub check_for_num_yelling_lines {
+    my ($self, $body, $threshold) = @_;
+
+    return ($self->{num_yelling_lines} >= $threshold);
 }
 
 ###########################################################################
@@ -897,9 +1039,15 @@ sub check_razor {
 sub check_for_base64_enc_text {
   my ($self, $fulltext) = @_;
 
+  # If the message itself is base64-encoded, return positive
+  my $cte = $self->get('Content-Transfer-Encoding');
+  if ( defined $cte && $cte =~ /^\s*base64/i ) {
+  	return 1;
+  }
+
   if ($$fulltext =~ /\n\n.{0,100}(
-    	\nContent-Type:\stext\/.{0,200}
-	\nContent-Transfer-Encoding:\sbase64.*?
+    	\nContent-Type:\s*text\/.{0,200}
+	\nContent-Transfer-Encoding:\s*base64.*?
 	\n\n)/isx)
   {
     my $otherhdrs = $1;
