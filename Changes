@@ -1,3 +1,87 @@
+2003-05-19 15:34  felicity
+
+	* Changes, lib/Mail/SpamAssassin.pm: updated changes and devel flag
+	for 2.55 release
+
+2003-05-19 15:25  felicity
+
+	* lib/Mail/SpamAssassin/Conf.pm: bug 1929: looks like we never
+	specified that "score 0" disables a rule from running.
+
+2003-05-18 17:20  felicity
+
+	* spamassassin.raw, lib/Mail/SpamAssassin/Conf.pm: bug 1917: docs
+	still talk about 'spamassassin -c', which was deprecated for
+	'spamassassin -C' ...
+
+2003-05-18 17:19  felicity
+
+	* spamd/spamd.raw: bug 1905: in perl 5.005, mkdir needs a umask
+	parameter
+
+2003-05-18 17:03  felicity
+
+	* Makefile.PL: bug 1893: a few warnings pop up if razor isn't
+	installed for testing.	simple cleanup.
+
+2003-05-18 07:48  felicity
+
+	* spamassassin.spec: updated spec file for 2.55
+
+2003-05-17 18:25  duncf
+
+	* debian/rules: Argh. More Debian packaging fixed.
+
+2003-05-17 16:11  duncf
+
+	* debian/rules: More woody build failures :-( This should work now,
+	I hope. Someone test please.
+
+2003-05-17 15:48  duncf
+
+	* debian/: changelog.in, spamassassin.preinst: last fix...
+	honestly! handles case where debconf not installed
+
+2003-05-17 15:19  duncf
+
+	* debian/control: Forgot to change debian/control for woody compat.
+	Fixed
+
+2003-05-17 14:59  duncf
+
+	* debian/: control, logcheck, rules, spamassassin.config,
+	spamassassin.dirs, spamassassin.links, spamassassin.postinst,
+	spamassassin.postrm, spamassassin.preinst, spamassassin.templates,
+	examples/muttrc, po/fr.po, po/pt_BR.po, po/templates.pot: Debian
+	packaging for 2,54. Includes a good upgrade from 2.20-1woody
+
+2003-05-14 10:27  felicity
+
+	* spamd/redhat-rc-script.sh: bug 1915: didn't list condrestart as
+	an option under usage
+
+2003-05-12 12:23  jmason
+
+	* lib/Mail/SpamAssassin.pm: 2.55 devel cycle started, not that
+	we'll need it of course ;)
+
+2003-05-12 12:20  jmason
+
+	* build/2.54_change_summary: 2.54 RELEASED
+
+2003-05-10 21:22  jmason
+
+	* build/2.54_change_summary: change summary for 2.54 release
+
+2003-05-10 21:19  jmason
+
+	* build/README: updated build README
+
+2003-05-10 21:17  jmason
+
+	* Changes, build/README, build/cvs2cl-branch: added cvs2cl-branch,
+	fixed Changes file
+
 2003-05-10 20:38  felicity
 
 	* Changes: Updated for 2.54rc1

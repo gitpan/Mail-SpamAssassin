@@ -299,7 +299,7 @@ ignore it.
         warn "configuration file \"$self->{currentfile}\" requires version ".
                 "$req_version of SpamAssassin, but this is code version ".
                 "$Mail::SpamAssassin::VERSION. Maybe you need to use ".
-                "the -c switch, or remove the old config files? ".
+                "the -C switch, or remove the old config files? ".
                 "Skipping this file";
         $skipfile = 1;
         $self->{errors}++;
@@ -525,6 +525,8 @@ network tests are disabled. The second score is used when Bayes is disabled,
 but network tests are enabled. The third score is used when Bayes is enabled
 and network tests are disabled. The fourth score is used when Bayes is
 enabled and network tests are enabled.
+
+Setting a rule's score to 0 will disable that rule from running.
 
 Note that test names which begin with '__' are reserved for meta-match
 sub-rules, and are not scored or listed in the 'tests hit' reports.
