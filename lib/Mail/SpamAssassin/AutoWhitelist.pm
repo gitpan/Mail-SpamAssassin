@@ -37,23 +37,37 @@ sub new {
 
 ###########################################################################
 
-=item $meanscore = awl->check_address($addr);
+=item $meanscore = awl->check_address($addr, $originating_ip);
 
 This method will return the mean score of all messages associated with the
-given address, or undef if the address hasn't been seen before
+given address, or undef if the address hasn't been seen before.
+
+If B<$originating_ip> is supplied, it will be used in the lookup.
 
 =cut
 
 sub check_address {
-  my ($self, $addr) = @_;
+  my ($self, $addr, $origip) = @_;
 
   if (!defined $self->{checker}) {
     return undef;		# no factory defined; we can't check
   }
 
   $addr = lc $addr;
-  $addr =~ s/[\000\;\'\"\!]/_/gs;	# paranoia
-  $self->{entry} = $self->{checker}->get_addr_entry ($addr);
+  $addr =~ s/[\000\;\'\"\!\|]/_/gs;	# paranoia
+
+  $self->{entry} = undef;
+
+  if (defined $origip) {
+    $origip =~ s/\.\d{1,3}\.\d{1,3}$//gs;
+    $origip =~ s/[\000\;\'\"\!\|]/_/gs;	# paranoia
+    $self->{entry} = $self->{checker}->get_addr_entry ($addr."|ip=".$origip);
+  }
+
+  if (!defined $self->{entry}) {
+    # fall back to more general style
+    $self->{entry} = $self->{checker}->get_addr_entry ($addr);
+  }
 
   if($self->{entry}->{count} == 0) { return undef; }
 
@@ -94,12 +108,49 @@ sub add_known_good_address {
     return undef;		# no factory defined; we can't check
   }
 
+  $addr = lc $addr;
+  $addr =~ s/[\000\;\'\"\!\|]/_/gs;	# paranoia
   my $entry = $self->{checker}->get_addr_entry ($addr);
 
+  # remove any old entries (will remove per-ip entries as well)
+  if ($entry->{count} > 0) {
+    $self->{checker}->remove_entry ($entry);
+  }
   $self->{checker}->add_score($entry,-100);
 
   return 0;
 }
+
+###########################################################################
+
+=item awl->add_known_bad_address($addr);
+
+This method will add a score of 100 to the given address -- effectively
+"bootstrapping" the address as being one that should be blacklisted.
+
+=cut
+
+sub add_known_bad_address {
+  my ($self, $addr) = @_;
+
+  if (!defined $self->{checker}) {
+    return undef;		# no factory defined; we can't check
+  }
+
+  $addr = lc $addr;
+  $addr =~ s/[\000\;\'\"\!\|]/_/gs;	# paranoia
+  my $entry = $self->{checker}->get_addr_entry ($addr);
+
+  # remove any old entries (will remove per-ip entries as well)
+  if ($entry->{count} > 0) {
+    $self->{checker}->remove_entry ($entry);
+  }
+  $self->{checker}->add_score($entry,100);
+
+  return 0;
+}
+
+
 
 ###########################################################################
 
@@ -110,12 +161,11 @@ sub remove_address {
     return undef;		# no factory defined; we can't check
   }
 
-  my $entry = $self->{checker}->get_addr_entry ($addr);
+  $addr = lc $addr;
+  $addr =~ s/[\000\;\'\"\!\|]/_/gs;	# paranoia
 
-  if ($entry->{count} > 0) {
-    $self->{checker}->remove_entry ($entry);
-    return 1;
-  }
+  my $entry = $self->{checker}->get_addr_entry ($addr);
+  $self->{checker}->remove_entry ($entry) and return 1;
 
   return 0;
 }

@@ -21,8 +21,8 @@ Mail::SpamAssassin - Mail::Audit spam detector plugin
 
 =head1 DESCRIPTION
 
-Mail::SpamAssassin is a Mail::Audit plugin to identify spam using text
-analysis and several internet-based realtime blacklists.
+Mail::SpamAssassin is a module to identify spam using text analysis and several
+internet-based realtime blacklists.
 
 Using its rule base, it uses a wide range of heuristic tests on mail headers
 and body text to identify "spam", also known as unsolicited commercial email.
@@ -30,9 +30,14 @@ and body text to identify "spam", also known as unsolicited commercial email.
 Once identified, the mail can then be optionally tagged as spam for later
 filtering using the user's own mail user-agent application.
 
-This module implements a Mail::Audit plugin, allowing SpamAssassin to be used
-in a Mail::Audit filter.  If you wish to use a command-line filter tool,
+This module also implements a Mail::Audit plugin, allowing SpamAssassin to be
+used in a Mail::Audit filter.  If you wish to use a command-line filter tool,
 try the C<spamassassin> or C<spamd> tools provided.
+
+Note that, if you're using Mail::Audit, the constructor for the Mail::Audit
+object must use the C<nomime> option, like so:
+
+        my $ma = new Mail::Audit ( nomime => 1 );
 
 SpamAssassin also includes support for reporting spam messages to collaborative
 filtering databases, such as Vipul's Razor ( http://razor.sourceforge.net/ ).
@@ -45,57 +50,78 @@ filtering databases, such as Vipul's Razor ( http://razor.sourceforge.net/ ).
 
 package Mail::SpamAssassin;
 
+# We do our best to make SA run with any Perl downto 5.005. You might want to
+# read <http://www.perldoc.com/perl5.8.0/pod/perl56delta.html> if you plan to 
+# hack SA and are used to Perl 5.6+.
+# (jm: Matt's just saying that 'cos they use 5.005 in MessageLabs ;)
+use 5.005;
+
 use Mail::SpamAssassin::Conf;
 use Mail::SpamAssassin::ConfSourceSQL;
 use Mail::SpamAssassin::PerMsgStatus;
-use Mail::SpamAssassin::Reporter;
-use Mail::SpamAssassin::Replier;
 use Mail::SpamAssassin::NoMailAudit;
 
 use File::Basename;
 use File::Path;
-use File::Spec;
+use File::Spec 0.8;
 use File::Copy;
 use Cwd;
 use Config;
 
-# Let's not make this required -- Marc
-#eval { require Time::HiRes };
-#Time::HiRes->import( qw(time) ) unless $@;
-# Unfortunately, the above doesn't work, please FIXME
-use Time::HiRes qw ( time );
+# Load Time::HiRes if it's available
+BEGIN {
+  eval { require Time::HiRes };
+  Time::HiRes->import( qw(time) ) unless $@;
+}
 
-use vars	qw{
-  	@ISA $VERSION $SUB_VERSION $HOME_URL $DEBUG $TIMELOG
+use vars qw{
+	@ISA $VERSION $SUB_VERSION @EXTRA_VERSION $HOME_URL $DEBUG $TIMELOG
+        $IS_DEVEL_BUILD
 	@default_rules_path @default_prefs_path
 	@default_userprefs_path @default_userstate_dir
-	@site_rules_path @old_site_rules_path
+	@site_rules_path
 };
+
+$VERSION = "2.41";              # update after release
+#$IS_DEVEL_BUILD = 1;            # comment for release versions
 
 # Create the hash so that it really points to something, otherwise we can't
 # get a reference to it -- Marc
 $TIMELOG->{dummy}=0;
 @ISA = qw();
 
-$VERSION = "2.31";
-$SUB_VERSION = 'devel $Id: SpamAssassin.pm,v 1.94.2.2 2002/06/20 17:20:29 hughescr Exp $';
+# SUB_VERSION is now <revision>-<yyyy>-<mm>-<dd>-<state>
+$SUB_VERSION = lc(join('-', (split(/[ \/]/, '$Id: SpamAssassin.pm,v 1.115.2.8 2002/09/05 12:13:28 jmason Exp $'))[2 .. 5, 8]));
 
-sub Version { $VERSION; }
+# If you hacked up your SA, add a token to identify it here. Eg.: I use
+# "mss<number>", <number> increasing with every hack.
+# Deersoft might want to use "pro" :o)
+@EXTRA_VERSION = qw();
+
+if (defined $IS_DEVEL_BUILD) {
+  push(@EXTRA_VERSION, 'cvs');
+}
+
+sub Version { join('-', $VERSION, @EXTRA_VERSION) }
 
 $HOME_URL = "http://spamassassin.org/";
 
-#__installsitelib__/spamassassin.cf
-#__installvendorlib__/spamassassin.cf
+# note that the CWD takes priority.  This is required in case a user
+# is testing a new version of SpamAssassin on a machine with an older
+# version installed.  Unless you can come up with a fix for this that
+# allows "make test" to work, don't change this.
 @default_rules_path = (
+	'./rules',
+	'../rules',
+        '__def_rules_dir__',
         '__prefix__/share/spamassassin',
         '/usr/local/share/spamassassin',
   	'/usr/share/spamassassin',
-	'./rules',
-	'../rules',
 );
 
 # first 3 are BSDish, latter 2 Linuxish
 @site_rules_path = (
+        '__local_rules_dir__',
         '__prefix__/etc/mail/spamassassin',
         '__prefix__/etc/spamassassin',
         '/usr/local/etc/spamassassin',
@@ -105,14 +131,11 @@ $HOME_URL = "http://spamassassin.org/";
   	'/etc/spamassassin',
 );
 
-@old_site_rules_path = (
-  	'/etc/mail/spamassassin.cf',
-  	'/etc/spamassassin.cf',
-);
-    
 @default_prefs_path = (
+        '__local_rules_dir__/user_prefs.template',
         '__prefix__/etc/mail/spamassassin/user_prefs.template',
         '__prefix__/share/spamassassin/user_prefs.template',
+	'/etc/spamassassin/user_prefs.template',
         '/etc/mail/spamassassin/user_prefs.template',
         '/usr/local/share/spamassassin/user_prefs.template',
         '/usr/share/spamassassin/user_prefs.template',
@@ -163,6 +186,17 @@ If set to 1, no tests that require internet access will be performed. (default:
 If set to 1, the user preferences file will not be created if it doesn't
 already exist. (default: 0)
 
+=item save_pattern_hits
+
+If set to 1, the patterns hit can be retrieved from the
+C<Mail::SpamAssassin::PerMsgStatus> object.  Used for debugging.
+
+=item home_dir_for_helpers
+
+If set, the B<HOME> environment variable will be set to this value
+when using test applications that require their configuration data,
+such as Razor, Pyzor and DCC.
+
 =back
 
 If none of C<rules_filename>, C<userprefs_filename>, or C<config_text> is set,
@@ -180,7 +214,7 @@ sub new {
   bless ($self, $class);
 
   $DEBUG->{enabled} = 0;
-  if (defined $self->{debug} and $self->{debug}) { $DEBUG->{enabled} = 1 }
+  if (defined $self->{debug} && $self->{debug} > 0) { $DEBUG->{enabled} = 1; }
 
   # This should be moved elsewhere, I know, but SA really needs debug sets 
   # I'm putting the intialization here for now, move it if you want
@@ -195,12 +229,16 @@ sub new {
   $DEBUG->{razor}=-3;
   $DEBUG->{rbl}=0;
   $DEBUG->{timelog}=0;
+  $DEBUG->{dnsavailable}=-2;
   # Bitfield:
   # header regex: 1 | body-text: 2 | uri tests: 4 | raw-body-text: 8
   # full-text regexp: 16 | run_eval_tests: 32 | run_rbl_eval_tests: 64
   $DEBUG->{rulesrun}=64;
 
   $self->{conf} ||= new Mail::SpamAssassin::Conf ($self);
+
+  $self->{save_pattern_hits} ||= 0;
+
   $self;
 }
 
@@ -282,13 +320,15 @@ been listed there.
 =cut
 
 sub report_as_spam {
-  my ($self, $mail_obj, $options) = @_;
+  my ($self, $mail, $options) = @_;
   local ($_);
 
   $self->init(1);
-  my $mail = $self->encapsulate_mail_object ($mail_obj);
-  my $msg = Mail::SpamAssassin::Reporter->new($self, $mail, $options);
-  $msg->report ();
+  $mail = $self->encapsulate_mail_object ($mail);
+
+  require Mail::SpamAssassin::Reporter;
+  $mail = Mail::SpamAssassin::Reporter->new($self, $mail, $options);
+  $mail->report ();
 }
 
 ###########################################################################
@@ -336,6 +376,28 @@ sub remove_all_addresses_from_whitelist {
 
 ###########################################################################
 
+=item $f->add_all_addresses_to_blacklist ($mail)
+
+Given a mail message, find as many addresses in the usual headers (To,
+Cc, From etc.), and the message body, and adds them to the automatic
+whitelist database with a high score, effectively blacklisting them.
+
+=cut
+
+sub add_all_addresses_to_blacklist {
+  my ($self, $mail_obj) = @_;
+
+  my $list = Mail::SpamAssassin::AutoWhitelist->new($self);
+  foreach my $addr ($self->find_all_addrs_in_mail ($mail_obj)) {
+    if ($list->add_known_bad_address ($addr)) {
+      print "SpamAssassin auto-whitelist: adding address: $addr\n";
+    }
+  }
+  $list->finish();
+}
+
+###########################################################################
+
 =item $f->reply_with_warning ($mail, $replysender)
 
 Reply to the sender of a mail, encapsulated in a C<Mail::Audit> object,
@@ -347,11 +409,13 @@ sender of the reply message.
 =cut
 
 sub reply_with_warning {
-  my ($self, $mail_obj, $replysender) = @_;
+  my ($self, $mail, $replysender) = @_;
   $self->init(1);
-  my $mail = $self->encapsulate_mail_object ($mail_obj);
-  my $msg = new Mail::SpamAssassin::Replier ($self, $mail);
-  $msg->reply ($replysender);
+  $mail = $self->encapsulate_mail_object ($mail);
+
+  require Mail::SpamAssassin::Replier;
+  $mail = Mail::SpamAssassin::Replier->new ($self, $mail);
+  $mail->reply ($replysender);
 }
 
 ###########################################################################
@@ -360,6 +424,8 @@ sub reply_with_warning {
 
 Returns the text of the message, with any SpamAssassin-added text (such
 as the report, or X-Spam-Status headers) stripped.
+
+Note that the B<$mail> object is not modified.
 
 =cut
 
@@ -454,7 +520,8 @@ sub read_scoreonly_config {
   my ($self, $filename) = @_;
 
   if (!open(IN,"<$filename")) {
-    warn "read_scoreonly_config: cannot open \"$filename\": $!\n";
+    # the file may not exist; this should not be verbose
+    dbg ("read_scoreonly_config: cannot open \"$filename\": $!");
     return;
   }
   my $text = join ('',<IN>);
@@ -548,6 +615,39 @@ sub compile_now {
 }
 
 ###########################################################################
+
+=item $failed = $f->lint_rules ()
+
+Syntax-check the current set of rules.  Returns the number of 
+syntax errors discovered, or 0 if the configuration is valid.
+
+=cut
+
+sub lint_rules {
+  my ($self) = @_;
+
+  dbg ("ignore: using a test message to lint rules");
+  my @testmsg = ("From: ignore\@compiling.spamassassin.taint.org\n", 
+    "Subject: \n",
+    "Message-Id:  <".time."\@lint_rules>\n", "\n",
+    "I need to make this message body somewhat long so TextCat preloads\n"x20);
+
+  $self->{lint_rules} = $self->{conf}->{lint_rules} = 1;
+  $self->{syntax_errors} = 0;
+  $self->{rule_errors} = 0;
+
+  $self->init(1);
+  $self->{syntax_errors} += $self->{conf}->{errors};
+
+  my $mail = Mail::SpamAssassin::NoMailAudit->new(data => \@testmsg);
+  my $status = $self->check($mail);
+  $self->{syntax_errors} += $status->{rule_errors};
+  $status->finish();
+
+  return ($self->{syntax_errors});
+}
+
+###########################################################################
 # non-public methods.
 
 sub init {
@@ -621,23 +721,28 @@ sub init {
 }
 
 sub read_cf {
-  my ($self, $fname, $desc) = @_;
+  my ($self, $path, $desc) = @_;
 
-  return '' unless defined ($fname);
+  return '' unless defined ($path);
 
-  dbg ("using \"$fname\" for $desc");
+  dbg ("using \"$path\" for $desc");
   my $txt = '';
 
-  if (-d $fname) {
-    foreach my $file ($self->get_cf_files_in_dir ($fname)) {
+  if (-d $path) {
+    foreach my $file ($self->get_cf_files_in_dir ($path)) {
       open (IN, "<".$file) or warn "cannot open \"$file\": $!\n", next;
+      $txt .= "file start $file\n";     # let Conf know
       $txt .= join ('', <IN>);
+      # add an extra \n in case file did not end in one.
+      $txt .= "\nfile end $file\n";     
       close IN;
     }
 
-  } elsif (-f $fname && -s _ && -r _) {
-    open (IN, "<".$fname) or warn "cannot open \"$fname\": $!\n";
+  } elsif (-f $path && -s _ && -r _) {
+    open (IN, "<".$path) or warn "cannot open \"$path\": $!\n";
+    $txt .= "file start $path\n";
     $txt = join ('', <IN>);
+    $txt .= "file end $path\n";
     close IN;
   }
 
@@ -661,7 +766,8 @@ sub create_dotsa_dir_if_needed {
     dbg ("using \"$fname\" for user state dir");
 
     if (!-d $fname) {
-      mkpath ($fname, 0, 0700) or warn "mkdir $fname failed: $!\n";
+      # not being able to create the *dir* is not worth a warning at all times
+      mkpath ($fname, 0, 0700) or dbg ("mkdir $fname failed: $!\n");
     }
   }
 }
@@ -691,14 +797,17 @@ sub create_default_prefs {
     my $defprefs = $self->first_existing_path
 			(@Mail::SpamAssassin::default_prefs_path);
     
-    open (IN, "<$defprefs") or warn "cannot open $defprefs: $!";
-    open (OUT, ">$fname") or warn "cannot write to $fname: $!";
-    while (<IN>) {
-      /^\#\* / and next;
-      print OUT;
+    if (!open (IN, "<$defprefs")) {
+      warn "cannot open $defprefs: $!";
+    } else {
+      open (OUT, ">$fname") or warn "cannot write to $fname: $!";
+      while (<IN>) {
+        /^\#\* / and next;
+        print OUT;
+      }
+      close OUT;
+      close IN;
     }
-    close OUT;
-    close IN;
 
     if (copy ($defprefs, $fname)) {
       if ( $< == 0 && $> == 0 && defined $user) {
@@ -727,7 +836,7 @@ sub expand_name ($) {
   my ($self, $name) = @_;
   my $home = $ENV{'HOME'} || '';
 
-  if ($^O =~ /mswin|dos|os2/oi) {
+  if ($^O =~ /mswin|(?<!bs)dos|os2/oi) {
 	  my $userprofile = $ENV{'USERPROFILE'} || '';
 
 	  return $userprofile if ($userprofile && $userprofile =~ m/^[a-z]\:[\/\\]/oi);
@@ -748,6 +857,8 @@ sub expand_name ($) {
 sub sed_path {
   my ($self, $path) = @_;
   return undef if (!defined $path);
+  $path =~ s/__local_rules_dir__/$self->{LOCAL_RULES_DIR} || ''/ges;
+  $path =~ s/__def_rules_dir__/$self->{DEF_RULES_DIR} || ''/ges;
   $path =~ s/__prefix__/$Config{prefix}/gs;
   $path =~ s/__sitelib__/$Config{sitelib}/gs;
   $path =~ s/__vendorlib__/$Config{vendorlib}/gs;
@@ -796,41 +907,31 @@ sub encapsulate_mail_object {
     return $class->new($mail_obj);
   }
 
-  if (!defined $self->{mail_audit_supports_encapsulation}) {
-    # test Mail::Audit for new-style encapsulation of the Mail::Internet
-    # message object.
-    my ($hdr, $val);
-    foreach my $hdrtest (qw(From To Subject Message-Id Date Sender)) {
-      $val = $mail_obj->get ($hdrtest);
-      if (defined $val) { $hdr = $hdrtest; last; }
-    }
+  # new versions of Mail::Audit can have one of 2 different base classes. URGH.
+  # we can tell which class, by querying the is_mime() method.  Support for
+  # MIME::Entity contributed by Andrew Wilson <andrew@rivendale.net>.
+  #
+  my $ismime = 0;
 
-    if (!defined $val) {                  # ah, just make one up
-      $hdr = 'X-SpamAssassin-Test-Header'; $val = 'x';
-    }
+  $self->{mail_audit_supports_encapsulation} = 0;
 
-    # now try using one of the new methods...
-    eval { $mail_obj->replace_header ($hdr, $val); };
+  if ($mail_obj->can ("is_mime")) {
+    $self->{mail_audit_supports_encapsulation} = 1;
+    $ismime = $mail_obj->is_mime();
 
-    if ($@)
-    {
-      dbg ("using Mail::Audit exposed-message-object code");
-      $self->{mail_audit_supports_encapsulation} = 0;
-    } else {
-      dbg ("using Mail::Audit message-encapsulation code");
-      $self->{mail_audit_supports_encapsulation} = 1;
-    }
+  } elsif ($mail_obj->can ("replace_header")) {
+    $self->{mail_audit_supports_encapsulation} = 1;
   }
 
-  if ($self->{mail_audit_supports_encapsulation}) {
+  if ($ismime) {
+    require Mail::SpamAssassin::EncappedMIME;
+    return  Mail::SpamAssassin::EncappedMIME->new($mail_obj);
+  } elsif ($self->{mail_audit_supports_encapsulation}) {
     require Mail::SpamAssassin::EncappedMessage;
-    # warning: Changed indirect object syntax here because of new() function 
-    # above which may bite us in the foot some time. See Damian Conway's book for details
-    return Mail::SpamAssassin::EncappedMessage->new($mail_obj);
-
+    return  Mail::SpamAssassin::EncappedMessage->new($mail_obj);
   } else {
     require Mail::SpamAssassin::ExposedMessage;
-    return Mail::SpamAssassin::ExposedMessage->new($mail_obj);
+    return  Mail::SpamAssassin::ExposedMessage->new($mail_obj);
   }
 }
 
@@ -869,11 +970,15 @@ sub find_all_addrs_in_line {
   my ($self, $line) = @_;
 
   my @addrs = ();
+  my %seen = ();
   while ($line =~ s/([-a-z0-9_\+\:\.\/]+
 	      \@[-a-z0-9_\+\:\.\/]+
 	      \.[-a-z0-9_\+\:\.\/]+)//ix)
   {
-    push (@addrs, $1);
+    my $addr = $1;
+    $addr =~ s/^mailto://;
+    next if (defined ($seen{$addr})); $seen{$addr} = 1;
+    push (@addrs, $addr);
   }
 
   return @addrs;
@@ -1016,5 +1121,6 @@ as well as:
   http://spamassassin.org/
 
 =cut
+
 
 

@@ -3,8 +3,13 @@ package Mail::SpamAssassin::DBBasedAddrList;
 
 use strict;
 
-use Mail::SpamAssassin::PersistentAddrList;
+# tell AnyDBM_File to prefer DB_File, if possible.
+# BEGIN { @AnyDBM_File::ISA = qw(DB_File GDBM_File NDBM_File SDBM_File); }
+# off until 3.0; there's lots of existing AWLs out there this breaks.
+
 use AnyDBM_File;
+
+use Mail::SpamAssassin::PersistentAddrList;
 use Fcntl ':DEFAULT',':flock';
 use Sys::Hostname;
 
@@ -39,9 +44,11 @@ sub new_checker {
     'hostname'		=> hostname,
   };
 
+  my $path;
+
   if(defined($main->{conf}->{auto_whitelist_path})) # if undef then don't worry -- empty hash!
   {
-      my $path = $main->sed_path ($main->{conf}->{auto_whitelist_path});
+      $path = $main->sed_path ($main->{conf}->{auto_whitelist_path});
 
       #NFS Safe Lockng (I hope!)
       #Attempt to lock the dbfile, using NFS safe locking 
@@ -56,6 +63,7 @@ sub new_checker {
       my $old_fh = select(LTMP);
       $|=1;
       select($old_fh);
+
 
       for (my $i = 0; $i < $lock_tries; $i++) #try $lock_tries (seconds) times to get lock
       {
@@ -88,6 +96,8 @@ sub new_checker {
 	 }
       }
 
+      # TODO: trap signals to unlock the db file here on SIGINT and SIGTERM
+
       close(LTMP);
       unlink($lock_tmp);
 
@@ -96,19 +106,24 @@ sub new_checker {
 	 dbg("Tie-ing to DB file R/W in $path");
 	 tie %{$self->{accum}},"AnyDBM_File",$path, O_RDWR|O_CREAT,   #open rw w/lock
 		       (oct ($main->{conf}->{auto_whitelist_file_mode}) & 0666)
-	     or die "Cannot open auto_whitelist_path $path: $!\n";
+	     or goto failed_to_tie;
       } 
       else 
       {
 	 dbg("Tie-ing to DB file R/O in $path");
 	 tie %{$self->{accum}},"AnyDBM_File",$path, O_RDONLY,         #open ro w/o lock
 		       (oct ($main->{conf}->{auto_whitelist_file_mode}) & 0666)
-	     or die "Cannot open auto_whitelist_path $path: $!\n";
+	     or goto failed_to_tie;
       } 
   }
 
   bless ($self, $class);
-  $self;
+  return $self;
+
+failed_to_tie:
+  unlink($self->{lock_file}) ||
+     dbg ("Couldn't unlink " . $self->{lock_file} . ": $!\n");
+  die "Cannot open auto_whitelist_path $path: $!\n";
 }
 
 ###########################################################################
@@ -122,6 +137,7 @@ sub finish {
        unlink($self->{lock_file}) ||
           dbg ("Couldn't unlink " . $self->{lock_file} . ": $!\n");
     }
+    # TODO: untrap signals to unlock the db file here
 }
 
 ###########################################################################
@@ -166,8 +182,18 @@ sub add_score {
 
 sub remove_entry {
   my ($self, $entry) = @_;
-  delete $self->{accum}->{$entry->{addr}};
-  delete $self->{accum}->{$entry->{addr}.'|totscore'};
+
+  my $addr = $entry->{addr};
+  delete $self->{accum}->{$addr};
+  delete $self->{accum}->{$addr.'|totscore'};
+
+  # try to delete any per-IP entries for this addr as well.
+  # could be slow...
+  my @keys = grep { /^\Q$addr\E\|ip=/ } keys %{$self->{accum}};
+  foreach my $key (@keys) {
+    delete $self->{accum}->{$key};
+    delete $self->{accum}->{$key.'|totscore'};
+  }
 }
 
 ###########################################################################

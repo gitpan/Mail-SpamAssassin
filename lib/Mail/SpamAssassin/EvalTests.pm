@@ -8,40 +8,23 @@ package Mail::SpamAssassin::PerMsgStatus;
 use Mail::SpamAssassin::Conf;
 use Mail::SpamAssassin::Dns;
 use Mail::SpamAssassin::Locales;
+use Mail::SpamAssassin::MailingList;
+use Mail::SpamAssassin::PerMsgStatus;
 use Mail::SpamAssassin::PhraseFreqs;
+use Mail::SpamAssassin::SHA1 qw(sha1);
 use Mail::SpamAssassin::TextCat;
 use Time::Local;
 use strict;
 
 use vars qw{
-	$KNOWN_BAD_DIALUP_RANGES
 	$CCTLDS_WITH_LOTS_OF_OPEN_RELAYS
 	$ROUND_THE_WORLD_RELAYERS
-	@PORN_WORDS
+	@PORN_WORDS $WORD_OBFUSCATION_CHARS 
 };
-
-# persistent spam sources. These are not in the RBL though :(
-$KNOWN_BAD_DIALUP_RANGES = q(
-    .da.uu.net .prod.itd.earthlink.net .pub-ip.psi.net .prserv.net
-);
 
 # sad but true. sort it out, sysadmins!
 $CCTLDS_WITH_LOTS_OF_OPEN_RELAYS = qr{(?:kr|cn|cl|ar|hk|il|th|tw|sg|za|tr|ma|ua|in|pe)};
 $ROUND_THE_WORLD_RELAYERS = qr{(?:net|com|ca)};
-
-# Porn words will each be prefixed with "\b" but not suffixed so as to pick up word ending variations.
-# if you want \b on the end, be sure to add it yourself.
-@PORN_WORDS = (qr(\blolita)i,  qr(\bcum)i, qr(\borg[iy])i, qr(\bwild)i, qr(\bfuck)i, qr(\bteen)i,
-qr(\baction)i, qr(\bspunk)i, qr(\bpuss)i, qr(\bsuck)i, qr(\bhot)i,
-qr(\bvoyeur)i, qr(\ble[sz]b(?:ian|o))i, qr(\banal\b)i, qr(\binterr?acial)i, qr(\basian)i,
-qr(\bamateur)i, qr(\bsex+)i, qr(\bslut)i, qr(\bexplicit)i, qr(\bxxx(?:[^x]|\b))i, qr(\blive)i,
-qr(\bcelebrity)i, qr(\blick)i, qr(\bsuck)i, qr(\bdorm)i, qr(\bwebcam)i, qr(\bass\b)i, qr(\bschoolgirl)i,
-qr(\bstrip)i, qr(\bhorn[yi])i, qr(\berotic)i, qr(\boral)i, qr(\bpenis)i, qr(\bhard.?core)i,
-qr(\bblow.?job)i, qr(\bnast[yi])i, qr(\bporn)i, qr(\bwhore)i, qr(\bnaked)i,
-qr(\bnude)i, qr(\bvirgin)i, qr(\bnaught[yi])i, qr(\bgirl)i, qr(\bceleb)i, qr(\bbabe)i,
-qr(\badult)i, qr(\bskank)i, qr(\btits?)i, qr(\btitties)i
-);
-
 
 # Here's how that RE was determined... relay rape by country (as of my
 # spam collection on Dec 12 2001):
@@ -59,6 +42,32 @@ qr(\badult)i, qr(\bskank)i, qr(\btits?)i, qr(\btitties)i
 # for figuring this. any ccTLD with > about 40000 domains is left out of this
 # regexp.  Then I threw in some unscientific seasoning to taste. ;)
 
+
+# Porn words will each be prefixed with "\b" but not suffixed so as to pick up
+# word ending variations.  if you want \b on the end, be sure to add it
+# yourself.
+@PORN_WORDS = (qr(\blolita\b)i,  qr(\bcum\b)i, qr(\borg[iy])i, qr(\bwild\b)i, qr(\bfuck)i,
+qr(\bspunk\b)i, qr(\bpuss[iy])i, qr(\bhot\b)i, qr(\bteen\b)i,
+qr(\bhottest\b)i, qr(\bhott[iy])i,
+qr(\bvoyeur)i, qr(\ble[sz]b(?:ian|o))i, qr(\banal\b)i, qr(\binterr?acial)i, qr(\basian)i,
+qr(\bamateur)i, qr(\bsexx+\b)i, qr(\bslut)i, qr(\bexplicit\b)i, qr(\bxxx(?:[^x]|\b))i,
+qr(\blick)i, qr(\bsucking\b)i, qr(\bdorm\b)i, qr(\bwebcam\b)i, qr(\bass\b)i,
+qr(\bschoolgirl\b)i, qr(\bstripper\b)i, qr(\bstripping\b)i, qr(\bhorn[yi])i, qr(\berotic)i,
+qr(\boral\b)i, qr(\bpenis\b)i, qr(\bhard.?core\b)i, qr(\bblow.?job)i,
+qr(\bnasty\b)i, qr(\bnastiest\b)i, qr(\bporn\b)i, qr(\bwhore\b)i, qr(\bnaked\b)i,
+qr(\bnude\b)i, qr(\bvirgin\b)i, qr(\bnaught[yi])i, qr(\bgirl)i, qr(\bcelebrity\b)i,
+qr(\bcelebrities\b)i, qr(\bceleb\b)i, qr(\bbabes?\b)i,
+qr(\badult\b)i, qr(\bskank\b)i, qr(\btits?\b)i, qr(\btitties\b)i,
+# jm: catch "s*x", "f*ck" etc.
+qr(\bs[\*\.\-\?]ck)i, qr(\bf[\*\.\-\?]ck)i, qr(\bs[\*\.\-\?]x\b)i
+
+# words to avoid, since they cause FPs: girl, teen, hot, suck, and "sex", believe
+# it or not!
+
+);
+
+$WORD_OBFUSCATION_CHARS = '*_.,/|-+=';
+
 ###########################################################################
 # HEAD TESTS:
 ###########################################################################
@@ -66,7 +75,10 @@ qr(\badult)i, qr(\bskank)i, qr(\btits?)i, qr(\btitties)i
 sub check_for_from_mx {
   my ($self) = @_;
 
-  my $from = $self->get ('From:addr');
+  my $from = $self->get ('Reply-To:addr');
+  if (!defined $from || $from !~ /\@\S+/) {
+    $from = $self->get ('From:addr');
+  }
   return 0 unless ($from =~ /\@(\S+)/);
   $from = $1;
 
@@ -83,12 +95,22 @@ sub check_for_from_mx {
     return 0;
   }
 
-  # Try 3 times to protect against temporary outages.  sleep between checks
-  # to give the DNS a chance to recover.
+  # Try check_mx_attempts times to protect against temporary outages.
+  # sleep between checks to give the DNS a chance to recover.
   for my $i (1..$self->{conf}->{check_mx_attempts}) {
-    my @mx = Net::DNS::mx ($self->{res}, $from);
-    dbg ("DNS MX records found: ".scalar (@mx));
-    if (scalar @mx > 0) { return 0; }
+    my @mx = Net::DNS::mx($self->{res}, $from);
+    dbg ("DNS MX records found: " . scalar(@mx));
+    return 0 if (scalar @mx > 0);
+
+    my $query = $self->{res}->search($from);
+    if ($query) {
+      my $count = 0;
+      foreach my $rr ($query->answer) {
+	$count++ if ($rr->type eq "A");
+      }
+      dbg ("DNS A records found: $count");
+      return 0 if ($count > 0);
+    }
     if ($i < $self->{conf}->{check_mx_attempts}) {sleep $self->{conf}->{check_mx_delay}; };
   }
 
@@ -97,29 +119,55 @@ sub check_for_from_mx {
 
 ###########################################################################
 
-sub check_for_bad_dialup_ips {
-  my ($self) = @_;
-  local ($_);
+sub check_for_from_to_same {
+  my ($self, $type) = @_;
 
-  my $knownbad = $KNOWN_BAD_DIALUP_RANGES;
-  $knownbad =~ s/^\s+//g;
-  $knownbad =~ s/\s+$//g;
-  $knownbad =~ s/\./\\./g;
-  $knownbad =~ s/\s+/\|/g;
-
-  $_ = $self->get ('Received');
-  /${knownbad}/o;
+  if (! exists $self->{from_to_same}) {
+    $self->_check_from_to_same();
+  }
+  return ($self->{from_to_same} eq $type);
 }
 
-###########################################################################
-
-sub check_for_from_to_equivalence {
+sub _check_from_to_same {
   my ($self) = @_;
-  my $from = $self->get ('From:addr');
-  my $to = $self->get ('To:addr');
+  my $addr_from = $self->get ('From:addr');
+  my $addr_to = $self->get ('To:addr');
+  my $hdr_from = $self->get ('From');
+  my $hdr_to = $self->get ('To');
 
-  if ($from eq '' && $to eq '') { return 0; }
-  return lc($from) eq lc($to);
+  # BUG: From:addr and To:addr sometimes contain whitespace
+  $addr_from =~ s/\s+//g;
+  $addr_to =~ s/\s+//g;
+
+  if (!length($addr_from) || !length($addr_to) ||
+      !length($hdr_from) || !length($hdr_to) ||
+      ($addr_from ne $addr_to))
+  {
+    $self->{from_to_same} = "none";
+    return;
+  }
+
+  if ($hdr_from eq $hdr_to) {
+    $self->{from_to_same} = "exact";
+  }
+  else {
+    $self->{from_to_same} = "rough";
+  }
+
+  my $from_space = ($hdr_from =~ /^\s*\S+\s*$/);
+  my $to_space = ($hdr_to =~ /^\s*\S+\s*$/);
+  if ($from_space && $to_space) {
+    $self->{from_to_same} .= "_both";
+  }
+  elsif ($from_space) {
+    $self->{from_to_same} .= "_from";
+  }
+  elsif ($to_space) {
+    $self->{from_to_same} .= "_to";
+  }
+  else {
+    $self->{from_to_same} .= "_none";
+  }
 }
 
 ###########################################################################
@@ -163,11 +211,11 @@ sub _check_mta_message_id {
   my $all = $self->get ('ALL');
   my $later_mta;
 
-  if ($all =~ /\nMessage-(ID|Id|id):.*\nReceived:/s) {
+  if ($all =~ /\nMessage-(?:ID|Id|id):.*\nReceived:/s) {
     # Message-ID is before a Received
     $later_mta = 1;
   }
-  elsif ($all =~ /\nReceived:[^\n]*\n([\t ][^\n]*\n)*Message-(ID|Id|id):/s) {
+  elsif ($all =~ /\nReceived:[^\n]*\n(?:[\t ][^\n]*\n)*Message-(?:ID|Id|id):/s) {
     # Message-ID is not before a Received but is directly after a Received
     $later_mta = 0;
   }
@@ -178,8 +226,10 @@ sub _check_mta_message_id {
 
   my $id = $self->get ('Message-Id');
 
-  # exempt certain Message-Id headers (could backfire so be prepared to remove)
-  return if $id =~ /\@.*(localhost\.localdomain|linux\.local|yahoo)/;
+  # Yahoo! and Wanadoo.fr do add their Message-Id on transport time:
+  # Yahoo! MIDs can depend on the country: yahoo.com, yahoo.fr, yahoo.co.uk, etc.
+  # Wanadoo MIDs end always in wanadoo.fr
+  return if $id =~ /\@[a-z0-9.-]+\.(?:yahoo|wanadoo)(?:\.[a-z]{2,3}){1,2}>/;
 
   # no further checks in simple case
   if ($later_mta) {
@@ -229,6 +279,40 @@ sub _check_mta_message_id {
 
 ###########################################################################
 
+# yet another test for faked Received: headers (FORGED_RCVD_TRAIL)
+sub check_for_forged_received_trail {
+  my ($self) = @_;
+
+  my @received = grep(/\S/, split(/\n/, $self->get ('Received')));
+  my @by;
+  my @from;
+  my $mismatch = 0;
+  my $local;
+
+  for (my $i = 0; $i < $#received; $i++) {
+    if ($received[$i] =~ s/\bby[\t ]+(\w+([\w.-]+\.)+\w+)//i) {
+      $by[$i] = lc($1);
+      $by[$i] =~ s/.*\.(\S+\.\S+)$/$1/;
+    }
+    if ($received[$i] =~ s/\bfrom[\t ]+(\w+([\w.-]+\.)+\w+)//i) {
+      $from[$i] = lc($1);
+      $from[$i] =~ s/.*\.(\S+\.\S+)$/$1/;
+    }
+
+    if ($i > 0 && defined($by[$i]) && defined($from[$i - 1]) &&
+	($by[$i] ne $from[$i - 1]))
+    {
+      $mismatch++;
+    }
+
+    dbg ("forged_rcvd_trail: entry $i:"
+        ." by=".(defined $by[$i] ? $by[$i] : "(undef)")
+        ." from=".(defined $from[$i] ? $from[$i] : "(undef)")
+        ." mismatches=$mismatch");
+  }
+  return ($mismatch > 1);
+}
+
 # FORGED_HOTMAIL_RCVD
 sub check_for_forged_hotmail_received_headers {
   my ($self) = @_;
@@ -254,6 +338,37 @@ sub check_for_forged_hotmail_received_headers {
                 { return 0; }
 
   return 1;
+}
+
+# MSN_GROUPS
+sub check_for_msn_groups_headers {
+  my ($self) = @_;
+
+  return 0 unless ($self->get('To') =~ /<(\S+)\@groups\.msn\.com>/i);
+  my $listname = $1;
+
+  # from Theo Van Dinter, see
+  # http://www.hughes-family.org/bugzilla/show_bug.cgi?id=591
+  return 0 unless $self->get('Message-Id') =~ /^<$listname-\S+\@groups\.msn\.com>/;
+  return 0 unless $self->get('X-Loop') =~ /^notifications\@groups\.msn\.com/;
+  return 0 unless $self->get('Return-Path') =~ /<$listname-bounce\@groups\.msn\.com>/;
+
+  $_ = $self->get ('Received');
+  return 0 if !/from mail pickup service by groups\.msn\.com\b/;
+  return 1;
+
+# MSN Groups
+# Return-path: <ListName-bounce@groups.msn.com>
+# Received: from groups.msn.com (tk2dcpuba02.msn.com [65.54.195.210]) by
+#    dogma.slashnull.org (8.11.6/8.11.6) with ESMTP id g72K35v10457 for
+#    <zzzzzzzzzzzz@jmason.org>; Fri, 2 Aug 2002 21:03:05 +0100
+# Received: from mail pickup service by groups.msn.com with Microsoft
+#    SMTPSVC; Fri, 2 Aug 2002 13:01:30 -0700
+# Message-id: <ListName-1392@groups.msn.com>
+# X-loop: notifications@groups.msn.com
+# Reply-to: "List Full Name" <ListName@groups.msn.com>
+# To: "List Full Name" <ListName@groups.msn.com>
+
 }
 
 ###########################################################################
@@ -348,7 +463,7 @@ sub check_for_forged_juno_received_headers {
   my ($self) = @_;
 
   my $from = $self->get('From:addr');
-  if($from !~ /juno.com/) { return 0; }
+  if($from !~ /\bjuno.com/) { return 0; }
 
   if($self->gated_through_received_hdr_remover()) { return 0; }
 
@@ -357,15 +472,56 @@ sub check_for_forged_juno_received_headers {
   my $rcvd = $self->get('Received');
 
   if (!$xorig) {  # New style Juno has no X-Originating-IP header, and other changes
-    if($rcvd !~ /from.*juno\.com.*\[[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\].*by/) { return 1; }
+    if($rcvd !~ /from.*\bjuno\.com.*[\[\(][0-9]+\.[0-9]+\.[0-9]+\.[0-9]+[\]\)].*by/
+        && $rcvd !~ / cookie\.juno\.com /) { return 1; }
     if($xmailer !~ /Juno /) { return 1; }
   } else {
-    if($rcvd !~ /from.*mail\.com.*\[[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\].*by/) { return 1; }
+    if($rcvd !~ /from.*\bmail\.com.*\[[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\].*by/) { return 1; }
     if($xorig !~ /[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/) { return 1; }
-    if($xmailer !~ /mail\.com/) { return 1; }
+    if($xmailer !~ /\bmail\.com/) { return 1; }
   }
 
   return 0;   
+}
+
+#Received: from dragnet.sjc.ebay.com (dragnet.sjc.ebay.com [10.6.21.14])
+#	by bashir.ebay.com (8.10.2/8.10.2) with SMTP id g29JpwB10940
+#	for <rod@begbie.com>; Sat, 9 Mar 2002 11:51:58 -0800
+
+sub check_for_from_domain_in_received_headers {
+  my ($self, $domain, $desired) = @_;
+  
+  if (exists $self->{from_domain_in_received}) {
+      if (exists $self->{from_domain_in_received}->{$domain}) {
+	  if ($desired eq 'true') {
+	      # See use of '0e0' below for why we force int() here:
+	      return int($self->{from_domain_in_received}->{$domain});
+	  }
+	  else {
+	      # And why we deliberately do NOT use integers here:
+	      return !$self->{from_domain_in_received}->{$domain};
+	  }
+      }
+  } else {
+      $self->{from_domain_in_received} = {};
+  }
+
+  my $from = $self->get('From:addr');
+  if ($from !~ /\b\Q$domain\E/i) {
+      # '0e0' is Perl idiom for "true but zero":
+      $self->{from_domain_in_received}->{$domain} = '0e0';
+      return 0;
+  }
+
+  my $rcvd = $self->get('Received');
+
+  if ($rcvd =~ /from.*\b\Q$domain\E.*[\[\(][0-9]+\.[0-9]+\.[0-9]+\.[0-9]+[\]\)].*by.*\b\Q$domain\E/) {
+      $self->{from_domain_in_received}->{$domain} = 1;
+      return ($desired eq 'true');
+  }
+
+  $self->{from_domain_in_received}->{$domain} = 0;
+  return ($desired ne 'true');   
 }
 
 # ezmlm has a very bad habit of removing Received: headers! bad ezmlm.
@@ -396,8 +552,62 @@ sub check_for_bad_helo {
   my ($self) = @_;
   local ($_);
   $_ = $self->get ('X-Authentication-Warning');
+  return 0 if (!defined $_);
 
-  (/host \S+ \[(\S+)\] claimed to be.*\[(\S+)\]/i && $1 ne $2);
+  s/\s+/ /gs;   # ignore whitespace
+  return 0 if (!/host (.*) claimed to be (.*)/i);
+
+  my $relayer = $1;
+  my $claimed = $2;
+  my $relayip;
+  my $claimip;
+
+  if ($relayer =~ s/\[(\d\S+)\]//gs) { $relayip = $1; }
+  if ($claimed =~ s/\[(\d\S+)\]//gs) { $claimip = $1; }
+  $relayer =~ s/^\s+//; $relayer =~ s/\s+$//;
+  $claimed =~ s/^\s+//; $claimed =~ s/\s+$//;
+
+  if ($relayer eq $claimed) { goto telling_truth; }
+  if (defined $relayip && defined $claimip && $relayip eq $claimip)
+                         { goto telling_truth; }
+
+  dbg ("fake_helo: mail relayed by ".	
+  	"$relayip (HELO '$claimed', rev DNS says '$relayer')");
+
+  # next stuff is DNS testing; local mode just return 0
+  return 0 unless $self->is_dns_available();
+  $self->load_resolver();
+
+  if ($relayer eq '') {         # there was no rev DNS at relay time
+
+    # check to see if the host it claims to be, has an interface with
+    # the IP address it came from.  This could still break with firewalls
+    # though :(
+
+    my $query = $self->{res}->search ($claimed);
+    my $claimaddrs = '';
+    if ($query) {
+      foreach my $rr ($query->answer) {
+        next unless $rr->type eq "A";
+        $claimaddrs .= $rr->address." ";
+      }
+    }
+
+    dbg ("fake_helo: DNS A records for '$claimed': $claimaddrs");
+    if ($claimaddrs =~ /\Q$relayip\E/) {
+      goto telling_truth;
+    }
+
+    chop $claimaddrs;
+    #$self->test_log ("$claimed is $claimaddrs, not $relayip");
+  }
+
+  dbg ("fake_helo: relayer was lying in HELO");
+  return 1;             # relayer was fibbing
+
+telling_truth:
+  dbg ("fake_helo: relayer was telling the truth in HELO");
+  return 0;             # relayer was fibbing
 }
 
 ###########################################################################
@@ -445,19 +655,34 @@ sub check_for_missing_to_header {
 sub check_from_in_whitelist {
   my ($self) = @_;
   local ($_);
-  $_ = $self->get ('From:addr');
-  return $self->_check_whitelist ($self->{conf}->{whitelist_from}, $_);
+  foreach $_ ($self->all_from_addrs()) {
+    if ($self->_check_whitelist ($self->{conf}->{whitelist_from}, $_)) {
+      return 1;
+    }
+    if ($self->_check_whitelist_rcvd ($self->{conf}->{whitelist_from_rcvd}, $_)) {
+      return 1;
+    }
+  }
 }
 
-sub _check_whitelist {
+###########################################################################
+
+sub _check_whitelist_rcvd {
   my ($self, $list, $addr) = @_;
   $addr = lc $addr;
-
-  if (defined ($list->{$addr})) { return 1; }
-
-  study $addr;
-  foreach my $regexp (values %{$list}) {
-    if ($addr =~ /$regexp/i) { return 1; }
+  # study $addr; # study isn't worth it for strings this size.
+  foreach my $white_addr (keys %{$list}) {
+    my $regexp = $list->{$white_addr}{re};
+    my $domain = $list->{$white_addr}{domain};
+    # warn("checking $addr against $regexp + $domain\n");
+    if ($addr =~ /$regexp/i) {
+      # warn("Looking for $domain\n");
+      my $rcvd = $self->get('Received');
+      if ($rcvd =~ /from.*\b\Q$domain\E.*[\[\(][0-9]+\.[0-9]+\.[0-9]+\.[0-9]+[\]\)].*\bby\b/) {
+        # warn("Found it.\n");
+        return 1;
+      }
+    }
   }
 
   return 0;
@@ -465,14 +690,76 @@ sub _check_whitelist {
 
 ###########################################################################
 
-my $obfu_chars = '*_.,/|-+=';
-sub check_obfuscated_words {
-    my ($self, $body) = @_;
-
-    foreach my $line (@$body) {
-        while ($line =~ /[\w$obfu_chars]/) {
-        }
+sub _check_whitelist {
+  my ($self, $list, $addr) = @_;
+  $addr = lc $addr;
+  if (defined ($list->{$addr})) { return 1; }
+  study $addr;
+  foreach my $regexp (values %{$list}) {
+    if ($addr =~ /$regexp/i) {
+      return 1;
     }
+  }
+
+  return 0;
+}
+
+sub all_from_addrs {
+  my ($self) = @_;
+
+  # Resent- headers take priority, if present. see bug 672
+  # http://www.hughes-family.org/bugzilla/show_bug.cgi?id=672
+  my $resent = $self->get ('Resent-From');
+  if (defined $resent && $resent =~ /\S/) {
+    return $self->{main}->find_all_addrs_in_line (
+  	 $self->get ('Resent-From'));
+
+  } else {
+    return $self->{main}->find_all_addrs_in_line
+  	($self->get ('From') .                  # std
+  	 $self->get ('Sender') .                # rfc822
+  	 $self->get ('Envelope-Sender') .       # qmail: new-inject(1)
+  	 $self->get ('Resent-Sender') .         # procmailrc manpage
+  	 $self->get ('X-Envelope-From') .       # procmailrc manpage
+  	 $self->get ('Return-Path') .           # Postfix, sendmail; rfc821
+  	 $self->get ('Resent-From'));
+    # http://www.cs.tut.fi/~jkorpela/headers.html is useful here
+  }
+}
+
+sub all_to_addrs {
+  my ($self) = @_;
+
+  # Resent- headers take priority, if present. see bug 672
+  # http://www.hughes-family.org/bugzilla/show_bug.cgi?id=672
+  my $resent = $self->get ('Resent-To') . $self->get ('Resent-Cc');
+  if (defined $resent && $resent =~ /\S/) {
+    return $self->{main}->find_all_addrs_in_line (
+  	 $self->get ('Resent-To') .             # std, rfc822
+  	 $self->get ('Resent-Cc'));             # std, rfc822
+
+  } else {
+    return $self->{main}->find_all_addrs_in_line (
+         $self->get ('To') .                    # std
+  	 $self->get ('Apparently-To') .         # sendmail, from envelope
+  	 $self->get ('Delivered-To') .          # Postfix, I think
+  	 $self->get ('Envelope-Recipients') .   # qmail: new-inject(1)
+  	 $self->get ('Apparently-Resent-To') .  # procmailrc manpage
+  	 $self->get ('X-Envelope-To') .         # procmailrc manpage
+         $self->get ('Cc'));                    # std
+    # http://www.cs.tut.fi/~jkorpela/headers.html is useful here
+  }
+}
+
+###########################################################################
+
+sub check_obfuscated_words {
+  my ($self, $body) = @_;
+  foreach my $line (@$body) {
+      while ($line =~ /[\w$WORD_OBFUSCATION_CHARS]/) {
+        # TODO, it seems ;)
+      }
+  }
 }
 
 ###########################################################################
@@ -480,8 +767,11 @@ sub check_obfuscated_words {
 sub check_from_in_blacklist {
   my ($self) = @_;
   local ($_);
-  $_ = $self->get ('From:addr');
-  return $self->_check_whitelist ($self->{conf}->{blacklist_from}, $_);
+  foreach $_ ($self->all_from_addrs()) {
+    if ($self->_check_whitelist ($self->{conf}->{blacklist_from}, $_)) {
+      return 1;
+    }
+  }
 }
 
 ###########################################################################
@@ -490,9 +780,7 @@ sub check_from_in_blacklist {
 sub check_to_in_whitelist {
   my ($self) = @_;
   local ($_);
-  foreach $_ ($self->{main}->find_all_addrs_in_line
-  			($self->get ('To') . $self->get ('Cc')))
-  {
+  foreach $_ ($self->all_to_addrs()) {
     if ($self->_check_whitelist ($self->{conf}->{whitelist_to}, $_)) {
       return 1;
     }
@@ -506,9 +794,7 @@ sub check_to_in_whitelist {
 sub check_to_in_more_spam {
   my ($self) = @_;
   local ($_);
-  foreach $_ ($self->{main}->find_all_addrs_in_line
-  			($self->get ('To') . $self->get ('Cc')))
-  {
+  foreach $_ ($self->all_to_addrs()) {
     if ($self->_check_whitelist ($self->{conf}->{more_spam_to}, $_)) {
       return 1;
     }
@@ -522,9 +808,7 @@ sub check_to_in_more_spam {
 sub check_to_in_all_spam {
   my ($self) = @_;
   local ($_);
-  foreach $_ ($self->{main}->find_all_addrs_in_line
-  			($self->get ('To') . $self->get ('Cc')))
-  {
+  foreach $_ ($self->all_to_addrs()) {
     if ($self->_check_whitelist ($self->{conf}->{all_spam_to}, $_)) {
       return 1;
     }
@@ -539,18 +823,6 @@ sub check_lots_of_cc_lines {
   $_ = $self->get ('Cc');
   my @count = /\n/gs;
   if ($#count > 20) { return 1; }
-  return 0;
-}
-
-###########################################################################
-
-sub check_from_name_eq_from_address {
-  my ($self) = @_;
-  local ($_);
-  $_ = $self->get ('From');
-
-  /\"(\S+)\" <(\S+)>/ or return 0;
-  if ($1 eq $2) { return 1; }
   return 0;
 }
 
@@ -575,7 +847,20 @@ sub check_rbl {
 
   dbg("Got the following IPs: ".join(", ", @ips), "rbl", -3);
   if ($#ips > 1) {
-    @ips = @ips[$#ips-$checklast .. $#ips]; # only check the originating IPs
+    # If the set name is foo-lastN, check only the Received header that is
+    # N hops from the final MTA (where 0 only checks the final Received
+    # header).
+    if ($set =~ /-last(\d+)$/) {
+      @ips = ($ips[$1]);
+    }
+    # If the set name is foo-firstN, only check the address that is N from
+    # the header generated by the first MTA.
+    elsif ($set =~ /-first(\d+)$/) {
+      @ips = ($ips[$#ips - $1]);
+    }
+    else {
+      @ips = @ips[$#ips-$checklast .. $#ips]; # only check the originating IPs
+    }
   }
   dbg("But only inspecting the following IPs: ".join(", ", @ips), "rbl", -3);
 
@@ -584,7 +869,6 @@ sub check_rbl {
     $self->{$set}->{rbl_matches_found} = ' ';
   }
 
-  init_rbl_check_reserved_ips();
   my $already_matched_in_other_zones = ' '.$self->{$set}->{rbl_matches_found}.' ';
   my $found = 0;
 
@@ -684,41 +968,45 @@ sub check_for_unique_subject_id {
   $_ = lc $self->get ('Subject');
   study;
 
-  my $id = undef;
+  my $id = 0;
   if (/[-_\.\s]{7,}([-a-z0-9]{4,})$/
+	|| /\s{10,}(?:\S\s)?(\S+)$/
 	|| /\s{3,}[-:\#\(\[]+([-a-z0-9]{4,})[\]\)]+$/
-	|| /\s{3,}[:\#\(\[]*([0-9]{4,})[\]\)]*$/
+	|| /\s{3,}[:\#\(\[]*([a-f0-9]{4,})[\]\)]*$/
 	|| /\s{3,}[-:\#]([a-z0-9]{5,})$/
 
         # (7217vPhZ0-478TLdy5829qicU9-0@26) and similar
         || /\(([-\w]{7,}\@\d+)\)$/
 
-        # Seven or more digits at the end of a subject is almost certainly
-        # a id.
+        # Seven or more digits at the end of a subject is almost certainly a id
         || /\b(\d{7,})\s*$/
 
-        # A number at the end of the subject, if it's after the end of a
-        # sentence (ending in "!" or "?"), is almost certainly an id
-        || /[!\?]\s*(\d{4,})\s*$/
+        # stuff at end of line after "!" or "?" is usually an id
+        || /[!\?]\s*(\d{4,}|\w+(-\w+)+)\s*$/
 
         # 9095IPZK7-095wsvp8715rJgY8-286-28 and similar
-        || /\b(\w{7,}-\w{7,}-\d+-\d+)\s*$/
+        || /\b(\w{7,}-\w{7,}(-\w+)*)\s*$/
+
+        # #30D7 and similar
+        || /\s#\s*([a-f0-9]{4,})\s*$/
      )
   {
     $id = $1;
+    # exempt online purchases
+    if ($id =~ /\d{5,}/
+	&& /(?:item|invoice|order|number|confirmation).{1,6}\Q$id\E\s*$/)
+    {
+      $id = 0;
+    }
   }
 
-  if (!defined($id) || $self->word_is_in_dictionary ($id)) {
-    return 0;
-  } else {
-    return 1;
-  }
+  return ($id && !$self->word_is_in_dictionary($id));
 }
 
 # word_is_in_dictionary()
 #
 # See if the word looks like an English word, by checking if each triplet
-# of letters it contains is one that can be found in the English lanugage.
+# of letters it contains is one that can be found in the English language.
 # Does not include triplets only found in proper names, or in the Latin
 # and Greek terms that might be found in a larger dictionary
 
@@ -871,29 +1159,10 @@ sub check_for_forged_gw05_received_headers {
 
 ###########################################################################
 
-sub check_for_content_type_just_html {
-  my ($self) = @_;
-  local ($_);
-
-  my $rcv = $self->get ('Received');
-  my $ctype = $self->get ('Content-Type');
-
-  # HotMail uses this unfortunately for it's "rich text" control,
-  # so we need to exclude that from the test.
-  if ($rcv =~ / by hotmail.com /) { return 0; }
-
-  if ($ctype =~ /^text\/html;?\b/i) { return 1; }
-
-  0;
-}
-
-###########################################################################
-
 sub check_for_faraway_charset {
   my ($self, $body) = @_;
 
   my $type = $self->get ('Content-Type');
-  $type ||= $self->get ('Content-type');
 
   my @locales = $self->get_my_locales();
 
@@ -930,27 +1199,28 @@ sub check_for_faraway_charset_in_body {
   # No message sections to check
   return 0 unless ( defined $boundary );
 
-  while ( $$fulltext =~ /^--$boundary\n((?:[^\n]+\n)+)(.+?)
-                      ^--$boundary(?:--)?\n/smxg ) {
-              my($header,$sampleofbody) = ($1,$2);
+  # Grab the whole mime body part
+  my($mimebody) = ($$fulltext =~ /^(--$boundary\n.*
+                                  ^--$boundary--\n)/smx);
 
-              if ( $header =~ /^Content-Type:\s(.{0,100}charset=[^\n]+)/msi ) {
-    my $type = $1;
+  if (defined $mimebody) {
+    foreach my $section ( split(/^--${boundary}\n/m, $mimebody) ) {
+      my($header,$sampleofbody) = split(/\n\s*\n/, $section, 2);
+      next unless defined $header;
 
-    my @locales = $self->get_my_locales();
+      if ( $header =~ /^Content-Type:\s(.{0,100}charset=[^\n]+)/msi ) {
+        my $type = $1;
 
-    return 0 if grep { $_ eq "all" } @locales;
+        my @locales = $self->get_my_locales();
 
-    $type = get_charset_from_ct_line ($type);
-    if (defined $type &&
-      !Mail::SpamAssassin::Locales::is_charset_ok_for_locales
-		      ($type, @locales))
-    {
-      if ($self->are_more_high_bits_set ($sampleofbody)) {
-        return 1;
+        return 0 if grep { $_ eq "all" } @locales;
+
+        $type = get_charset_from_ct_line ($type);
+        return 1 if (defined $type &&
+          !Mail::SpamAssassin::Locales::is_charset_ok_for_locales($type, @locales) &&
+          $self->are_more_high_bits_set ($sampleofbody));
       }
     }
-  }
   }
 
   0;
@@ -1207,33 +1477,127 @@ sub subject_is_all_caps {
    $subject =~ s/^\s+//;
    $subject =~ s/\s+$//;
    return 0 if $subject !~ /\s/;	# don't match one word subjects
+   return 0 if (length $subject < 10);  # don't match short subjects
    $subject =~ s/[^a-zA-Z]//g;		# only look at letters
    return length($subject) && ($subject eq uc($subject));
 }
 
 ###########################################################################
-# BODY TESTS:
+
+sub message_from_bugzilla {
+  my ($self) = @_;
+
+  my $all    = $self->get('ALL');
+  
+  # Let's look for a Bugzilla Subject...
+  if ($all   =~ /^Subject: [^\n]{0,10}\[Bug \d+\] /m && (
+        # ... in combination with either a Bugzilla message header...
+        $all =~ /^X-Bugzilla-[A-Z][a-z]+: /m ||
+        # ... or sender.
+        $all =~ /^From: bugzilla/mi
+     )) {
+    return 1;
+  }
+
+  return 0;
+}
+
+sub message_from_debian_bts {
+  my ($self)  = @_;
+
+  my  $all    = $self->get('ALL');
+
+  # This is the main case; A X-<Project>-PR-Message header exists and the
+  # Subject looks "buggy". Watch out: The DBTS is used not only by Debian
+  # but by other <Project>s, eg. KDE, too.
+  if ($all    =~ /^X-[A-Za-z0-9]+-PR-Message: [a-z-]+ \d+$/m &&
+      $all    =~ /^Subject: Bug#\d+: /m) {
+    return 1;
+  }
+  # Sometimes the DBTS sends out messages which don't include the X- header.
+  # In this case we look if the message is From a DBTS account and Subject
+  # and Message-Id look good.
+  elsif ($all =~ /^From: owner\@/mi &&
+         $all =~ /^Subject: Processed(?: \([^)]+\))?: /m &&
+         $all =~ /^Message-ID: <handler\./m) {
+    return 1;
+  }
+
+  return 0;
+}
+
+sub message_is_habeas_swe {
+  my ($self) = @_;
+
+  my $all = $self->get('ALL');
+  if ($all =~ /\n(X-Habeas-SWE-1:.{0,512}X-Habeas-SWE-9:[^\n]{0,64}\n)/si) {
+    my $text = $1;
+    $text =~ tr/A-Z/a-z/;
+    $text =~ tr/ / /s;
+    $text =~ s/\/?>/\/>/;
+    return sha1($text) eq "42ab3d716380503f66c4d44017c7f37b04458a9a";
+  }
+  return 0;
+}
+
 ###########################################################################
 
+# This test was originally based on RFC 2369 compliance.  However, the
+# Mailing-List header was added so that Yahoo!Groups mails would not be
+# matched.
+sub suspect_list_headers {
+  my ($self) = @_;
+
+  my $all = $self->get('ALL');
+  my @headers = ('List-Help', 'List-Subscribe', 'List-Unsubscribe',
+		 'List-Post', 'List-Owner', 'List-Archive',
+		 'Mailing-List');
+  my %count;
+
+  foreach my $header (@headers) {
+    while ($all =~ s/^$header://im) {
+      $count{$header}++;
+    }
+  }
+
+  # without RFC 2369 fields
+  return 0 unless %count;
+
+  # header appears more than once (violates RFC 2369)
+  foreach my $count (values %count) {
+    return 1 if $count > 1;
+  }
+
+  # List-Help field is used (good RFC 2369 practice)
+  return 0 if exists $count{'List-Help'};
+
+  # List-Unsubscribe without much else (spammer mind trick)
+  return (exists $count{'List-Unsubscribe'} && scalar keys %count < 2);
+}
+  
+###########################################################################
+# BODY TESTS:
+###########################################################################
 
 sub porn_word_test {
     my ($self, $fulltext) = @_;
     my $hits = 0;
     foreach my $pat (@PORN_WORDS) {
-        $hits++ if ($$fulltext =~ /$pat/);
+        if ($$fulltext =~ /$pat/) {
+          $hits++;
+          dbg ("porn word test: found $pat");
+        }
         return 1 if ($hits == 3);
     }
     return 0;
 }
 
 sub check_for_very_long_text {
-  my ($self, $body) = @_;
-
+  my ($self, $body, $len) = (@_, 0);
   my $count = 0;
-  foreach my $line (@{$body}) {
-    if (length($line) > 40) { $count++; }
-  }
-  if ($count > 500) { return 1; }
+  foreach my $line (@{$body}) { $count += length($line); }
+  dbg ("check_for_very_long_text: found $count bytes");
+  if ($count > $len+0) { return 1; }
   return 0;
 }
 
@@ -1248,14 +1612,17 @@ sub check_for_uppercase {
   my @lines = grep(/\S\s+\S/, @{$body});
 
   # strip out lingering base64 (currently possible for forwarded messages)
-  @lines = grep(!/^([A-Za-z0-9+\/=]{60,76} ){2}/, @lines);
+  @lines = grep(!/^(?:[A-Za-z0-9+\/=]{60,76} ){2}/, @lines);
 
   # join lines together
   $body = join('', @lines);
 
-  # now count upper and lower case
-  my $upper = $body =~ s/([A-Z])/$1/sg;
-  my $lower = $body =~ s/([a-z])/$1/sg;
+  # remove shift-JIS charset codes
+  $body =~ s/\x1b\$B.*\x1b\(B//gs;
+
+  # count numerals as lower case, otherwise 'date|mail' is spam
+  my $lower = $body =~ tr/a-z0-9//d;
+  my $upper = $body =~ tr/A-Z//;
 
   if (($upper + $lower) == 0) {
     $self->{uppercase} = 0;
@@ -1268,14 +1635,14 @@ sub check_for_uppercase {
 }
 
 sub check_for_yelling {
-    my ($self, $body) = @_;
+  my ($self, $body) = @_;
     
-    if (exists $self->{num_yelling_lines}) {
-        return $self->{num_yelling_lines} > 0;
-    }
+  if (exists $self->{num_yelling_lines}) {
+    return $self->{num_yelling_lines} > 0;
+  }
 
   # Make local copy of lines in the body that have some non-letters
-    my @lines = grep(/[^A-Za-z]/, @{$body});
+  my @lines = grep(/[^A-Za-z]/, @{$body});
 
   # Try to eliminate lines which might be newsletter section headers,
   # which are often in all caps; we do this by removing most lines
@@ -1286,94 +1653,47 @@ sub check_for_yelling {
   @lines = grep(/^\S|!|\$\$|\.(?:\s|$)/, @lines);
 
   # Get rid of everything but upper AND lower case letters
-    map (s/[^A-Za-z \t]//sg, @lines);
+  map (tr/A-Za-z \t//cd, @lines);
 
   # Remove leading and trailing whitespace
-    map (s/^\s+//, @lines);
-    map (s/\s+$//, @lines);
+  map (s/^\s+//, @lines);
+  map (s/\s+$//, @lines);
 
   # Now that we have a mixture of upper and lower case, see if it's
   # 1) All upper case
   # 2) 20 or more characters in length
   # 3) Has at least one whitespace in it; we don't want to catch things
   #    like lines of genetic data ("...AGTAGC...")
-    my $num_lines = scalar grep(/\s/, grep(/^[A-Z\s]{20,}$/, @lines) );
+  my $num_lines = scalar grep(/\s/, grep(/^[A-Z\s]{20,}$/, @lines) );
 
-    $self->{num_yelling_lines} = $num_lines;
+  $self->{num_yelling_lines} = $num_lines;
 
-    return ($num_lines > 0);
+  return ($num_lines > 0);
 }
 
 sub check_for_num_yelling_lines {
-    my ($self, $body, $threshold) = @_;
+  my ($self, $body, $threshold) = @_;
     
-    $self->check_for_yelling($body);
+  $self->check_for_yelling($body);
     
-    return ($self->{num_yelling_lines} >= $threshold);
+  return ($self->{num_yelling_lines} >= $threshold);
 }
 
 sub check_for_mime_excessive_qp {
-  my ($self, $body) = @_;
+  my ($self) = @_;
 
-  # Note: We don't use $body because it removes MIME parts.  Instead, we
-  # get the raw unfiltered body AND WE MUST NOT CHANGE ANY LINE.
-  $body = join('', @{$self->{msg}->get_body()});
+  # Note: We don't use rawbody because it removes MIME parts.  Instead,
+  # we get the raw unfiltered body.  We must not change any lines.
+  my $body = join('', @{$self->{msg}->get_body()});
 
   my $length = length($body);
-  my $qp = $body =~ s/\=([0-9A-Fa-f]{2})/$1/g;
+  my $qp = $body =~ s/\=([0-9A-Fa-f]{2,2})/$1/g;
 
   # this seems like a decent cutoff
   return ($length != 0 && ($qp > ($length / 20)));
 }
 
-# This test should be a nearly zero cost operation done during MIME
-# decoding, but this works just fine for now.
-sub check_for_mime_missing_boundary {
-  my ($self, $body) = @_;
-  my $ctype = 0;
-  my $name;
-  my @boundary;
-  my %count;
-
-  # boundaries in header
-  my $header_ctype = $self->{msg}->get_header('Content-Type');
-  $header_ctype = '' unless defined $header_ctype;
-  if ($header_ctype =~ /\bboundary\s*=\s*["']?(.*?)["']?(?:;|$)/i) {
-    push (@boundary, "\Q$1\E");
-  }
-
-  # Note: We don't use $body because it removes MIME parts.  Instead, we
-  # get the raw unfiltered body AND WE MUST NOT CHANGE ANY LINE.
-  foreach my $line (@{$self->{msg}->get_body()}) {
-    if ($line =~ /^--/) {
-      foreach my $boundary (@boundary) {
-	if ($line =~ /^--$boundary$/) {
-	  $count{$boundary} = 1;
-	}
-	if ($line =~ /^--$boundary--$/) {
-	  $count{$boundary}--;
-	}
-      }
-    }
-    if ($line =~ /^Content-[Tt]ype: (\S+?\/\S+?)(?:\;|\s|$)/) {
-      $ctype = 1;
-    }
-    if ($ctype) {
-      if ($line =~ /^$/) {
-	$ctype = 0;
-      }
-      elsif ($line =~ /\bboundary\s*=\s*["']?(.*?)["']?(?:;|$)/i) {
-        push (@boundary, "\Q$1\E");
-      }
-    }
-  }
-  foreach my $boundary (keys %count) {
-    return 1 if $count{$boundary} != 0;
-  }
-  return 0;
-}
-
-sub check_language {
+sub check_language {            # UNDESIRED_LANGUAGE_BODY
   my ($self, $body) = @_;
 
   my @languages = split (' ', $self->{conf}->{ok_languages});
@@ -1408,23 +1728,283 @@ sub check_language {
   return 1;
 }
 
+sub check_signature {
+  my ($self, $full, $min, $max, $blank) = @_;
+
+  if (!exists $self->{signature_lines}) {
+    $self->_check_signature($full);
+  }
+  return (($self->{signature_lines} >= $min) &&
+	  ($self->{signature_lines} <= $max) &&
+	  ($self->{signature_blank} == $blank));
+}
+
+
+sub _check_signature {
+  my ($self, $full) = @_;
+
+  $self->{signature_blank} = 0;
+  $self->{signature_lines} = 0;
+
+  # remove headers
+  my ($body) = ($$full =~ /.*?\n\n(.*)/s);
+
+  # signature must follow one non-whitespace character
+  if ($body =~ /\S\s*\n-- \n((.*\n){1,15}?)\s*\Z/m) {
+    my $signature = $1;
+
+    if ($signature =~ /\n\s*\n\s*\S/m) {
+      $self->{signature_blank} = 1;
+    }
+    if ($signature =~ /\S/m) {
+      $self->{signature_lines} = ($signature =~ tr/\n/\n/);
+    }
+  }
+}
+
+sub check_carriage_returns {
+  my ($self, $rawbody) = @_;
+
+  $rawbody = join ("\n", @$rawbody);
+
+  my $cr = ($rawbody =~ tr/\r/x/);
+  my $nl = ($rawbody =~ tr/\n/x/);
+
+  return ($nl > 0 && ($cr / $nl) > 0.5);
+}
+
+###########################################################################
+# MIME/uuencode attachment tests
+###########################################################################
+
+sub check_for_mime_base64_encoded_text {
+  my ($self) = @_;
+
+  $self->_check_attachments unless exists $self->{mime_base64_encoded_text};
+  return $self->{mime_base64_encoded_text};
+}
+
+sub check_for_mime_html_no_charset {
+  my ($self) = @_;
+
+  $self->_check_attachments unless exists $self->{mime_html_no_charset};
+  return $self->{mime_html_no_charset};
+}
+
+sub check_for_mime_missing_boundary {
+  my ($self) = @_;
+
+  $self->_check_attachments unless exists $self->{mime_missing_boundary};
+  return $self->{mime_missing_boundary};
+}
+
+sub check_for_mime_long_line_qp {
+  my ($self) = @_;
+
+  $self->_check_attachments unless exists $self->{mime_long_line_qp};
+  return $self->{mime_long_line_qp};
+}
+
+sub check_for_mime_suspect_name { # MIME_SUSPECT_NAME
+  my ($self) = @_;
+
+  $self->_check_attachments unless exists $self->{mime_suspect_name};
+  return $self->{mime_suspect_name};
+}
+
+sub check_for_microsoft_executable {
+  my ($self) = @_;
+
+  $self->_check_attachments unless exists $self->{microsoft_executable};
+  return $self->{microsoft_executable};
+}
+
+sub _check_mime_header {
+  my ($self, $ctype, $cte, $cd, $charset, $name) = @_;
+
+  if ($ctype =~ /^text/ &&
+      $cte =~ /base64/ &&
+      !($cd && $cd =~ /^(?:attachment|inline)/))
+  {
+    $self->{mime_base64_encoded_text} = 1;
+  }
+
+  if ($ctype =~ /^text\/html/ &&
+      !(defined($charset) && $charset) &&
+      !($cd && $cd =~ /^(?:attachment|inline)/))
+  {
+    $self->{mime_html_no_charset} = 1;
+  }
+
+  if ($name && $ctype ne "application/octet-stream") {
+    # MIME_SUSPECT_NAME triggered here
+    $name =~ s/.*\.//;
+    $ctype =~ s@/(x-|vnd\.)@/@;
+    if (   ($name =~ /^html?$/ && $ctype !~ m@^text/(?:html|xml|plain)@)
+	|| ($name =~ /^jpe?g$/ && $ctype !~ m@^image/p?jpeg@)
+	|| ($name eq "pdf" && $ctype ne "application/pdf")
+	|| ($name eq "gif" && $ctype ne "image/gif")
+	|| ($name eq "txt" && $ctype !~ m@^text/@)      # text/english is OK, it seems
+	|| ($name eq "vcf" && $ctype ne "text/vcard")
+	|| ($name =~ /^(?:bat|com|exe|pif|scr|swf|vbs)$/ && $ctype !~ m@^application/@)
+	|| ($name eq "doc" && $ctype !~ m@^application/.*word$@)
+	|| ($name eq "ppt" && $ctype !~ m@^application/.*(?:powerpoint|ppt)$@)
+	|| ($name eq "xls" && $ctype !~ m@^application/.*excel$@)
+       )
+    {
+       $self->{mime_suspect_name} = 1;
+    }
+  }
+}
+
+sub _check_attachments {
+  my ($self) = @_;
+
+  my $previous = 'undef';	# the previous line
+
+  # MIME status
+  my $where = 0;		# 0 = nowhere, 1 = header, 2 = body
+  my @boundary;			# list of MIME boundaries
+  my %state;			# state of each MIME part
+
+  # MIME header information
+  my $ctype;			# Content-Type
+  my $cte;			# Content-Transfer-Encoding
+  my $cd;			# Content-Disposition
+  my $charset;			# charset
+  my $name;			# name or filename
+
+  # regular expressions
+  my $re_boundary = qr/\bboundary\s*=\s*["']?(.*?)["']?(?:;|$)/i;
+  my $re_charset = qr/\bcharset\s*=\s*["']?(.*?)["']?(?:;|$)/i;
+  my $re_name = qr/name\s*=\s*["']?(.*?)["']?(?:;|$)/i;
+  my $re_ctype = qr/^Content-Type:\s*(.+?)(?:;|\s|$)/i;
+  my $re_cte = qr/^Content-Transfer-Encoding:\s*(.+)/i;
+  my $re_cd = qr/^Content-Disposition:\s*(.+)/i;
+
+  # results
+  $self->{microsoft_executable} = 0;
+  $self->{mime_base64_encoded_text} = 0;
+  $self->{mime_html_no_charset} = 0;
+  $self->{mime_long_line_qp} = 0;
+  $self->{mime_missing_boundary} = 0;
+  $self->{mime_suspect_name} = 0;
+
+  $ctype = $self->get('Content-Type');
+  if ($ctype =~ /$re_boundary/) {
+    push (@boundary, "\Q$1\E");
+  }
+  if ($ctype =~ /^text\//i) {
+    $cte = $self->get('Content-Transfer-Encoding');
+    if ($cte =~ /base64/i) {
+      $self->{mime_base64_encoded_text} = 1;
+    }
+  }
+
+  # Note: We don't use rawbody because it removes MIME parts.  Instead,
+  # we get the raw unfiltered body.  We must not change any lines.
+  for (@{$self->{msg}->get_body()}) {
+    if (/^--/) {
+      foreach my $boundary (@boundary) {
+	if (/^--$boundary$/) {
+	  $state{$boundary} = 1;
+	  $ctype = $cte = $cd = $charset = $name = 0;
+	  $where = 1;
+	}
+	if (/^--$boundary--$/) {
+	  $state{$boundary}--;
+	  $where = 0;
+	}
+      }
+    }
+    if ($where == 2) {
+      if ($previous =~ /^$/ && /^TVqQAAMAAAAEAAAA/) {
+	$self->{microsoft_executable} = 1;
+      }
+      if ($self->{mime_html_no_charset} &&
+	  $ctype =~ /^text\/html/ &&
+	  /charset=/i)
+      {
+	$self->{mime_html_no_charset} = 0;
+      }
+    }
+    if ($where == 1) {
+      if (/^$/) {
+	$where = 2;
+	$self->_check_mime_header($ctype, $cte, $cd, $charset, $name);
+      }
+      if (/$re_boundary/) { push(@boundary, "\Q$1\E"); }
+      if (/$re_charset/) { $charset = lc($1); }
+      if (/$re_name/) { $name = lc($1); }
+      if (/$re_ctype/) { $ctype = lc($1); }
+      elsif (/$re_cte/) { $cte = lc($1); }
+      elsif (/$re_cd/) { $cd = lc($1); }
+    }
+    if ($self->{found_encoding_quoted_printable} &&
+	length > 77 && /\=[0-9A-Fa-f]{2}/)
+    {
+      $self->{mime_long_line_qp} = 1;
+    }
+    if ($previous =~ /^begin [0-7]{3} ./ && /^M35J0``,````\$````/) {
+      $self->{microsoft_executable} = 1;
+    }
+    $previous = $_;
+  }
+  foreach my $str (keys %state) {
+    if ($state{$str} != 0) {
+      $self->{mime_missing_boundary} = 1;
+      last;
+    }
+  }
+}
+
 ###########################################################################
 # FULL-MESSAGE TESTS:
 ###########################################################################
 
-sub check_razor {
+sub check_razor1 {
   my ($self, $fulltext) = @_;
 
-  return 0 unless ($self->is_razor_available());
-  return 0 if ($self->{already_checked_razor});
+  return 0 unless ($self->is_razor1_available());
+  return 0 if ($self->{already_checked_razor1});
 
-  $self->{already_checked_razor} = 1;
+  $self->{already_checked_razor1} = 1;
 
   # note: we don't use $fulltext. instead we get the raw message,
-  # unfiltered, for razor to check.  ($fulltext removes MIME
+  # unfiltered, for razor1 to check.  ($fulltext removes MIME
   # parts etc.)
   my $full = $self->get_full_message_as_text();
-  return $self->razor_lookup (\$full);
+  return $self->razor1_lookup (\$full);
+}
+
+sub check_razor2 {
+  my ($self, $fulltext) = @_;
+
+  return 0 unless ($self->is_razor2_available());
+  return 0 if ($self->{already_checked_razor2});
+
+  $self->{already_checked_razor2} = 1;
+
+  # note: we don't use $fulltext. instead we get the raw message,
+  # unfiltered, for razor2 to check.  ($fulltext removes MIME
+  # parts etc.)
+  my $full = $self->get_full_message_as_text();
+  return $self->razor2_lookup (\$full);
+}
+
+sub check_pyzor {
+  my ($self, $fulltext) = @_;
+
+  return 0 unless ($self->is_pyzor_available());
+  return 0 if ($self->{already_checked_pyzor});
+
+  $self->{already_checked_pyzor} = 1;
+
+  # note: we don't use $fulltext. instead we get the raw message,
+  # unfiltered, for pyzor to check.  ($fulltext removes MIME
+  # parts etc.)
+  my $full = $self->get_full_message_as_text();
+  return $self->pyzor_lookup (\$full);
 }
 
 sub check_dcc {
@@ -1442,43 +2022,59 @@ sub check_dcc {
   return $self->dcc_lookup (\$full);
 }
 
-sub check_for_base64_enc_text {
-  my ($self, $fulltext) = @_;
+###########################################################################
 
-  # If the message itself is base64-encoded, return positive
-  my $cte = $self->get('Content-Transfer-Encoding');
-  if ( defined $cte && $cte =~ /^\s*base64/i &&
-        ($self->get('content-type') =~ /text\//i) ) {
-  	return 1;
+sub check_for_spam_phrases {
+  return Mail::SpamAssassin::PhraseFreqs::check_phrase_freqs (@_);
+}
+
+###########################################################################
+
+sub check_for_fake_aol_relay_in_rcvd {
+  my ($self) = @_;
+  local ($_);
+
+  $_ = $self->get ('Received'); s/\s/ /gs;
+
+  # this is the hostname format used by AOL for their relays. Spammers love 
+  # forging it.  Don't make it more specific to match aol.com only, though --
+  # there's another set of spammers who generate fake hostnames to go with
+  # it!
+  if (/ rly-[a-z][a-z]\d\d\./i) {
+    return 0 if /ESMTP id (?:RELAY|MAILRELAY|MAILIN)/; # AOLish
+    return 1;
   }
 
-  if ($$fulltext =~ /\n\n.{0,100}(
-    	\nContent-Type:\s*text\/.{0,200}
-	\nContent-Transfer-Encoding:\s*base64.*?
-	\n\n)/isx)
-  {
-    my $otherhdrs = $1;
-    if ($otherhdrs =~ /^Content-Disposition: (?:attachment|inline)/im) {
-      return 0;		# text attachments are OK
-    } else {
-      return 1;		# no Content-Disp: header found, it's bad
-    }
-  }
+# spam: Received: from unknown (HELO mta05bw.bigpond.com) (80.71.176.130) by
+#    rly-xw01.mx.aol.com with QMQP; Sat, 15 Jun 2002 23:37:16 -0000
+
+# non: Received: from  rly-xj02.mx.aol.com (rly-xj02.mail.aol.com [172.20.116.39]) by
+#    omr-r05.mx.aol.com (v83.35) with ESMTP id RELAYIN7-0501132011; Wed, 01
+#    May 2002 13:20:11 -0400
 
   return 0;
 }
 
 ###########################################################################
 
-sub check_for_spam_phrases {
-  return Mail::SpamAssassin::PhraseFreqs::check_phrase_freqs (@_);
-}
-sub check_for_spam_phrases_scoring {
-  return Mail::SpamAssassin::PhraseFreqs::extra_score_phrase_freqs (@_);
-}
+sub check_for_to_in_subject {
+  my ($self,$check) = @_;
+  $check ||= 1;
 
-###########################################################################
+  my $to = $self->get ('To:addr');
+  return 0 unless $to; # no To:?
+  $to =~ s/\@.*$//; # just the username please
 
-sub check_for_missing_headers { return 0; } # obsolete test
+  my $subject = $self->get('Subject');
+
+  return 1 if ( $check == 1 && $subject =~ /^\s*\Q$to\E,/ );    # "user,"   case sensitive
+  return 1 if ( $check == 2 && $subject =~ /^\s*\Q$to\E,/i );   # "user,"   case insensitive
+  return 1 if ( $check == 3 && $subject =~ /^\s*\Q$to\E,\S/ );  # "user,\S" case sensitive
+  return 1 if ( $check == 4 && $subject =~ /^\s*\Q$to\E,\S/i ); # "user,\S" case insensitive
+  return 1 if ( $check == 5 && $subject =~ /\b\Q$to\E\b/ );     # "user"    case sensitive
+  return 1 if ( $check == 6 && $subject =~ /\b\Q$to\E\b/i );    # "user"    case insensitive
+
+  return 0;
+}
 
 1;

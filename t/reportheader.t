@@ -2,7 +2,9 @@
 
 use lib '.'; use lib 't';
 use SATest; sa_t_init("reportheader");
-use Test; BEGIN { plan tests => 15 };
+use Test; BEGIN { plan tests => 14 };
+
+$ENV{'LC_ALL'} = 'C';             # a cheat, but we need the patterns to work
 
 # ---------------------------------------------------------------------------
 
@@ -19,16 +21,15 @@ q{ Subject: *****SPAM***** There yours for FREE!}, 'subj',
 q{ X-Spam-Status: Yes, hits=}, 'status',
 q{ X-Spam-Flag: YES}, 'flag',
 q{ Valid-looking To "undisclosed-recipients"}, 'undisc',
-q{ Subject has an exclamation mark}, 'apling',
+q{ Subject contains "FREE" in CAPS }, 'subjfree',
 q{ From: ends in numbers}, 'endsinnums',
 q{ From: does not include a real name}, 'noreal',
 q{ BODY: List removal information }, 'removesubject',
 q{ BODY: Claims you can be removed from the list}, 'toberemoved',
-q{ Says: "to be removed, reply via email" }, 'removesubj',
 q{ BODY: Nobody's perfect }, 'remove',
-q{ Message-Id is not valid, according to RFC-2822 }, 'msgidnotvalid',
+q{ Message-Id is not valid, according to RFC 2822 }, 'msgidnotvalid',
 q{ Message-Id has no @ sign }, 'msgidnoat',
-q{ URI: Uses a dotted-decimal IP address in URL }, 'dotteddec',
+q{ Uses a dotted-decimal IP address in URL }, 'dotteddec',
 
 ); #'
 
