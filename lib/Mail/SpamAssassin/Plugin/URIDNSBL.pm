@@ -21,12 +21,12 @@ those IP addresses.  This is quite effective.
 Specify a lookup.  C<NAME_OF_RULE> is the name of the rule to be
 used, C<dnsbl_zone> is the zone to look up IPs in, and C<lookuptype>
 is the type of lookup (B<TXT> or B<A>).   Note that you must also
-define a header-eval rule calling C<check_uridnsbl()> to use this.
+define a body-eval rule calling C<check_uridnsbl()> to use this.
 
 Example:
 
  uridnsbl        URIBL_SBLXBL    sbl-xbl.spamhaus.org.   TXT
- header          URIBL_SBLXBL    eval:check_uridnsbl('URIBL_SBLXBL')
+ body            URIBL_SBLXBL    eval:check_uridnsbl('URIBL_SBLXBL')
  describe        URIBL_SBLXBL    Contains a URL listed in the SBL/XBL blocklist
 
 =item urirhsbl NAME_OF_RULE rhsbl_zone lookuptype
@@ -34,7 +34,7 @@ Example:
 Specify a RHSBL-style domain lookup.  C<NAME_OF_RULE> is the name of the rule
 to be used, C<rhsbl_zone> is the zone to look up domain names in, and
 C<lookuptype> is the type of lookup (B<TXT> or B<A>).   Note that you must also
-define a header-eval rule calling C<check_uridnsbl()> to use this.
+define a body-eval rule calling C<check_uridnsbl()> to use this.
 
 An RHSBL zone is one where the domain name is looked up, as a string; e.g. a
 URI using the domain C<foo.com> will cause a lookup of C<foo.com.uriblzone.net>.
@@ -58,7 +58,7 @@ non-negative decimal number to specify a bitmask for RHSBLs that return a
 single A record containing a bitmask of results, or (if none of the preceding
 options seem to fit) a regular expression.
 
-Note that, as with C<urirhsbl>, you must also define a header-eval rule calling
+Note that, as with C<urirhsbl>, you must also define a body-eval rule calling
 C<check_uridnsbl()> to use this.
 
 Example:
@@ -75,6 +75,12 @@ DNS timeout applied for DNSBL lookups on IPs found in the Received headers.
 =item uridnsbl_max_domains N		(default: 20)
 
 The maximum number of domains to look up.
+
+=item uridnsbl_skip_domain domain1 domain2 ...
+
+Specify a domain, or a number of domains, which should be skipped for the
+URIBL checks.  This is very useful to specify very common domains which are
+not going to be listed in URIBLs.
 
 =back
 
@@ -126,12 +132,12 @@ sub new {
   # set default config settings
   $samain->{conf}->{uridnsbl_timeout} =		3;
   $samain->{conf}->{uridnsbl_max_domains} =	20;
+  $samain->{conf}->{uridnsbl_skip_domains} =	{};
   return $self;
 }
 
 # this is just a placeholder; in fact the results are dealt with later
 sub check_uridnsbl {
-  my ($self, $permsgstatus, $rulename) = @_;
   return 0;
 }
 
@@ -160,7 +166,7 @@ sub parsed_metadata {
   $scanstate->{active_rules_rhsbl} = { };
   $scanstate->{active_rules_revipbl} = { };
   foreach my $rulename (keys %{$scanner->{conf}->{uridnsbls}}) {
-    next unless ($scanner->{conf}->is_rule_active('head_evals',$rulename));
+    next unless ($scanner->{conf}->is_rule_active('body_evals',$rulename));
 
     my $rulecf = $scanstate->{scanner}->{conf}->{uridnsbls}->{$rulename};
     if ($rulecf->{is_rhsbl}) {
@@ -178,7 +184,14 @@ sub parsed_metadata {
   my %domlist = ( );
   foreach my $uri ($scanner->get_uri_list()) {
     my $dom = Mail::SpamAssassin::Util::uri_to_domain($uri);
-    if ($dom) { $domlist{$dom} = 1; }
+    if ($dom) {
+      if (exists $scanner->{main}->{conf}->{uridnsbl_skip_domains}->{$dom}) {
+        dbg("URIDNSBL: found domain $dom in skip list");
+      }
+      else {
+        $domlist{$dom} = 1;
+      }
+    }
   }
 
   # trim down to a limited number - pick randomly
@@ -253,6 +266,12 @@ sub parse_config {
   }
   elsif ($key eq 'uridnsbl_timeout') {
     $opts->{conf}->{uridnsbl_timeout} = $opts->{value};
+    $self->inhibit_further_callbacks(); return 1;
+  }
+  elsif ($key eq 'uridnsbl_skip_domain') {
+    foreach my $domain (split(/\s+/, $opts->{value})) {
+      $opts->{conf}->{uridnsbl_skip_domains}->{lc $domain} = 1;
+    }
     $self->inhibit_further_callbacks(); return 1;
   }
   return 0;
@@ -335,8 +354,7 @@ sub query_domain {
   if ($dom =~ /^\d+\.\d+\.\d+\.\d+$/) { 
     $self->lookup_dnsbl_for_ip ($scanstate, $obj, $dom);
   }
-  else
-  {
+  else {
     # look up the domain in the RHSBL subset
     my $cf = $scanstate->{active_rules_rhsbl};
     foreach my $rulename (keys %{$cf}) {

@@ -98,19 +98,19 @@ use vars qw{
   @site_rules_path
 };
 
-$VERSION = "3.000000";      # update after release (same format as perl $])
-$IS_DEVEL_BUILD = 0;        # change for release versions
+$VERSION = "3.000001";      # update after release (same format as perl $])
+# $IS_DEVEL_BUILD = 1;        # change for release versions
 
 @ISA = qw();
 
 # SUB_VERSION is now just <yyyy>-<mm>-<dd>
-$SUB_VERSION = (split(/\s+/,'$LastChangedDate: 2004-09-13 20:02:01 -0700 (Mon, 13 Sep 2004) $ updated by SVN'))[1];
+$SUB_VERSION = (split(/\s+/,'$LastChangedDate: 2004-10-22 18:40:58 -0700 (Fri, 22 Oct 2004) $ updated by SVN'))[1];
 
 # If you hacked up your SA, you should add a version_tag to you .cf files.
 # This variable should not be modified directly.
 @EXTRA_VERSION = qw();
 if (defined $IS_DEVEL_BUILD && $IS_DEVEL_BUILD) {
-  push(@EXTRA_VERSION, ( 'r' . qw{$LastChangedRevision: 46006 $ updated by SVN}[1] ));
+  push(@EXTRA_VERSION, ( 'r' . qw{$LastChangedRevision: 55343 $ updated by SVN}[1] ));
 }
 
 sub Version { $VERSION=~/^(\d+)\.(\d\d\d)(\d\d\d)$/; join('-', sprintf("%d.%d.%d",$1,$2,$3), @EXTRA_VERSION) }

@@ -41,6 +41,7 @@ use File::Spec;
 use Time::Local;
 use Sys::Hostname (); # don't import hostname() into this namespace!
 use Fcntl;
+use POSIX (); # don't import anything unless we ask explicitly!
 
 ###########################################################################
 
@@ -641,21 +642,31 @@ sub parse_content_type {
   # - only an opening double quote seems to be needed
   # - non-quoted boundaries should be followed by space, ";", or end of line
   # - blank boundaries seem to not work
+  #
   my($boundary) = $ct =~ m!\bboundary\s*=\s*("[^"]+|[^\s";]+(?=[\s;]|$))!i;
 
   # remove double-quotes in boundary (should only be at start and end)
+  #
   $boundary =~ tr/"//d if defined $boundary;
 
   # Parse out the charset and name, if they exist.
+  #
   my($charset) = $ct =~ /\bcharset\s*=\s*["']?(.*?)["']?(?:;|$)/i;
   my($name) = $ct =~ /\b(?:file)?name\s*=\s*["']?(.*?)["']?(?:;|$)/i;
 
-  # Get the type out ...
-  $ct =~ s/;.*$//;                    # strip everything after first semi-colon
-  $ct =~ s@^([^/]+(?:/[^/]*)?).*$@$1@;	# only something/something ...
+  # Get the actual MIME type out ...
+  # Note: the header content may not be whitespace unfolded, so make sure the
+  # REs do /s when appropriate.
+  #
+  $ct =~ s/;.*$//s;                     # strip everything after first semi-colon
+  $ct =~ s@^([^/]+(?:/[^/]*)?).*$@$1@s;	# only something/something ...
   $ct =~ tr/\000-\040\177-\377\042\050\051\054\056\072-\077\100\133-\135//d;    # strip inappropriate chars
   $ct = lc $ct;
 
+  # Now that the header has been parsed, return the requested information.
+  # In scalar context, just the MIME type, in array context the
+  # four important data parts (type, boundary, charset, and filename).
+  #
   return wantarray ? ($ct,$boundary,$charset,$name) : $ct;
 }
 
@@ -813,14 +824,6 @@ sub uri_list_canonify {
 
     # Make a copy so we don't trash the original
     my $nuri = $uri;
-
-    if ($nuri !~ /^[a-z0-9_-]+:/i) {    # no scheme?
-      $nuri = "http://".$nuri;          # assume HTTP, as a web browser would
-      # TODO: should we be sensitive to the type of attribute ("href", etc.)
-      # this appears in?  IMO, no, since as far as I can see it doesn't
-      # make any difference; most browsers/MUAs will assume a default
-      # of HTTP.
-    }
 
     # http:www.foo.biz -> http://www.foo.biz
     $nuri =~ s#^(https?:)/{0,2}#$1//#i;
@@ -1024,14 +1027,58 @@ sub helper_app_pipe_open_unix {
   setuid_to_euid();
   dbg ("setuid: helper proc $$: ruid=$< euid=$>");
 
-  if ($stdinfile) {              # < $tmpfile
-    close STDIN;
-    open (STDIN, "<$stdinfile") or die "cannot open $stdinfile: $!";
+  # now set up the fds.  due to some wierdness, we may have to ensure that we
+  # *really* close the correct fd number, since some other code may have
+  # redirected the meaning of STDOUT/STDIN/STDERR it seems... (bug 3649). use
+  # POSIX::close() for that. it's safe to call close() and POSIX::close() on
+  # the same fd; the latter is a no-op in that case.
+
+  if (!$stdinfile) {              # < $tmpfile
+    # ensure we have *some* kind of fd 0.
+    $stdinfile = "/dev/null";
   }
 
+  my $f = fileno(STDIN);
+  close STDIN;
+
+  # sanity: was that the *real* STDIN? if not, close that one too ;)
+  if ($f != 0) {
+    POSIX::close(0);
+  }
+  open STDIN, "<$stdinfile" or die "cannot open $stdinfile: $!";
+
+  # this should be impossible; if we just closed fd 0, UNIX
+  # fd behaviour dictates that the next fd opened (the new STDIN)
+  # will be the lowest unused fd number, which should be 0.
+  # so die with a useful error if this somehow isn't the case.
+  if (fileno(STDIN) != 0) {
+    die "setuid: oops: fileno(STDIN) [".fileno(STDIN)."] != 0";
+  }
+
+  # ensure STDOUT is open.  since we just created a pipe to ensure this, it has
+  # to be open to that pipe, and if it isn't, something's seriously screwy.
+  # Update: actually, this fails! see bug 3649 comment 37.  For some reason,
+  # fileno(STDOUT) can be 0; possibly because open("-|") didn't change the fh
+  # named STDOUT, instead changing fileno(1) directly.  So this is now
+  # commented.
+  # if (fileno(STDOUT) != 1) {
+  # die "setuid: oops: fileno(STDOUT) [".fileno(STDOUT)."] != 1";
+  # }
+
   if ($duperr2out) {             # 2>&1
+    my $f = fileno(STDERR);
     close STDERR;
+
+    # sanity: was that the *real* STDERR? if not, close that one too ;)
+    if ($f != 2) {
+      POSIX::close(2);
+    }
     open STDERR, ">&STDOUT" or die "dup STDOUT failed: $!";
+
+    # STDERR must be fd 2 to be useful to subprocesses! (bug 3649)
+    if (fileno(STDERR) != 2) {
+      die "setuid: oops: fileno(STDERR) [".fileno(STDERR)."] != 2";
+    }
   }
 
   exec @cmdline;
