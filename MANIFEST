@@ -3,7 +3,7 @@ Makefile.PL
 MANIFEST
 MANIFEST.SKIP
 TODO
-spamassassin
+spamassassin.raw
 spamassassin.cf
 spamassassin.prefs
 sample-nonspam.txt
@@ -26,6 +26,7 @@ lib/Mail/SpamAssassin/ExposedMessage.pm
 lib/Mail/SpamAssassin/Message.pm
 lib/Mail/SpamAssassin/PerMsgStatus.pm
 windows_install.pl
+fixpath.pl
 lib/Mail/SpamAssassin/Reporter.pm
 t/SATest.pm
 t/data/nice/001
@@ -36,3 +37,7 @@ t/test_dir
 lib/Mail/SpamAssassin/Dns.pm
 t/data/spam/002
 t/forged_rcvd.t
+lib/Mail/SpamAssassin/Replier.pm
+t/data/spam/003
+t/stripmarkup.t
+

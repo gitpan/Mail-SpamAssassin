@@ -2,19 +2,24 @@ NAME
     Mail::SpamAssassin - Mail::Audit spam detector plugin
 
 SYNOPSIS
-      my $spamtest = new Mail::SpamAssassin();
       my $mail = Mail::Audit->new();
 
+      my $spamtest = Mail::SpamAssassin->new();
       my $status = $spamtest->check ($mail);
+
       if ($status->is_spam ()) {
         $status->rewrite_mail ();
-        $mail->accept("caught_spam");
+        $mail->accept("spamfolder");
+
+      } else {
+        $mail->accept();            # to default incoming mailbox
       }
       ...
 
 DESCRIPTION
     Mail::SpamAssassin is a Mail::Audit plugin to identify spam
-    using text analysis.
+    using text analysis and several internet-based realtime
+    blacklists.
 
     Using its rule base, it uses a wide range of heuristic tests on
     mail headers and body text to identify "spam", also known as
@@ -25,8 +30,13 @@ DESCRIPTION
     application.
 
     This module implements a Mail::Audit plugin, allowing
-    SpamAssassin to be used in a Mail::Audit filter. In addition, a
-    command-line filter tool is also provided.
+    SpamAssassin to be used in a Mail::Audit filter. If you wish to
+    use a command-line filter tool, try the the spamassassin manpage
+    tool provided.
+
+    SpamAssassin also includes support for reporting spam messages
+    to collaborative filtering databases, such as Vipul's Razor (
+    http://razor.sourceforge.net/ ).
 
 METHODS
     $f = new Mail::SpamAssassin( [ { opt => val, ... } ] )
@@ -49,6 +59,14 @@ METHODS
             configuration, otherwise SpamAssassin will not do
             anything!
 
+            The the spamassassin manpage command-line tool includes
+            quite a lot of logic to find its configuration files in
+            a variety of locations, so see its documentation for
+            more details on how it loads its configuration. (It is
+            assumed that users of the `Mail::SpamAssassin' module
+            will wish to load a ''canned'' configuration, which is
+            why the config-searching logic is not included here.)
+
     $status = $f->check ($mail)
         Check a mail, encapsulated in a `Mail::Audit' object, to
         determine if it is spam or not.
@@ -65,6 +83,19 @@ METHODS
         human-verified spam. This will submit the mail message to
         live, collaborative, spam-blocker databases, allowing other
         users to block this message.
+
+    $f->reply_with_warning ($mail, $replysender)
+        Reply to the sender of a mail, encapsulated in a
+        `Mail::Audit' object, explaining that their message has been
+        added to spam-tracking databases and deleted. To be used in
+        conjunction with `report_as_spam'. The `$replysender'
+        argument should contain an email address to use as the
+        sender of the reply message.
+
+    $text = $f->remove_spamassassin_markup ($mail)
+        Returns the text of the message, with any SpamAssassin-added
+        text (such as the report, or X-Spam-Status headers)
+        stripped.
 
 PREREQUISITES
     `Mail::Audit' `Mail::Internet'

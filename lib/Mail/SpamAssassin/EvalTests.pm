@@ -80,6 +80,25 @@ sub check_for_from_to_equivalence {
 
 ###########################################################################
 
+sub check_for_forged_hotmail_received_headers {
+  my ($self) = @_;
+  my $rcvd = $self->get ('Received');
+
+  # Hotmail formats its received headers like this:
+  # Received: from hotmail.com (f135.law8.hotmail.com [216.33.241.135])
+  # spammers do not ;)
+
+  if ($rcvd =~ /from hotmail.com/
+  	&& $rcvd !~ /from hotmail.com \(\S+\.\S+\.hotmail\.com /)
+  {
+    return 1;
+  } else {
+    return 0;
+  }
+}
+
+###########################################################################
+
 sub check_for_bad_helo {
   my ($self) = @_;
   local ($_);
@@ -95,10 +114,28 @@ sub check_subject_for_lotsa_8bit_chars {
   local ($_);
   $_ = $self->get ('Subject');
 
-  my @highbits = /[\200-\377]/g; my $numhis = $#highbits+1;
+  # include [ and ] because 8-bit posts to mailing lists may not get
+  # hit otherwise. e.g.: Subject: [ILUG] 出售傳真號碼 
+  my @highbits = /[\[\] \200-\377]/g; my $numhis = $#highbits+1;
   my $numlos = length($_) - $numhis;
 
-  ($numlos < $numhis && $numhis > 3);
+  ($numlos <= $numhis && $numhis > 3);
+}
+
+###########################################################################
+
+sub check_from_in_whitelist {
+  my ($self) = @_;
+  local ($_);
+  $_ = $self->get ('From:addr');
+
+  foreach my $addr (@{$self->{conf}->{whitelist_from}}) {
+    if ($_ eq $addr) {
+      return 1;
+    }
+  }
+
+  return 0;
 }
 
 ###########################################################################

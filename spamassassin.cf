@@ -13,6 +13,7 @@
 #   header SYMBOLIC_TEST_NAME	header op pattern
 #	(The operations allowed (so far) are: =~  and: !~)
 #       (header can be 'ALL', which returns the text of all headers)
+#       (note that non-appearing headers are returned as the string 'undef')
 #
 #   header SYMBOLIC_TEST_NAME	eval:name_of_eval_method([args])
 #
@@ -55,6 +56,31 @@ report _SUMMARY_
 report -------------------- End of SpamAssassin results ---------------------
 #      ......................................................................
 
+###########################################################################
+# and now, a template for spam-trap responses.  If the first few lines
+# begin with "Xxxxxx: " where Xxxxxx is a header, they'll be used as
+# headers.
+
+spamtrap Subject: this address is no longer available
+
+spamtrap [this message has been automatically generated]
+spamtrap 
+spamtrap Please note that this address is no longer in use, and nowadays
+spamtrap receives nothing but unsolicited commercial mail.  Accordingly,
+spamtrap any mail sent to it is added to several spam-tracking databases,
+spamtrap then automatically deleted.
+spamtrap
+spamtrap If you genuinely want to contact the owner of the address, please
+spamtrap re-check your contact lists, or search the web, to find their
+spamtrap current e-mail address.
+spamtrap 
+spamtrap The mail you sent is reproduced in full below, for resending to
+spamtrap the correct address.  Sorry for the inconvenience!
+spamtrap 
+spamtrap [-- Signed: the SpamAssassin mail filter]
+spamtrap 
+
+###########################################################################
 
 header NO_REAL_NAME		From =~ /^\s*\<?\S+\@\S+\>?\s*$/
 describe NO_REAL_NAME		From: does not include a real name
@@ -65,34 +91,37 @@ describe FROM_ENDS_IN_NUMS	From: ends in numbers
 header PLING_PLING		Subject =~ /\!+/
 describe PLING_PLING		Subject has lots of exclamation marks
 
-header SUBJ_HAS_UNIQ_ID		Subject =~ /\s+(?:\s{6,}[-a-z0-9]{4,}|[-:\#\(\[]+[-a-zA-Z0-9]{4,}[\]\)]+|[-:\#][-a-zA-Z0-9]{4,})$/
+header SUBJ_HAS_UNIQ_ID		Subject =~ /(?:[-_\s]{7,}[-a-z0-9]{4,}|\s+[-:\#\(\[]+[-a-zA-Z0-9]{4,}[\]\)]+|\s+[-:\#][-a-zA-Z0-9]{4,})$/
 describe SUBJ_HAS_UNIQ_ID	Subject contains a unique ID number
 
 header UNDISC_RECIPS		To =~ /Undisclosed.*Recipients/i
 describe UNDISC_RECIPS		To "Undisclosed.Recipients" or similar
 
-header SUBJ_ALL_CAPS		Subject !~ /[a-z]/
+header SUBJ_ALL_CAPS		Subject =~ /^[A-Z0-9\W]{4,}[^a-z]+$/
 describe SUBJ_ALL_CAPS		Subject is all capitals
 
 header MSGID_HAS_NO_AT		Message-Id !~ /\@/
 describe MSGID_HAS_NO_AT	Message-Id has no @ sign
 
-header INVALID_DATE		Date =~ / AM| PM/
-describe INVALID_DATE		Invalid Date: header
+header INVALID_DATE		Date =~ / AM| PM/i
+describe INVALID_DATE		Invalid Date: header (has AM/PM)
+
+header INVALID_DATE_NO_TZ	Date =~ /^..., .. ... .... ..:..:..$/
+describe INVALID_DATE_NO_TZ	Invalid Date: header (no timezone)
 
 header SUBJ_HAS_Q_MARK		Subject =~ /\?/
 describe SUBJ_HAS_Q_MARK	Subject: ends in a question mark
 
-header ADVERT_CODE		Subject =~ /ADV:/
+header ADVERT_CODE		Subject =~ /(^\s*|\s+)ADV:/i
 describe ADVERT_CODE		Subject: contains advertising tag
 
 header FRIEND_AT_PUBLIC	To =~ /(yourdomain|you|your|public).(com|org|net)/i
 describe FRIEND_AT_PUBLIC	sent to you@you.com or similar
 
-header TO_EMPTY			To =~ /^(?:\@|\s*$)/
+header TO_EMPTY			To =~ /^(?:\@|\s*$)/ [if-unset: UNSET]
 describe TO_EMPTY		To: is empty
 
-header REPLY_TO_EMPTY		Reply-To =~ /^\@/
+header REPLY_TO_EMPTY		Reply-To =~ /^(?:\@|\s*$)/ [if-unset: UNSET]
 describe REPLY_TO_EMPTY		Reply-To: is empty
 
 header X_EM_VER_PRESENT		X-Em-Version =~ /\S/
@@ -122,11 +151,32 @@ describe RCVD_IN_RSS		Received via RSS-listed relay, see http://www.mail-abuse.o
 header RCVD_IN_DUL		eval:check_rbl('dialups.mail-abuse.org.')
 describe RCVD_IN_DUL		Received from a dialup IP, see http://www.mail-abuse.org/dul/
 
+header RCVD_IN_OSIRUSOFT_COM	eval:check_rbl('relays.osirusoft.com.')
+describe RCVD_IN_OSIRUSOFT_COM	Received from an IP in Osirusoft zone, see http://relays.osirusoft.com/
+
 header RCVD_IN_RELAYS_ORDB_ORG	eval:check_rbl('relays.ordb.org.')
 describe RCVD_IN_RELAYS_ORDB_ORG Received via a relay in relays.ordb.org
 
 header FORGED_RCVD_FOUND	ALL =~ /\n(?:Date|Subject|From):.*\nReceived: .*\n\n/s
 describe FORGED_RCVD_FOUND	Possibly-forged 'Received:' header found
+
+header YR_MEMBERSHIP_EXCH	Subject =~ /Your Membership Exchange/
+describe YR_MEMBERSHIP_EXCH	Subject contains 'Your Membership Exchange'
+
+header FROM_FORGED_HOTMAIL	From =~ /^[^"]+\S+\@hotmail\.com/i
+describe FROM_FORGED_HOTMAIL	Forged From: line claiming to be from hotmail.com
+
+header FORGED_HOTMAIL_RCVD	eval:check_for_forged_hotmail_received_headers()
+describe FORGED_HOTMAIL_RCVD	Forged hotmail.com 'Received:' header found
+
+header X_MAILER_GIBBERISH	X-Mailer =~ /^[A-Fa-f0-9\.]{48,}$/
+describe X_MAILER_GIBBERISH	'X-Mailer' line contains gibberish
+
+header X_PRIORITY_HIGH		X-Priority =~ /^1/
+describe X_PRIORITY_HIGH	Sent with 'X-Priority' set to high
+
+header X_MSMAIL_PRIORITY_HIGH	X-Msmail-Priority =~ /^High/
+describe X_MSMAIL_PRIORITY_HIGH	Sent with 'X-Msmail-Priority' set to high
 
 ###########################################################################
 
@@ -154,6 +204,8 @@ body BILL_1618			/Bill.*1618.*TITLE.*III/i
 body S_1618			/S.\s*1618\s*-\s*SECTION\s*301/i
 body SECTION_301		/SECTION\s*301/
 
+body POPLAUNCH			/StealthLaunch PopLaunch.\s/
+
 body NUMERIC_HTTP_ADDR		/http\:\/\/\d+\//i
 body SUPERLONG_LINE		/.{199,}/
 body ASCII_FORM_ENTRY		/[A-Za-z].* _{30,}/
@@ -167,7 +219,8 @@ body BULK_EMAIL			/bulk e-*mail/i
 body DEAR_FRIEND		/Dear Friend/
 body CASHCASHCASH		/\${5,}/
 body CALL_NOW			/CALL NOW/
-body CALL_888			/call.*888-\d+-\d+/i
+body CALL_888			/(?:call|dial).*888-[\dA-Z]+-?[\dA-Z]+/i
+body CALL_1_800			/(?:call|dial).*1-800-[\dA-Z]+-?[\dA-Z]+/i
 body ONLINE_BIZ_OPS		/online business opportunities/i
 body REMOVAL_INSTRUCTIONS	/Removal instructions/i
 body BILLION_DOLLARS		/[BM]ILLION DOLLAR/
@@ -191,6 +244,12 @@ body EXCUSE_6			/to remove yourself/i
 body EXCUSE_7			/you would like to be removed/i
 body EXCUSE_8			/requests to be taken off our mailing list/
 body EXCUSE_9		/If you do.*n.*t want to receive emails on this subject/i
+body EXCUSE_10			/if you (?:wish|care) not to (?:be contacted again|receive any\s*more solicitations)/i
+body EXCUSE_11			/you.*(?:name|mail).*(?:was|were).*list/i
+body EXCUSE_12			/(?:received this e?-?mail|has reached you) in error/i
+body EXCUSE_13			/mail was sent to you because /i
+body EXCUSE_14			/you do not wish to receive further /i
+body EXCUSE_15			/this is not spam/i
 
 body GREEN_EXCUSE_1	/using email instead can significantly reduce this/i
 body GREEN_EXCUSE_2	/the trees, save the planet, use email!/i
@@ -198,11 +257,12 @@ body GREEN_EXCUSE_2	/the trees, save the planet, use email!/i
 body FREE_PRIORITY_MAIL		/FREE PRIORITY MAIL SHIPPING/i
 body LIMITED_TIME_ONLY		/LIMITED TIME ONLY/i
 
-body WE_HONOR_ALL		/We honor ALL remove requests/i
+body WE_HONOR_ALL		/we honou?r(?: all|) remove requests/i
+body FILTERED_BY_WORLDREMOVE	/filtered by WorldRemove/
 
 body PORN_1			/\bbarely\b.*\blegal\b/i
 body PORN_2			/\bwild\b.*\bhardcore\b/i
-body PORN_3			/(?:(?:\bcum|\bteen|\baction\b|\bhot\b).*){2,}/i
+body PORN_3			/(?:(?:\bcum|\bteen|\baction\b|\bhot\b|\bhottest\b).*){2,}/i
 
 body TRACKER_ID			/^\s*\W{4,} \w{10,} \W{4,}\s*$/
 
@@ -218,16 +278,36 @@ body INCREASE_SALES		/INCREASE SALES/i
 # in the middle of a HTML "attribute=value" pair.
 
 full CLICK_HERE_LINK		/click here.{0,100}<\/a>/is
+full CLICK_BELOW		/click below/is
+
 full A_HREF_TO_IP		/href[3D=\s\"\']*http:\/\/\d+\.\d+\.\d+\.\d+\:?\d*\//is
+describe A_HREF_TO_IP		Link to an IP-address instead of a named host
+
+full A_HREF_TO_REMOVE		/href[3D=\s\"\']*\S+(?:unsubscribe|remove)/i
+describe A_HREF_TO_REMOVE	Link to a URL containing "remove"
+
 full MAILTO_LINK		/=[3D=\s"']*mailto:/is
 full MAILTO_WITH_SUBJ_REMOVE	/mailto:\S+\?subject=[3D=\s"']*remove/is
 full MAILTO_WITH_SUBJ		/mailto:\S+\?subject=/is
 full FORM_W_MAILTO_ACTION	/action=[3D=\s"']*mailto:/is
 full AOL_USERS_LINK		/AOL\s+Users\s+Click\s+Here/is
 
+full WEB_BUGS			/<\s*img\s[^>]*src[^>]+\?/i
+describe WEB_BUGS		Image tag with an ID code to identify you
+
 ###########################################################################
 # Compensation for common false positives.
 
 body BALANCE_FOR_LONG		eval:check_for_very_long_text()
 describe BALANCE_FOR_LONG	Message text is over 500 lines long
+
+header USER_IN_WHITELIST	eval:check_from_in_whitelist()
+describe USER_IN_WHITELIST	From: address is in the user's white-list
+
+###########################################################################
+# not quite spam, but dangerous/irritating nonetheless. Sircam worms etc.
+
+full SIRCAM_SIGNATURE		/Content-Disposition: attachment;\s+filename=..+\.\S\S\S\.(bat|com|lnk|pif)./s
+describe SIRCAM_SIGNATURE	SECURITY: message contains the Sircam worm
+
 

@@ -208,8 +208,14 @@ sub rewrite_as_spam {
   $self->{msg}->put_header ("X-Spam-Flag", 'YES');
 
   # defang HTML mail; change it to text-only.
-  $self->{msg}->replace_header ("Content-Type", "text/plain");
-  $self->{msg}->delete_header ("Content-type"); 	# just in case
+  my $ct = $self->{msg}->get_header ("Content-Type");
+  $ct ||= $self->{msg}->get_header ("Content-type");
+
+  if (defined $ct && $ct ne '' && $ct ne 'text/plain') {
+    $self->{msg}->replace_header ("Content-Type", "text/plain");
+    $self->{msg}->delete_header ("Content-type"); 	# just in case
+    $self->{msg}->replace_header ("X-Spam-Prev-Content-Type", $ct);
+  }
 
   my $lines = $self->{msg}->get_body();
   unshift (@{$lines}, split (/$/, $self->{report}));
@@ -296,22 +302,33 @@ sub get_body_text {
 ###########################################################################
 
 sub get {
-  my ($self, $hdrname) = @_;
+  my ($self, $hdrname, $defval) = @_;
   local ($_);
+
 
   if ($hdrname eq 'ALL') { return $self->{msg}->get_all_headers(); }
 
   my $getaddr = 0;
   if ($hdrname =~ s/:addr$//) { $getaddr = 1; }
 
-  $_ = join ("\n", $self->{msg}->get_header ($hdrname));
+  my @hdrs = $self->{msg}->get_header ($hdrname);
+  if ($#hdrs >= 0) {
+    $_ = join ("\n", @hdrs);
+  } else {
+    $_ = undef;
+  }
+
   if ($hdrname eq 'Message-Id' && (!defined($_) || $_ eq '')) {
     $_ = join ("\n", $self->{msg}->get_header ('Message-ID'));	# news-ish
   }
-  $_ ||= '';
+
+  if (!defined $_) {
+    $defval ||= '';
+    $_ = $defval;
+  }
 
   if ($getaddr) {
-    s/^.*?<.+>\s*$/$1/g			# Foo Blah <jm@foo>
+    s/^.*?<(.+)>\s*$/$1/g			# Foo Blah <jm@foo>
     	or s/^(.+)\s\(.*?\)\s*$/$1/g;	# jm@foo (Foo Blah)
   }
 
@@ -331,10 +348,13 @@ sub do_head_tests {
     my $hit = 0;
     $self->clear_test_state();
 
+    my $def = '';
     my ($hdrname, $testtype, $pat) = 
     		$rule =~ /^\s*(\S+)\s*(\=|\!)\~\s*(\S.*?\S)\s*$/;
 
-    $_ = $self->get ($hdrname);
+    if ($pat =~ s/\s+\[if-unset:\s+(.+)\]\s*$//i) { $def = $1; }
+    $_ = $self->get ($hdrname, $def);
+    # warn "JMD $pat $def $hdrname $_\n";
 
     if (!eval 'if ($_ '.$testtype.'~ '.$pat.') { $hit = 1; } 1;') {
       warn "Failed to run $rulename SpamAssassin test, skipping:\n".

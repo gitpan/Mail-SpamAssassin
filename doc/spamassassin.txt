@@ -8,13 +8,18 @@ SYNOPSIS
       -P               pipe message through, instead of delivering to mail spool
       -t               only testing
       -r               report this message as verified spam
+      -w fromaddr      send a warning mail back to the sender of the message,
+                       notifying them that their message has been marked as spam
+                       (only useful if -r is used)
+      -l filename      Log all mail messages to a mbox-format file
+      -d               Remove SpamAssassin reports from a mail message
       -c config        configuration file
       -p prefs         user preferences file
       -D               produce diagnostic output
 
 DESCRIPTION
     SpamAssassin is a mail filter to identify spam using text
-    analysis.
+    analysis and several internet-based realtime blacklists.
 
     Using its rule base, it uses a wide range of heuristic tests on
     mail headers and body text to identify "spam", also known as
@@ -30,6 +35,17 @@ DESCRIPTION
     The default tagging operations that take place are detailed in
     the the TAGGING manpage section below.
 
+CONFIGURATION FILES
+    The rule base, text templates, and rule description text are
+    loaded from the configuration file. The default configuration
+    file, if `-c' is not specified, is
+    `$Config{installsitelib}/spamassassin.cf'.
+
+    The user preferences (such as scores to attach to each rule),
+    are loaded from the file specified in the `-p' argument. If this
+    is not specified, `~/.spamassassin.cf' is used if it exists,
+    otherwise `$Config{installsitelib}/spamassassin.prefs' is used.
+
 OPTIONS
     -P  Normally SpamAssassin will write the rewritten message to the
         mail spool by default. The `-P' parameter will cause it to
@@ -44,15 +60,28 @@ OPTIONS
         If the message contains SpamAssassin markup, this will be
         stripped out automatically before submission.
 
+    -w fromaddr
+        This flag is only useful in conjunction with `-r'. It will
+        send a reply mail to the sender of the tested mail,
+        notifying them that their message has been trapped as spam,
+        from the address supplied in `fromaddr'. See the the section
+        on "SPAM TRAPPING" section below for more details.
+
+    -l filename
+        Log all mail messages that pass through the filter, to an
+        mbox-format file named by `filename'. Handy for use with `-
+        r' and `-w'.
+
+    -d  Remove SpamAssassin markup (the "SpamAssassin results" report,
+        X-Spam-Status headers, etc.) from the mail message. The
+        resulting message, which will be identical to the original,
+        pre-SpamAssassin input, will be output to stdout.
+
     -c config
-        Read configuration from `config'. The default configuration
-        file, if this is not specified, is
-        `$Config{installsitelib}/spamassassin.cf'.
+        Read configuration from `config'.
 
     -p prefs
-        Read user score preferences from `prefs'. The default
-        preferences file, if this is not specified, is
-        `~/.spamassassin.cf'.
+        Read user score preferences from `prefs'.
 
 TAGGING FOR SPAM MAILS
     The modifications made are as follows:
@@ -79,6 +108,32 @@ TAGGING FOR NON-SPAM MAILS
     X-Spam-Status: header
         A string, `No, hits=nn required=nn' is set in this header to
         reflect the filter status.
+
+SPAM TRAPPING
+    Quite often, if you've been on the internet for a while, you'll
+    have accumulated a few old email accounts that nowadays get
+    nothing but spam.
+
+    SpamAssassin lets you set them up as aliases, as follows:
+
+    spamtrap1: "| /path/to/spamassassin -r -w spamtrap1"
+    This will add any incoming mail messages straight into spam-
+    tracking databases, such as Vipul's Razor; send an explanatory
+    reply message to the sender, from the `spamtrap1' address; then
+    drop the mail into the bit-bucket.
+
+    The explanatory reply text is taken from the SpamAssassin
+    configuration file, where it is stored in the `spamtrap' lines.
+
+    If you want to keep a copy of the mails, use something like
+    this:
+
+    spamtrap1: "| /path/to/spamassassin -r -w spamtrap1 -l /var/spam/caught"
+    It is suggested you familiarise yourself with how MTAs run
+    programs specified in aliases, if you plan to do this; for one
+    thing, `spamassassin' will not run under your user id in this
+    case. If you are nervous about this, create a user for
+    spamtrapping, and set up spamassassin in it's `.forward' file.
 
 INSTALLATION
     The spamassassin command is part of the Mail::SpamAssassin Perl

@@ -13,9 +13,11 @@
 	<LI><A HREF="#NAME">NAME</A>
 	<LI><A HREF="#SYNOPSIS">SYNOPSIS</A>
 	<LI><A HREF="#DESCRIPTION">DESCRIPTION</A>
+	<LI><A HREF="#CONFIGURATION_FILES">CONFIGURATION FILES</A>
 	<LI><A HREF="#OPTIONS">OPTIONS</A>
 	<LI><A HREF="#TAGGING_FOR_SPAM_MAILS">TAGGING FOR SPAM MAILS</A>
 	<LI><A HREF="#TAGGING_FOR_NON_SPAM_MAILS">TAGGING FOR NON-SPAM MAILS</A>
+	<LI><A HREF="#SPAM_TRAPPING">SPAM TRAPPING</A>
 	<LI><A HREF="#INSTALLATION">INSTALLATION</A>
 	<LI><A HREF="#ENVIRONMENT">ENVIRONMENT</A>
 	<LI><A HREF="#SEE_ALSO">SEE ALSO</A>
@@ -42,6 +44,11 @@ spamassassin - mail filter to identify spam using text analysis
 <PRE>  -P               pipe message through, instead of delivering to mail spool
   -t               only testing
   -r               report this message as verified spam
+  -w fromaddr      send a warning mail back to the sender of the message,
+                   notifying them that their message has been marked as spam
+                   (only useful if -r is used)
+  -l filename      Log all mail messages to a mbox-format file
+  -d               Remove SpamAssassin reports from a mail message
   -c config        configuration file
   -p prefs         user preferences file
   -D               produce diagnostic output
@@ -50,7 +57,8 @@ spamassassin - mail filter to identify spam using text analysis
 <HR>
 <H1><A NAME="DESCRIPTION">DESCRIPTION</A></H1>
 <P>
-SpamAssassin is a mail filter to identify spam using text analysis.
+SpamAssassin is a mail filter to identify spam using text analysis and
+several internet-based realtime blacklists.
 
 <P>
 Using its rule base, it uses a wide range of heuristic tests on mail
@@ -69,6 +77,19 @@ HREF="http://razor.sourceforge.net/">http://razor.sourceforge.net/</A> ).
 <P>
 The default tagging operations that take place are detailed in the <EM>TAGGING</EM>
 section below.
+
+<P>
+<HR>
+<H1><A NAME="CONFIGURATION_FILES">CONFIGURATION FILES</A></H1>
+<P>
+The rule base, text templates, and rule description text are loaded from
+the configuration file. The default configuration file, if <CODE>-c</CODE> is not specified, is <CODE>$Config{installsitelib}/spamassassin.cf</CODE>.
+
+<P>
+The user preferences (such as scores to attach to each rule), are loaded
+from the file specified in the <CODE>-p</CODE> argument. If this is not specified,
+<CODE>~/.spamassassin.cf</CODE> is used if it exists, otherwise
+<CODE>$Config{installsitelib}/spamassassin.prefs</CODE> is used.
 
 <P>
 <HR>
@@ -94,13 +115,31 @@ read from STDIN to various spam-blocker databases, such as Vipul's Razor (
 If the message contains SpamAssassin markup, this will be stripped out
 automatically before submission.
 
+<DT><STRONG><A NAME="item__w">-w fromaddr</A></STRONG><DD>
+<P>
+This flag is only useful in conjunction with <CODE>-r</CODE>. It will send a reply mail to the sender of the tested mail, notifying
+them that their message has been trapped as spam, from the address supplied
+in <CODE>fromaddr</CODE>. See the <A HREF="#SPAM_TRAPPING">SPAM TRAPPING</A> section below for more details.
+
+<DT><STRONG><A NAME="item__l">-l filename</A></STRONG><DD>
+<P>
+Log all mail messages that pass through the filter, to an mbox-format file
+named by <CODE>filename</CODE>. Handy for use with <CODE>-r</CODE> and <CODE>-w</CODE>.
+
+<DT><STRONG><A NAME="item__d">-d</A></STRONG><DD>
+<P>
+Remove SpamAssassin markup (the ``SpamAssassin results'' report,
+X-Spam-Status headers, etc.) from the mail message. The resulting message,
+which will be identical to the original, pre-SpamAssassin input, will be
+output to stdout.
+
 <DT><STRONG><A NAME="item__c">-c config</A></STRONG><DD>
 <P>
-Read configuration from <CODE>config</CODE>. The default configuration file, if this is not specified, is <CODE>$Config{installsitelib}/spamassassin.cf</CODE>.
+Read configuration from <CODE>config</CODE>.
 
 <DT><STRONG><A NAME="item__p">-p prefs</A></STRONG><DD>
 <P>
-Read user score preferences from <CODE>prefs</CODE>. The default preferences file, if this is not specified, is <CODE>~/.spamassassin.cf</CODE>.
+Read user score preferences from <CODE>prefs</CODE>.
 
 </DL>
 <P>
@@ -141,6 +180,39 @@ The SpamAssassin report is added to top of the mail message body.
 A string, <CODE>No, hits=nn required=nn</CODE> is set in this header to reflect the filter status.
 
 </DL>
+<P>
+<HR>
+<H1><A NAME="SPAM_TRAPPING">SPAM TRAPPING</A></H1>
+<P>
+Quite often, if you've been on the internet for a while, you'll have
+accumulated a few old email accounts that nowadays get nothing but spam.
+
+<P>
+SpamAssassin lets you set them up as aliases, as follows:
+
+<DL>
+<DT><STRONG><A NAME="item_spamtrap1">spamtrap1: &quot;| /path/to/spamassassin -r -w spamtrap1&quot;</A></STRONG><DD>
+</DL>
+<P>
+This will add any incoming mail messages straight into spam-tracking
+databases, such as Vipul's Razor; send an explanatory reply message to the
+sender, from the <A HREF="#item_spamtrap1">spamtrap1</A> address; then drop the mail into the bit-bucket.
+
+<P>
+The explanatory reply text is taken from the SpamAssassin configuration
+file, where it is stored in the <CODE>spamtrap</CODE> lines.
+
+<P>
+If you want to keep a copy of the mails, use something like this:
+
+<DL>
+<DT><STRONG>spamtrap1: &quot;| /path/to/spamassassin -r -w spamtrap1 -l /var/spam/caught&quot;</STRONG><DD>
+</DL>
+<P>
+It is suggested you familiarise yourself with how MTAs run programs
+specified in aliases, if you plan to do this; for one thing, <CODE>spamassassin</CODE> will not run under your user id in this case. If you are nervous about
+this, create a user for spamtrapping, and set up spamassassin in it's <CODE>.forward</CODE> file.
+
 <P>
 <HR>
 <H1><A NAME="INSTALLATION">INSTALLATION</A></H1>

@@ -34,14 +34,20 @@ Mail::SpamAssassin - Mail::Audit spam detector plugin
 <HR>
 <H1><A NAME="SYNOPSIS">SYNOPSIS</A></H1>
 <P>
-<PRE>  my $spamtest = new Mail::SpamAssassin();
-  my $mail = Mail::Audit-&gt;new();
+<PRE>  my $mail = Mail::Audit-&gt;new();
 </PRE>
 <P>
-<PRE>  my $status = $spamtest-&gt;check ($mail);
-  if ($status-&gt;is_spam ()) {
+<PRE>  my $spamtest = Mail::SpamAssassin-&gt;new();
+  my $status = $spamtest-&gt;check ($mail);
+</PRE>
+<P>
+<PRE>  if ($status-&gt;is_spam ()) {
     $status-&gt;rewrite_mail ();
-    $mail-&gt;accept(&quot;caught_spam&quot;);
+    $mail-&gt;accept(&quot;spamfolder&quot;);
+</PRE>
+<P>
+<PRE>  } else {
+    $mail-&gt;accept();            # to default incoming mailbox
   }
   ...
 </PRE>
@@ -50,7 +56,7 @@ Mail::SpamAssassin - Mail::Audit spam detector plugin
 <H1><A NAME="DESCRIPTION">DESCRIPTION</A></H1>
 <P>
 Mail::SpamAssassin is a Mail::Audit plugin to identify spam using text
-analysis.
+analysis and several internet-based realtime blacklists.
 
 <P>
 Using its rule base, it uses a wide range of heuristic tests on mail
@@ -63,8 +69,13 @@ filtering using the user's own mail user-agent application.
 
 <P>
 This module implements a Mail::Audit plugin, allowing SpamAssassin to be
-used in a Mail::Audit filter. In addition, a command-line filter tool is
-also provided.
+used in a Mail::Audit filter. If you wish to use a command-line filter
+tool, try the <EM>spamassassin</EM> tool provided.
+
+<P>
+SpamAssassin also includes support for reporting spam messages to
+collaborative filtering databases, such as Vipul's Razor ( <A
+HREF="http://razor.sourceforge.net/">http://razor.sourceforge.net/</A> ).
 
 <P>
 <HR>
@@ -92,6 +103,12 @@ but note that at least one of <A HREF="#item_rules_filename">rules_filename</A>,
 <A HREF="#item_config_text">config_text</A> must be specified to provide configuration, otherwise SpamAssassin will not
 do anything!
 
+<P>
+The <EM>spamassassin</EM> command-line tool includes quite a lot of logic to find its configuration
+files in a variety of locations, so see its documentation for more details
+on how it loads its configuration. (It is assumed that users of the <CODE>Mail::SpamAssassin</CODE> module will wish to load a ''canned'' configuration, which is why the
+config-searching logic is not included here.)
+
 </DL>
 <DT><STRONG><A NAME="item__status">$status = $f-&gt;check ($mail)</A></STRONG><DD>
 <P>
@@ -110,6 +127,18 @@ object is a ``factory''.
 Report a mail, encapsulated in a <CODE>Mail::Audit</CODE> object, as human-verified spam. This will submit the mail message to live,
 collaborative, spam-blocker databases, allowing other users to block this
 message.
+
+<DT><STRONG><A NAME="item__f_reply_with_warning">$f-&gt;reply_with_warning ($mail, $replysender)</A></STRONG><DD>
+<P>
+Reply to the sender of a mail, encapsulated in a <CODE>Mail::Audit</CODE> object, explaining that their message has been added to spam-tracking
+databases and deleted. To be used in conjunction with <CODE>report_as_spam</CODE>. The
+<CODE>$replysender</CODE> argument should contain an email address to use as the sender of the reply
+message.
+
+<DT><STRONG><A NAME="item__text">$text = $f-&gt;remove_spamassassin_markup ($mail)</A></STRONG><DD>
+<P>
+Returns the text of the message, with any SpamAssassin-added text (such as
+the report, or X-Spam-Status headers) stripped.
 
 </DL>
 <P>
