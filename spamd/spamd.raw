@@ -233,7 +233,7 @@ $opt{'daemonize'} and daemonize();
 # support non-root use (after we bind to the port)
 my $setuid_to_user = 0;
 if ($opt{'username'}) {
-  my $uuid = getpwnam($opt{'username'});
+  my ($uuid,$ugid) = (getpwnam($opt{'username'}))[2,3];
   if (!defined $uuid || $uuid == 0) {
     die "fatal: cannot run as nonexistent user or root with -u option\n";
   }
@@ -243,7 +243,12 @@ if ($opt{'username'}) {
     chown $uuid, -1, $opt{'pidfile'}
       || die "fatal: could not chown '$opt{'pidfile'}' to uid $uuid\n";
   }
+  
+  # Change GID
+  $) = "$ugid $ugid"; # effective gid
+  $( = $ugid; # real gid
 
+  # Change UID
   $> = $uuid;   # effective uid
   $< = $uuid;   # real uid. we now cannot setuid anymore
   if ($> != $uuid and $> != ($uuid-2**32)) {
@@ -467,8 +472,9 @@ sub check {
         }
         logmsg "Still running as root: user not specified with -u, ".
 	     "not found, or set to root.  Fall back to nobody.";
-        my $uid = getpwnam('nobody');
-        $> = $uid;
+        my ($uid,$gid) = (getpwnam('nobody'))[2,3];
+	$) = "$gid $gid"; # eGID
+        $> = $uid; # eUID
         if ( !defined($uid) || ($> != $uid and $> != ($uid-2**32))) {
             logmsg "fatal: setuid to nobody failed";
 	    die;
@@ -540,7 +546,7 @@ sub check {
         # Build the message to send back and measure it
         my $msg_resp = join '',$mail->header,"\n",@{$mail->body};
         my $msg_resp_length = length($msg_resp);
-        if($version >= 1.3) # Spamc protocol 1.2 means it takes multi hdrs
+        if($version >= 1.3) # Spamc protocol 1.3 means multi hdrs are OK
 	{
 	    print $client "SPAMD/1.1 $resphash{$resp} $resp\r\n",
 	   		"Content-length: $msg_resp_length\r\n",
@@ -563,7 +569,7 @@ sub check {
       print $client "SPAMD/1.1 $resphash{$resp} $resp\r\n"; 
 
       if($method eq "CHECK") {
-	    print $client "$spamhdr\r\n\r\n";
+        print $client "$spamhdr\r\n\r\n";
       }
       else {
         my $msg_resp = '';
@@ -571,21 +577,24 @@ sub check {
         if($method eq "REPORT" or
 		  ($method eq "REPORT_IFSPAM" and $status->is_spam))
 	{
-	    $msg_resp = "$msg_score/$msg_threshold\r\n" . 
+          $msg_resp = "$msg_score/$msg_threshold\r\n" . 
 				$status->{test_logs};
         }
         elsif($method eq "SYMBOLS") {
           $msg_resp = $status->get_names_of_tests_hit;
         }
+        else {
+          die "unknown method $method";
+        }
 
-        if($version >= 1.3) # Spamc protocol 1.2 means it takes multi hdrs
+        if($version >= 1.3) # Spamc protocol > 1.2 means multi hdrs are OK
 	{
 	    printf $client "Content-length: %d\r\n%s\r\n\r\n%s",
 			length($msg_resp), $spamhdr, $msg_resp;
         }
 	else {
-	    printf $client "Content-length: %d\r\n\r\n%s",
-			length($msg_resp), $msg_resp;
+	    printf $client "%s\r\n\r\n%s",
+			$spamhdr, $msg_resp;
 	}
       }
     }
@@ -694,7 +703,8 @@ sub handle_user
     }
 
     if ($setuid_to_user) {
-	$> = $uid;
+	$) = "$gid $gid"; # change eGID
+	$> = $uid; # change eUID
         if ( !defined($uid) || ($> != $uid and $> != ($uid-2**32))) {
             logmsg "fatal: setuid to $username failed";
 	    die;		# make it fatal to avoid security breaches
@@ -820,7 +830,8 @@ sub handle_user_setuid_with_sql
     }
 
     if ($setuid_to_user) {
-       $> = $uid;
+       $) = "$gid $gid"; # change eGID
+       $> = $uid; # change eUID
        if ( !defined($uid) || ($> != $uid and $> != ($uid-2**32))) {
            logmsg "fatal: setuid to $username failed";
           die;         # make it fatal to avoid security breaches

@@ -1,3 +1,54 @@
+2003-02-20 13:12  jmason
+
+	* lib/Mail/SpamAssassin.pm: getting ready for 2.50 release
+
+2003-02-20 13:10  jmason
+
+	* rules/20_uri_tests.cf: Dan's fix for bug 1501: WEIRD_PORT
+	misfiring on port 443 for https, which is the https port
+
+2003-02-20 13:05  jmason
+
+	* BUGS, t/razor.t: updated with 2 new known bugs
+
+2003-02-20 13:01  jmason
+
+	* BUGS, MANIFEST, MANIFEST.SKIP, MailAudit.patch,
+	masses/RUNME.TWOSTEP, masses/craig-evolve.c.ALTIVEC,
+	rules/40_spam_phrases.cf, t/reportheader.t, t/spamd_report.t,
+	t/data/nice/001, wordfreqs/.cvsignore, wordfreqs/README,
+	wordfreqs/RUNME, wordfreqs/RUNME.DOGMA, wordfreqs/RUNME.SONIC,
+	wordfreqs/join-and-settle-phrases, wordfreqs/mass-phrase-freq,
+	wordfreqs/mass-phrase-freq-for-jm, wordfreqs/settle-phrases:
+	removed more obsolete code from CVS and MANIFEST
+
+2003-02-20 12:23  jmason
+
+	* sql/: README, spamassassin.sql: changed suggested username length
+	limit to 100 chars in SQL setup, so that virtual domains can work
+	easily
+
+2003-02-20 11:22  quinlan
+
+	* MANIFEST: sort
+
+2003-02-20 11:14  quinlan
+
+	* MANIFEST: adding stuff to MANIFEST
+
+2003-02-20 10:55  msquadrat
+
+	* .cvsignore, masses/.cvsignore, qmail/.cvsignore, t/.cvsignore:
+	Updating cvsignore
+
+2003-02-20 05:04  felicity
+
+	* .cvsignore: we merged the sa-learn* scripts...
+
+2003-02-20 04:50  quinlan
+
+	* MANIFEST: remove duplicated triplets.txt file
+
 2003-02-19 21:48  msquadrat
 
 	* Makefile.PL: remove the spamassassin.conf manpage again: it's a
