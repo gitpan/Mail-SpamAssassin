@@ -73,20 +73,20 @@ header RCVD_IN_SORBS_HTTP	eval:check_rbl_sub('sorbs', '127.0.0.2')
 describe RCVD_IN_SORBS_HTTP	SORBS: sender is open HTTP proxy server
 tflags RCVD_IN_SORBS_HTTP	net
 
-header RCVD_IN_SORBS_MISC	eval:check_rbl_sub('sorbs', '127.0.0.3')
-describe RCVD_IN_SORBS_MISC	SORBS: sender is open proxy server
-tflags RCVD_IN_SORBS_MISC	net
-
-header RCVD_IN_SORBS_SMTP	eval:check_rbl_sub('sorbs', '127.0.0.4')
-describe RCVD_IN_SORBS_SMTP	SORBS: sender is open SMTP relay
-tflags RCVD_IN_SORBS_SMTP	net
-
-header RCVD_IN_SORBS_SOCKS	eval:check_rbl_sub('sorbs', '127.0.0.5')
+header RCVD_IN_SORBS_SOCKS	eval:check_rbl_sub('sorbs', '127.0.0.3')
 describe RCVD_IN_SORBS_SOCKS	SORBS: sender is open SOCKS proxy server
 tflags RCVD_IN_SORBS_SOCKS	net
 
+header RCVD_IN_SORBS_MISC	eval:check_rbl_sub('sorbs', '127.0.0.4')
+describe RCVD_IN_SORBS_MISC	SORBS: sender is open proxy server
+tflags RCVD_IN_SORBS_MISC	net
+
+header RCVD_IN_SORBS_SMTP	eval:check_rbl_sub('sorbs', '127.0.0.5')
+describe RCVD_IN_SORBS_SMTP	SORBS: sender is open SMTP relay
+tflags RCVD_IN_SORBS_SMTP	net
+
 header RCVD_IN_SORBS_SPAM	eval:check_rbl_sub('sorbs', '127.0.0.6')
-describe RCVD_IN_SORBS_SPAM	SORBS: sender is a spam source
+describe RCVD_IN_SORBS_SPAM	SORBS: spam source or spam-supporting ISP
 tflags RCVD_IN_SORBS_SPAM	net
 
 header RCVD_IN_SORBS_WEB	eval:check_rbl_sub('sorbs', '127.0.0.7')
@@ -100,6 +100,12 @@ tflags RCVD_IN_SORBS_BLOCK	net
 header RCVD_IN_SORBS_ZOMBIE	eval:check_rbl_sub('sorbs', '127.0.0.9')
 describe RCVD_IN_SORBS_ZOMBIE	SORBS: sender is on a hijacked network
 tflags RCVD_IN_SORBS_ZOMBIE	net
+
+# Dynablock used to be at easynet.nl; closed down there, but reopened
+# by SORBS.
+header RCVD_IN_DYNABLOCK        eval:check_rbl('sorbs-notfirsthop', 'dnsbl.sorbs.net.', '127.0.0.10')
+describe RCVD_IN_DYNABLOCK      Sent directly from dynamic IP address
+tflags RCVD_IN_DYNABLOCK        net
 
 # ---------------------------------------------------------------------------
 # OPM (recommended, supports TXT queries, but A queries needed for sub-tests)
@@ -181,12 +187,6 @@ tflags RCVD_IN_BSP_OTHER	net nice
 # test.senderbase.org for everything else (until SenderBase is in production)
 #header __SENDERBASE eval:check_rbl_txt('senderbase', 'sa.senderbase.org.')
 #tflags __SENDERBASE net
-
-# DynaBlocker: block SMTP connections from dynamic dial-up IP ranges.
-# URL: http://basic.wirehub.nl/dynablocker.html
-header RCVD_IN_DYNABLOCK	eval:check_rbl_txt('dynablock-notfirsthop', 'dynablock.easynet.nl.')
-describe RCVD_IN_DYNABLOCK	Sent directly from dynamic IP address
-tflags RCVD_IN_DYNABLOCK	net
 
 # ---------------------------------------------------------------------------
 # NOTE: donation tests, see README file for details

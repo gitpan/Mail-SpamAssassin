@@ -88,6 +88,7 @@ Mail::SpamAssassin::Util::am_running_in_taint_mode();
 
 # First untaint the environment -- need to do this before Cwd::cwd(), else
 # it will croak.
+Mail::SpamAssassin::Util::clean_path_in_taint_mode();
 Mail::SpamAssassin::Util::untaint_var(\%ENV);
 
 # The zeroth argument will be replaced in daemonize().
@@ -426,8 +427,6 @@ $opt{'auto-whitelist'} and eval
   $spamtest->set_persistent_address_list_factory ($addrlistfactory);
 };
 
-Mail::SpamAssassin::Util::clean_path_in_taint_mode();
-
 # restart handling.  do this here before compile_now() as that may
 # take a while.
 my $got_sighup;
@@ -547,6 +546,7 @@ while (1) {
       my $name = gethostbyaddr($ip, AF_INET);
 
       $ip = inet_ntoa($ip);
+      $name ||= $ip;
       if (ip_is_allowed($ip)) {
         logmsg("connection from $name [$ip] at port $port");
       } else {
@@ -614,14 +614,21 @@ sub check {
     {
 	while(1)
 	{
-	    $_ = $client->getline;
-	    if(!defined $_)
+	    my $line = $client->getline;
+	    if(!defined $line)
 	    {
 		protocol_error ("(EOF during headers)");
 		return 1;
 	    }
+            $line =~ s/\r\n$//;
+            last unless $line;
 
-	    if (/^\r\n/s) { last; }
+            my($header, $value) = split(/: /, $line, 2);
+            if (!defined $value)
+            {
+                protocol_error("(header not in 'Name: value' format)");
+                return 1;
+            }
 
 	    # We'll run handle user unless we've been told not
 	    # to process per-user config files.  Otherwise
@@ -632,8 +639,14 @@ sub check {
 	    # only need to do the SQL lookup if $opt{'sql-config'} IS
 	    # true.  (I got that wrong the first time.)
 
-	    if (/^User: (.*)\r\n/)
+	    if ($header eq 'User')
 	    {
+                if ($value !~ /^([\x20-\xFF]+)$/)
+                {
+		    protocol_error ("(User header contains control chars)");
+                    return 1;
+                }
+
 		$current_user = $1;
 		auth_ident($current_user) if $opt{'auth-ident'};
 
@@ -654,7 +667,13 @@ sub check {
 		  }
 		}
 	    }
-	    if (/^Content-length: ([0-9]*)\r\n/i) {
+	    elsif ($header eq 'Content-length')
+            {
+                if ($value !~ /^(\d+)$/)
+                {
+		    protocol_error ("(Content-Length contains non-numeric bytes)");
+                    return 1;
+                }
 		$expected_length = $1;
 	    }
 	}
@@ -701,7 +720,7 @@ sub check {
         }
         push(@msglines, $_);
         $actual_length += length;
-        last if ($actual_length == $expected_length);
+        last if (defined($expected_length) && ($actual_length == $expected_length));
     }
 
     $msgid        ||= "(unknown)";
