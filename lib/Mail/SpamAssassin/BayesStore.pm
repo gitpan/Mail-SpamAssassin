@@ -305,6 +305,12 @@ sub expire_old_tokens_trapped {
   if (!$last || $last =~ /\D/) { $last = 0; }
   my $current = $self->scan_count_get();
 
+  # if $current is > 65535, we need to reset the atimes to 0
+  if ( $current > 65535 ) {
+    dbg("bayes: Current scan count $current > 65535, resetting atimes to 0");
+    $too_old = $last = 0;
+  }
+
   # since DB_File will not shrink a database (!!), we need to *create*
   # a new one instead.
   my $main = $self->{bayes}->{main};
@@ -335,6 +341,9 @@ sub expire_old_tokens_trapped {
     if ($atime > $current) {
       $atime = $last;
     }
+    elsif ( $current > 65535 ) { # reset atime to 0
+      $atime = 0;
+    }
 
     if ($atime < $too_old) {
       push (@deleted_toks, [ $tok, $ts, $th, $atime ]);
@@ -360,25 +369,46 @@ sub expire_old_tokens_trapped {
   # some of the toks we deleted.
   my $reprieved = 0;
 
-  while ($kept+$reprieved < $self->{expiry_min_db_size} && $deleted-$reprieved > 0) {
-    my $deld = shift @deleted_toks;
-    last unless defined $deld;
+  # do we need to reprieve any tokens?
+  if ( $kept < $self->{expiry_min_db_size} ) {
+    # sort the deleted tokens so the most recent ones are at the end of the array
+    @deleted_toks = sort { $a->[3] <=> $b->[3] } @deleted_toks;
+  
+    # Go through until the DB is at least min_db_size, and there are still tokens to reprieve
+    while ($kept+$reprieved < $self->{expiry_min_db_size} && $#deleted_toks > -1) {
+      my $oatime;
 
-    my ($tok, $ts, $th, $atime) = @{$deld};
-    next unless (defined $tok && defined $ts && defined $th);
+      # reprieve all tokens with a given atime at once
+      while ( $#deleted_toks > -1 && (!defined $oatime || $deleted_toks[$#deleted_toks]->[3] == $oatime) ) {
+        my $deld = pop @deleted_toks; # pull the token off the backside
+        last unless defined $deld; # this shouldn't happen, but just in case ...
 
-    $new_toks{$tok} = tok_pack ($ts, $th, $atime);
-    if (defined($atime) && (!defined($oldest) || $atime < $oldest)) {
-      $oldest = $atime;
+        my ($tok, $ts, $th, $atime) = @{$deld};
+        next unless (defined $tok && defined $ts && defined $th);
+        $oatime = $atime;
+
+        $new_toks{$tok} = tok_pack ($ts, $th, $atime);
+        if (defined($atime) && (!defined($oldest) || $atime < $oldest)) {
+          $oldest = $atime;
+        }
+        $reprieved++;
+      }
     }
-    $reprieved++;
   }
+
   @deleted_toks = ();		# free 'em up
   $deleted -= $reprieved;
 
   # and add the magic tokens.  don't add the expire_running token.
-  $new_toks{$SCANCOUNT_BASE_MAGIC_TOKEN} = $self->{db_toks}->{$SCANCOUNT_BASE_MAGIC_TOKEN};
-  $new_toks{$LAST_EXPIRE_MAGIC_TOKEN} = $self->scan_count_get();
+  if ( $current > 65535 ) {
+    $new_toks{$SCANCOUNT_BASE_MAGIC_TOKEN} = 0;
+    $new_toks{$LAST_EXPIRE_MAGIC_TOKEN} = 0;
+  }
+  else {
+    $new_toks{$SCANCOUNT_BASE_MAGIC_TOKEN} = $self->{db_toks}->{$SCANCOUNT_BASE_MAGIC_TOKEN};
+    $new_toks{$LAST_EXPIRE_MAGIC_TOKEN} = $self->scan_count_get();
+  }
+
   $new_toks{$OLDEST_TOKEN_AGE_MAGIC_TOKEN} = $oldest;
   $new_toks{$NSPAM_MAGIC_TOKEN} = $self->{db_toks}->{$NSPAM_MAGIC_TOKEN};
   $new_toks{$NHAM_MAGIC_TOKEN} = $self->{db_toks}->{$NHAM_MAGIC_TOKEN};
@@ -553,7 +583,31 @@ sub add_touches_to_journal {
     umask $umask; # reset umask
     return;
   }
-  print OUT $self->{string_to_journal};
+
+  # do not use print() here, it will break up the buffer if it's >8192 bytes,
+  # which could result in two sets of tokens getting mixed up and their
+  # touches missed.
+
+  my $nbytes = length ($self->{string_to_journal});
+  my $writ = 0;
+  while ($writ < $nbytes) {
+    my $len = syswrite (OUT, $self->{string_to_journal});
+
+    if ($len < 0) {
+      # argh, write failure, give up
+      warn "write failed to Bayes journal $path ($len of $nbytes)!\n";
+      last;
+    }
+
+    $writ += $len;
+    if ($len < $nbytes) {
+      # this should not happen on filesystem writes!  Still, try to recover
+      # anyway, but be noisy about it so the admin knows
+      warn "partial write to Bayes journal $path ($len of $nbytes), recovering.\n";
+      $self->{string_to_journal} = substr ($self->{string_to_journal}, $len);
+    }
+  }
+
   if (!close OUT) {
     warn "cannot write to $path, Bayes db update ignored\n";
   }
@@ -795,6 +849,10 @@ sub scan_count_increment {
     umask $umask; # reset umask
     return;
   }
+
+  # note we don't have to use syswrite() here, since we're only writing 1 byte.
+  # Anything bigger in the future, and we should, however, since print() will
+  # go thru stdio and the buffer may be split across 2 write() ops.
   print OUT "."; close OUT or warn "cannot append to $path\n";
   umask $umask; # reset umask
 

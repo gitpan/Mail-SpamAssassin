@@ -44,7 +44,7 @@ sub cmdline_run {
 	     'learnprob=f'			=> \$opt{'learnprob'},
 	     'randseed=i'			=> \$opt{'randseed'},
 
-             'debug-level|D'                    => \$opt{'debug-level'},
+             'debug-level|D:s'                  => \$opt{'debug-level'},
              'version|V'                        => \$opt{'version'},
              'help|h|?'                         => \$opt{'help'},
 
@@ -143,7 +143,7 @@ sub cmdline_run {
     if ($@) { die $@ unless ($@ =~ /HITLIMIT/); }
 
     print STDERR "\n" if ($opt{showdots});
-    warn "Learned from $messagecount messages.\n";
+    print "Learned from $messagecount messages.\n";
 
     if (!$opt{norebuild}) {
       $spamtest->rebuild_learner_caches();

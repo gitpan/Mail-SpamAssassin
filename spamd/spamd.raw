@@ -70,6 +70,14 @@ my %opt = (
   'ident-timeout' => 5.0,
 );
 
+# untaint all command-line options and ENV vars, since spamd is launched
+# as a daemon from a known-safe environment.
+@ARGV = map { /^(.*)$/ and $_ = $1; } @ARGV;
+foreach (keys %ENV) {
+  /^(.*)$/ and $_ = $1;
+  $ENV{$_} =~ /^(.*)$/ and $ENV{$_} = $1;
+}
+
 my @OLD_ARGV = @ARGV;    # Getopt::Long tends to clear @ARGV
 Getopt::Long::Configure ("bundling");
 GetOptions(
@@ -165,6 +173,11 @@ if ($opt{'create-prefs'}) { $dontcopy = 0; }
 my $extrapid = 5000;
 undef($opt{'max-children'}) unless defined($opt{'max-children'}) && $opt{'max-children'} > 0;
 $extrapid = $opt{'max-children'} if defined($opt{'max-children'});
+
+# Untaint the pidfile path before we use it
+if (defined $opt{'pidfile'}) {
+  $opt{'pidfile'} = Mail::SpamAssassin::Util::untaint_file_path($opt{'pidfile'});
+}
 
 my $orighome;
 if (defined $ENV{'HOME'}) {
@@ -588,9 +601,12 @@ sub check {
         if($method eq "REPORT" or
 		  ($method eq "REPORT_IFSPAM" and $status->is_spam))
 	{
-          $msg_resp = "$msg_score/$msg_threshold\r\n" . 
-				$status->{test_logs};
+	  # $msg_resp = $status->get_report();
+          $msg_resp = "$msg_score/$msg_threshold\r\n" . $status->get_report();
         }
+	elsif ($method eq "REPORT_IFSPAM") {
+	  # message is ham, $msg_resp remains empty
+	}
         elsif($method eq "SYMBOLS") {
           $msg_resp = $status->get_names_of_tests_hit;
         }
@@ -852,6 +868,20 @@ sub handle_user_setuid_with_sql
           logmsg "info: setuid to $username succeeded, reading scores from SQL.";
         }
     }
+
+    my $spam_conf_dir = $dir . '/.spamassassin';  #needed for AWL, Bayes, etc.
+    if ( ! -d $spam_conf_dir )
+    {
+       if ( mkdir $spam_conf_dir )
+       {
+          logmsg "info: created $spam_conf_dir for $username.";
+       }
+       else
+       {
+          logmsg "info: failed to create $spam_conf_dir for $username.";
+       }
+    }
+	  
     $spamtest->load_scoreonly_sql ($username);
 
     $spamtest->signal_user_changed ({ username => $username });
