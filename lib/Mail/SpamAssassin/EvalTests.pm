@@ -283,8 +283,8 @@ sub _mta_added_message_id {
   # Postfix adds the Message-ID on the second local hop.  Note: this is not
   # an exemption, this is a special case to classify these hits correctly.
   if ($#received > 0 &&
-      $received[$#received] =~ /\(Postfix.*?\)/i &&
-      $received[$#received - 1] =~ /\(Postfix.*?\)/i)
+      $received[$#received] =~ /\[127\.0\.0\.1\].+\(Postfix.*?\)/i &&
+      $received[$#received - 1] =~ /\(Postfix, from userid \d+\)/i)
   {
     $local = 2;
   }
@@ -609,6 +609,11 @@ sub check_for_forged_yahoo_received_headers {
   if ($from !~ /yahoo\.com$/) { return 0; }
 
   my $rcvd = $self->get ('Received');
+  
+  if ( $self->get("Resent-From") && $self->get("Resent-To") ) {
+    my $xrcvd = $self->get("X-Received");
+    $rcvd = $xrcvd if ( $xrcvd );
+  }
   $rcvd =~ s/\s+/ /gs;		# just spaces, simplify the regexp
 
   # not sure about this
@@ -617,7 +622,7 @@ sub check_for_forged_yahoo_received_headers {
   if ($self->gated_through_received_hdr_remover()) { return 0; }
 
   if ($rcvd =~ /by web\S+\.mail\.yahoo\.com via HTTP/) { return 0; }
-  if ($rcvd =~ /by smtp\.\S+\.yahoo\.com with SMTP/) { return 0; }
+  if ($rcvd =~ /by smtp\S+\.yahoo\.com with SMTP/) { return 0; }
   if ($rcvd =~
       /from \[$IP_ADDRESS\] by \S+\.(?:groups|grp\.scd)\.yahoo\.com with NNFMP/) {
     return 0;
@@ -634,7 +639,7 @@ sub check_for_forged_yahoo_received_headers {
   if ($rcvd =~ /\bmailer\d+\.bulk\.scd\.yahoo\.com\b/
                 && $from =~ /\@reply\.yahoo\.com$/) { return 0; }
 
-  if ($rcvd =~ /by \w+\.\w+\.yahoo\.com \(\d+\.\d+\.\d+\/\d+\.\d+\.\d+\) id \w+/) {
+  if ($rcvd =~ /by \w+\.\w+\.yahoo\.com \(\d+\.\d+\.\d+\/\d+\.\d+\.\d+\)(?: with ESMTP)? id \w+/) {
       # possibly sent from "mail this story to a friend"
       return 0;
   }
@@ -1922,16 +1927,17 @@ sub message_is_habeas_swe {
 
   $self->{habeas_swe} = 0;
 
-  my $all = $self->get('ALL');
-  if ($all =~ /\n(X-Habeas-SWE-1:.{0,512}X-Habeas-SWE-9:[^\n]{0,64}\n)/si) {
-    my $text = $1;
-    $text =~ tr/A-Z/a-z/;
-    $text =~ tr/ / /s;
-    $text =~ s/\/?>/\/>/;
-    if (sha1($text) eq "42ab3d716380503f66c4d44017c7f37b04458a9a") {
-      $self->{habeas_swe} = 1;
-    }
+  my $text = '';
+  for (my $i = 1; $i <= 9; $i++) {
+    $text .= lc($self->get("X-Habeas-SWE-$i"));
   }
+  if ($text) {
+    $text =~ s,\s+, ,g;
+    $text =~ s,^\s|\s$,,g;
+    $text =~ s,/?>,/>,;
+    $self->{habeas_swe} = sha1($text) eq q(76c65d9eb65e572166a08b50fd197b29af09d43a);
+  }
+
   return $self->{habeas_swe};
 }
 

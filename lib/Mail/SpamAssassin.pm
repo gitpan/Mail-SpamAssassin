@@ -85,20 +85,19 @@ use vars qw{
   @site_rules_path
 };
 
-$VERSION = "2.61";              # update after release
-#$IS_DEVEL_BUILD = 1;            # change for release versions
+$VERSION = "2.62";              # update after release
+$IS_DEVEL_BUILD = 0;            # change for release versions
 
 @ISA = qw();
 
 # SUB_VERSION is now <revision>-<yyyy>-<mm>-<dd>-<state>
-$SUB_VERSION = lc(join('-', (split(/[ \/]/, '$Id: SpamAssassin.pm,v 1.212.2.1 2003/12/09 06:30:29 jmason Exp $'))[2 .. 5, 8]));
+$SUB_VERSION = (split(/\s+/,'$LastChangedDate: 2004-01-11 14:21:28 -0500 (Sun, 11 Jan 2004) $ updated by SVN'))[1];
 
 # If you hacked up your SA, add a token to identify it here. Eg.: I use
 # "mss<number>", <number> increasing with every hack.
 @EXTRA_VERSION = qw();
-
 if (defined $IS_DEVEL_BUILD && $IS_DEVEL_BUILD) {
-  push(@EXTRA_VERSION, 'cvs');
+  push(@EXTRA_VERSION, ( 'r' . qw{$LastChangedRevision: 6141 $ updated by SVN}[1] ));
 }
 
 sub Version { join('-', $VERSION, @EXTRA_VERSION) }
@@ -633,6 +632,10 @@ sub report_as_spam {
 
   $self->init(1);
 
+  # Let's make sure the markup was removed first ...
+  my @msg = split (/^/m, $self->remove_spamassassin_markup($mail));
+  $mail = Mail::SpamAssassin::NoMailAudit->new ('data' => \@msg);
+
   $mail = $self->encapsulate_mail_object ($mail);
 
   # learn as spam if enabled
@@ -674,6 +677,10 @@ sub revoke_as_spam {
   local ($_);
 
   $self->init(1);
+
+  # Let's make sure the markup was removed first ...
+  my @msg = split (/^/m, $self->remove_spamassassin_markup($mail));
+  $mail = Mail::SpamAssassin::NoMailAudit->new ('data' => \@msg);
 
   $mail = $self->encapsulate_mail_object ($mail);
 

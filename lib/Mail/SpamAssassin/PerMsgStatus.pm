@@ -621,11 +621,16 @@ sub rewrite_as_spam {
       next if ( exists $already_added{lc $hdr} );
       my @hdrtext = $self->{msg}->get_pristine_header($hdr);
       $already_added{lc $hdr}++;
-      foreach ( @hdrtext ) {
-	if ( lc $hdr eq "received" ) { # add Received at the top ...
-          $newmsg = "$hdr: $_$newmsg";
-	}
-	else { # if not Received, add at the bottom ...
+
+      if ( lc $hdr eq "received" ) { # add Received at the top ...
+	  my $rhdr = "";
+	  foreach (@hdrtext) {
+            $rhdr .= "$hdr: $_";
+	  }
+	  $newmsg = "$rhdr$newmsg";
+      }
+      else {
+        foreach ( @hdrtext ) {
           $newmsg .= "$hdr: $_";
 	}
       }
@@ -635,7 +640,7 @@ sub rewrite_as_spam {
   # jm: add a SpamAssassin Received header to note markup time etc.
   # emulates the fetchmail style.
   # tvd: do this after report_safe_copy_headers so Received will be done correctly
-  $newmsg = "Received: from localhost [127.0.0.1] by " .
+  $newmsg = "Received: from localhost by " .
 	    Mail::SpamAssassin::Util::fq_hostname() . "\n" .
 	"\twith SpamAssassin (" . Mail::SpamAssassin::Version() . " " .
 	    $Mail::SpamAssassin::SUB_VERSION . ");\n" .
