@@ -238,13 +238,10 @@ sub REAPER {
     $SIG{CHLD} = \&REAPER;
 }
 
-# don't use this: use the same signal-handling regardless of options,
-# to cut down on the matrix of possible input and errors.
-#
-# if ($opt{'max-children'}) {$SIG{CHLD} = \&REAPER;}
-# else {$SIG{CHLD} = 'IGNORE';}
+# only use REAPER if -m is used.
+if ($opt{'max-children'}) {$SIG{CHLD} = \&REAPER;}
+else {$SIG{CHLD} = 'IGNORE';}
 
-$SIG{CHLD} = \&REAPER;
 $SIG{INT} = \&kill_handler;
 $SIG{TERM} = \&kill_handler;
 
@@ -307,7 +304,7 @@ for ( ; 1; close Client)
         if (/SKIP SPAMC\/(.*)/)
 	{
 	    logmsg "skipped large message in ".
-		sprintf("%3d", time - $start) ." seconds.\n";
+		sprintf("%3d", time - $start) ." seconds.";
 	    return 0;
 
 	}
@@ -409,7 +406,7 @@ for ( ; 1; close Client)
             }
 
             logmsg "checking message $msgid for $current_user:$>" .
-              ($expected_length ? ", expecting $expected_length bytes" : "") . ".\n";
+              ($expected_length ? ", expecting $expected_length bytes" : "") . ".";
 
 	    my $mail = Mail::SpamAssassin::NoMailAudit->new (
                                 data => \@msglines
@@ -451,7 +448,7 @@ for ( ; 1; close Client)
 	    print $status->get_report,"\r\n" if ($method eq "REPORT" or $method eq "REPORT_IFSPAM" and $status->is_spam);
 	    $current_user ||= '(unknown)';
 	    logmsg "$was_it_spam ($msg_score/$msg_threshold) for $current_user:$> in ".
-		sprintf("%.1f", time - $start) ." seconds, $actual_length bytes.\n";
+		sprintf("%.1f", time - $start) ." seconds, $actual_length bytes.";
 
 	    $status->finish();	# added by jm to allow GC'ing
 	}
@@ -553,7 +550,7 @@ for ( ; 1; close Client)
             }
 
             logmsg "processing message $msgid for $current_user:$>" .
-              ($expected_length ? ", expecting $expected_length bytes" : "") . ".\n";
+              ($expected_length ? ", expecting $expected_length bytes" : "") . ".";
 
 	    my $mail = Mail::SpamAssassin::NoMailAudit->new (
                                 data => \@msglines
@@ -589,7 +586,7 @@ for ( ; 1; close Client)
             my $msg_threshold = sprintf("%.1f",$status->get_required_hits);
 	    $current_user ||= '(unknown)';
 	    logmsg "$was_it_spam ($msg_score/$msg_threshold) for $current_user:$> in ".
-	        sprintf("%.1f", time - $start) ." seconds, $actual_length bytes.\n";
+	        sprintf("%.1f", time - $start) ." seconds, $actual_length bytes.";
 
 	    $status->finish();	# added by jm to allow GC'ing
 	}
@@ -671,7 +668,7 @@ sub handle_user
 	#if we are given a username, but can't look it up,
 	#Maybe NIS is down? lets break out here to allow
 	#them to get 'defaults' when we are not running paranoid.
-	logmsg "handle_user() -> unable to find user [$userid]!\n";
+	logmsg "handle_user() -> unable to find user [$userid]!";
 	return 0;
     }
 
@@ -725,11 +722,11 @@ sub handle_virtual_user
 		# And if that isn't there, log that it's misconfigured.
 		if(! -f $file) {
 			logmsg("Couldn't find a virtual directory or defaults "
-				. "for $username in $dir\n");
+				. "for $username in $dir");
 			return(0);
 		} else {
 			# Log that the default configuration is being used for a user.
-			logmsg("Using default config for $username\n");
+			logmsg("Using default config for $username");
 		}
 	}
 
@@ -913,6 +910,22 @@ Options:
  -H dir				    Specify a different HOME directory, path optional
 
 
+=head1 DESCRIPTION
+
+The purpose of this program is to provide a daemonized version of the
+spamassassin executable.  The goal is improving throughput performance for
+automated mail checking.
+
+This is intended to be used alongside C<spamc>, a fast, low-overhead C client
+program.
+
+See the README file in the C<spamd> directory of the SpamAssassin distribution
+for more details.
+
+Note: Although spamd will check per-user config files for every message, any
+changes to the system-wide config files will require restarting spamd for
+the changes to take effect.
+
 =head1 OPTIONS
 
 Options of the long form can be shortened as long as they remain
@@ -1045,15 +1058,19 @@ user I<nobody> and using the default configuration.
 
 =item B<-m> I<number>, B<--max-children>=I<number>
 
+This option is not recommended -- see below.
+
 Specify a maximum number of children to spawn. Spamd will wait until another
 child finishes before forking again. Meanwhile, incoming connections will be
 queued.
 
+Use of this option is not recommended in most circumstances, as we have
+received reports of the perl interpreter dumping core.  It seems that some
+versions of Perl on some OSes have issues with tracking child processes and
+signal handling, which the perl interpreter to crash.
+
 Please note that there is a OS specific maximum of connections that can be
 queued (Try C<perl -MSocket -e'print SOMAXCONN'> to find this maximum).
-Also, some OSes versions of perl may have issues with tracking child processes
-correctly, in which case this switch may cause core-dumps.  (one report
-is that perl versions pre-5.7.3 on IRIX can display this behaviour.)
 
 =item B<-H> I<directory>, B<--helper-home-dir>=I<directory>
 
@@ -1065,28 +1082,15 @@ home directory instead.
 
 =back
 
-=head1 DESCRIPTION
-
-The purpose of this program is to provide a daemonized version of the
-spamassassin executable.  The goal is improving throughput performance for
-automated mail checking.
-
-This is intended to be used alongside C<spamc>, a fast, low-overhead C client
-program.
-
-See the README file in the C<spamd> directory of the SpamAssassin distribution
-for more details.
-
-Note: Although spamd will check per-user config files for every message, any
-changes to the system-wide config files will require restarting spamd for
-the changes to take effect.
-
 =head1 BUGS
 
-Perl 5.005_03 seems to have a bug, which spamd triggers, causing messages to
+Perl 5.005_03 seems to have a bug which spamd triggers, causing messages to
 pass through unscanned.  Upgrading to Perl 5.6 seems to fix the problem, so
 that's the current workaround.  More information can be found at
 http://www.hughes-family.org/bugzilla/show_bug.cgi?id=497
+
+The C<-m> switch seems to trigger signal-handling bugs in many versions
+of Perl.
 
 =head1 SEE ALSO
 

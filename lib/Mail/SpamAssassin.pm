@@ -82,7 +82,7 @@ use vars qw{
 	@site_rules_path
 };
 
-$VERSION = "2.42";              # update after release
+$VERSION = "2.43";              # update after release
 #$IS_DEVEL_BUILD = 0;            # comment for release versions
 
 # Create the hash so that it really points to something, otherwise we can't
@@ -91,7 +91,7 @@ $TIMELOG->{dummy}=0;
 @ISA = qw();
 
 # SUB_VERSION is now <revision>-<yyyy>-<mm>-<dd>-<state>
-$SUB_VERSION = lc(join('-', (split(/[ \/]/, '$Id: SpamAssassin.pm,v 1.115.2.14 2002/10/04 15:29:31 jmason Exp $'))[2 .. 5, 8]));
+$SUB_VERSION = lc(join('-', (split(/[ \/]/, '$Id: SpamAssassin.pm,v 1.115.2.20 2002/10/15 15:53:47 jmason Exp $'))[2 .. 5, 8]));
 
 # If you hacked up your SA, add a token to identify it here. Eg.: I use
 # "mss<number>", <number> increasing with every hack.
@@ -916,7 +916,7 @@ sub sed_path {
   return undef if (!defined $path);
   $path =~ s/__local_rules_dir__/$self->{LOCAL_RULES_DIR} || ''/ges;
   $path =~ s/__def_rules_dir__/$self->{DEF_RULES_DIR} || ''/ges;
-  $path =~ s/__prefix__/$self->{PREFIX} || $Config{prefix}/gs;
+  $path =~ s{__prefix__}{$self->{PREFIX} || $Config{prefix} || '/usr'}ges;
   $path =~ s/^\~([^\/]*)/$self->expand_name($1)/es;
   $path;
 }

@@ -16,8 +16,8 @@ Summary:        a spam filter for email which can be invoked from mail delivery 
 Summary(pl):    Filtr antyspamowy, przeznaczony dla programów dostarczaj±cych pocztê (MDA)
 
 Group:          Applications/Mail
-%define version 2.42
-%define real_version 2.42
+%define version 2.43
+%define real_version 2.43
 %define release 1
 
 %define name    spamassassin
@@ -40,7 +40,7 @@ Distribution: SpamAssassin
 
 %description
 SpamAssassin provides you with a way to reduce if not completely eliminate
-Unsolicited Commercial Email (SPAM) from your incoming email.  It can
+Unsolicited Commercial Email (spam) from your incoming email.  It can
 be invoked by a MDA such as sendmail or postfix, or can be called from
 a procmail script, .forward file, etc.  It uses a genetic-algorithm
 evolved scoring system to identify messages which look spammy, then
@@ -54,20 +54,20 @@ kompletnego wyeliminowania Niezamawianej Komercyjnej Poczty
 (Unsolicited Commercial Email, spamu) z Twojej poczty. Mo¿e byæ
 wywo³ywany z MDA, np. Sendmaila czy Postfixa, lub z pliku ~/.forward
 itp. U¿ywa ogólnego algorytmu oceniania w celu identyfikacji
-wiadomo¶ci, które wygl±daj± na SPAM, po czym dodaje nag³ówki do
+wiadomo¶ci, które wygl±daj± na spam, po czym dodaje nag³ówki do
 wiadomo¶ci, umo¿liwiaj±c filtrowanie przez oprogramowanie u¿ytkownika.
 Ta dystrybucja zawiera programy spamd/spamc, umo¿liwiaj±ce
 uruchomienie serwera, co znacznie przyspieszy proces przetwarzania
 poczty.
 
 %package tools
-Summary:        Miscleanous tools for SpamAssassin
+Summary:        Miscellaneous tools for SpamAssassin
 Summary(pl):    Przeró¿ne narzêdzia zwi±zane z SpamAssassin
 Group:          Applications/Mail
 Requires: perl-Mail-SpamAssassin = %{version}-%{release}
 
 %description tools
-Miscleanous tools from various authors, distributed with SpamAssassin.
+Miscellaneous tools from various authors, distributed with SpamAssassin.
 See /usr/share/doc/SpamAssassin-tools-*/.
 
 %description tools -l pl
@@ -105,16 +105,13 @@ aplikacji do czytania poczty.
 %setup -q -n %{pdir}-%{pnam}-%{real_version}
 
 %build
-%{__perl} Makefile.PL PREFIX=%{_prefix} SYSCONFDIR=%{_sysconfdir}
+%{__perl} Makefile.PL PREFIX=$RPM_BUILD_ROOT/%{_prefix} SYSCONFDIR=$RPM_BUILD_ROOT/%{_sysconfdir} INST_PREFIX=%{_prefix} INST_SYSCONFDIR=%{_sysconfdir}
 %{__make} 
 # make test
 
 %install
 [ "$RPM_BUILD_ROOT" != "/" ] && rm -rf $RPM_BUILD_ROOT
-%makeinstall PREFIX=%buildroot/%{_prefix} \
-        INSTALLMAN1DIR=%buildroot/%{_mandir}/man1 \
-        INSTALLMAN3DIR=%buildroot/%{_mandir}/man3 \
-	LOCAL_RULES_DIR=%buildroot/%{_sysconfdir}/mail/spamassassin
+%makeinstall 
 install -d %buildroot/%{initdir}
 install -m 0755 spamd/redhat-rc-script.sh %buildroot/%{initdir}/spamassassin
 
