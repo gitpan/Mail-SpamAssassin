@@ -1,0 +1,345 @@
+#!/usr/bin/perl -w
+
+use Getopt::Std;
+use Config;
+
+use FindBin;
+
+BEGIN {
+  # This code will track down the directories where WebMake
+  # keeps its modules, portably, so it'll work on Macs, UNIX and Win32,
+  # with or without a UNIX-style "make install" installation.
+  # Sadly, we can't rely on File::Spec to do the slash-twiddling for us;
+  # it's not included with some versions of MacPerl. :(
+  #
+  my $bin = $FindBin::Bin;
+  my $slash = '/';              # between directories in a path
+  my $dirtrailer = '';          # at the end of a directory's path
+
+  if ($^O eq 'MacOS') {
+    $slash = ':'; $dirtrailer = ':';
+  } elsif ($^O =~ /(win|os2)/) {
+    $slash = '\\';
+  }
+
+  # first, find the common candidates: "lib" and "site_perl" in
+  # the same dir as the script. These are likely on all platforms.
+  $_ = $bin.$slash. "lib" . $dirtrailer;
+  push (@INC, $_);
+  $_ = $bin.$slash. "site_perl" . $dirtrailer;
+  push (@INC, $_);
+
+  # next, support UNIX-style /usr-based installation, where the
+  # script lives in /usr/*/bin and the support files in /usr/*/lib
+  # or /usr/*/share. This only happens on UNIX afaik.
+  if ($slash eq '/') {
+    $_ = $bin . "/../lib/spamassassin";
+    if (-d $_) {
+      push (@INC, "$_/lib"); push (@INC, "$_/site_perl");
+    }
+
+    $_ = $bin . "/../share/spamassassin";
+    if (-d $_) {
+      push (@INC, "$_/lib"); push (@INC, "$_/site_perl");
+    }
+  }
+}
+
+use lib 'lib';
+use lib '../lib';		# for testing in ./t
+
+@default_rules_path = qw(
+	./spamassassin.cf
+	../spamassassin.cf
+	/etc/spamassassin.cf
+	__installsitelib__/spamassassin.cf
+);
+
+@default_prefs_path = qw(
+	/etc/spamassassin.prefs
+	__installsitelib__/spamassassin.prefs
+);
+
+@default_userprefs_path = qw(
+	./spamassassin.prefs
+	../spamassassin.prefs
+	~/.spamassassin.cf
+);
+
+sub usage {
+  my $ver = Mail::SpamAssassin::Version();
+  my $rules = join ("\n\t\t\t\t", @default_rules_path);
+  my $prefs = join ("\n\t\t\t\t", @default_userprefs_path);
+  die <<EOUSAGE;
+
+Usage: spamassassin [option ...] < mailmessage
+       spamassassin -P [option ...] < mailmessage > output
+
+Options:
+ 
+  -P               pipe message through, instead of delivering to mail spool
+ 
+  -t               only testing
+
+  -r               mail message is verified as spam, report it
+
+  -c config        configuration file
+                   (default:	$rules )
+
+  -p prefs         user preferences file
+                   (default:	$prefs )
+
+  -D		   log diagnostic messages
+
+Version: $ver      Home: http://spamassassin.taint.org/
+
+EOUSAGE
+}
+
+
+require Mail::SpamAssassin;
+require Mail::Audit;
+
+use vars qw{
+  $opt_t $opt_c $opt_p $opt_h $opt_V $opt_D $opt_r $opt_P
+};
+
+getopts ('tc:p:hVDrP') or usage();
+
+if (defined $opt_h) { usage(); }
+if (defined $opt_V) {
+  my $ver = Mail::SpamAssassin::Version();
+  print <<EOVERSION;
+SpamAssassin version $ver
+EOVERSION
+  exit 0;
+}
+
+# standard Mail::Audit start
+my $mail = Mail::Audit->new();
+
+# For Mail::Audit users -- this is the magic. Just create a Mail::SpamAssassin
+# object like this, then run the check() method as below; if it returns a
+# non-undef value, then you've got spam, otherwise it's normal mail.
+#
+# You can then use the rewrite() method (passing in the Mail::Audit object) to
+# rewrite the spam.
+#
+# (This implementation does other stuff though, such as -t support, and setting
+# up the user's rules files if they don't exist; ignore that stuff.)
+
+$opt_c = first_existing_path (@default_rules_path);
+
+if (!defined $opt_p) {
+  $opt_p = first_existing_path (@default_userprefs_path);
+
+  if (!-f $opt_p) {
+    # copy in the default one for later editing
+
+    my $defprefs = first_existing_path (@default_prefs_path);
+    use File::Copy;
+    if (copy ($defprefs, $opt_p)) {
+      warn "Created user preferences file: $opt_p\n";
+    } else {
+      warn "Failed to create user preferences file\n".
+      		"\"$opt_p\" from default \"$defprefs\".\n";
+    }
+  }
+}
+
+# finally, now that we've found the configuration, start testing the message...
+my $spamtest = new Mail::SpamAssassin ({
+  'rules_filename'	=> $opt_c,
+  'userprefs_filename'	=> $opt_p,
+  'debug'		=> $opt_D
+});
+
+if ($opt_r) {
+  $spamtest->report_as_spam ($mail);
+  exit;
+}
+
+my $status = $spamtest->check ($mail);
+$status->rewrite_mail ();
+$status->handle_auto_report ();
+
+if ($opt_t) {
+  # add the spam report to the end of the body as well, if testing.
+  my $lines = $mail->{obj}->body();
+  push (@{$lines}, split (/$/, $status->get_report()));
+  $mail->{obj}->body ($lines);
+}
+
+# if we're piping it, deliver it to stdout.
+if ($opt_t || $opt_P) {
+  $mail->{obj}->print (\*STDOUT);
+  exit;
+}
+
+# else, store it to the mail spool (thx to Mail::Audit)
+# $MAIL: std on unix
+# $DEFAULT: set by procmail
+my $where = $ENV{'MAIL'} || $ENV{'DEFAULT'} || undef;
+$mail->accept($where);
+exit;
+
+# ---------------------------------------------------------------------------
+
+sub sed_path {
+  my $path = shift;
+  $path =~ s/__installsitelib__/$Config{installsitelib}/gs;
+  $path =~ s/\~/$ENV{HOME}/gs;
+  $path;
+}
+
+sub first_existing_path {
+  my $path;
+  foreach my $path (@_) { 
+    $path = sed_path ($path);
+    if (-e $path) { return $path; }
+  }
+  $path;
+}
+
+# ---------------------------------------------------------------------------
+
+=head1 NAME
+
+spamassassin - mail filter to identify spam using text analysis
+
+=head1 SYNOPSIS
+
+  spamassassin [option ...] < mailmessage
+  spamassassin -P [option ...] < mailmessage > output
+
+  -P               pipe message through, instead of delivering to mail spool
+  -t               only testing
+  -r               report this message as verified spam
+  -c config        configuration file
+  -p prefs         user preferences file
+  -D               produce diagnostic output
+
+=head1 DESCRIPTION
+
+SpamAssassin is a mail filter to identify spam using text analysis.
+
+Using its rule base, it uses a wide range of heuristic tests on mail headers
+and body text to identify "spam", also known as unsolicited commercial email.
+
+Once identified, the mail is then tagged as spam for later filtering using the
+user's own mail user-agent application.
+
+SpamAssassin also includes support for reporting spam messages to collaborative
+filtering databases, such as Vipul's Razor ( http://razor.sourceforge.net/ ).
+
+The default tagging operations that take place are detailed in the L<TAGGING>
+section below.
+
+=head1 OPTIONS
+
+=over 4
+
+=item -P
+
+Normally SpamAssassin will write the rewritten message to the mail spool by
+default.  The C<-P> parameter will cause it to pipe the output to STDOUT
+instead.
+
+=item -t
+
+Test mode.
+
+=item -r
+
+Report this message as verified spam.  This will submit the mail message read
+from STDIN to various spam-blocker databases, such as Vipul's Razor (
+http://razor.sourceforge.net/ ).
+
+If the message contains SpamAssassin markup, this will be stripped out
+automatically before submission.
+
+=item -c config
+
+Read configuration from C<config>.  The default configuration file, if this is
+not specified, is C<$Config{installsitelib}/spamassassin.cf>.
+
+=item -p prefs
+
+Read user score preferences from C<prefs>.  The default preferences file,  if
+this is not specified, is C<~/.spamassassin.cf>.
+
+=back
+
+=head1 TAGGING FOR SPAM MAILS
+
+The modifications made are as follows:
+
+=over 4
+
+=item Subject: header
+
+The string C<*****SPAM*****> is prepended to the subject.
+
+=item X-Spam-Status: header
+
+A string, C<Yes, hits=nn required=nn> is set in this header to reflect
+the filter status.
+
+=item X-Spam-Flag: header
+
+Set to C<YES>.
+
+=item Content-Type: header
+
+Set to C<text/plain>, in order to defang HTML mail or other active
+content that could "call back" to the spammer.
+
+=item spam mail body text
+
+The SpamAssassin report is added to top of the mail message body.
+
+=back
+
+=head1 TAGGING FOR NON-SPAM MAILS
+
+=over 4
+
+=item X-Spam-Status: header
+
+A string, C<No, hits=nn required=nn> is set in this header to reflect
+the filter status.
+
+=back
+
+=head1 INSTALLATION
+
+The B<spamassassin> command is part of the B<Mail::SpamAssassin> Perl module.
+Install this as a normal Perl module, using C<perl -MCPAN -e shell>, or by
+hand.
+
+=head1 ENVIRONMENT
+
+No environment variables, aside from those used by perl, are required to
+be set.
+
+=head1 SEE ALSO
+
+C<Mail::SpamAssassin>
+C<Mail::Audit>
+C<Razor>
+
+=head1 AUTHOR
+
+Justin Mason E<lt>jm /at/ jmason.orgE<gt>
+
+=head1 PREREQUISITES
+
+C<Mail::Audit>
+
+=head1 COREQUISITES
+
+C<Net::DNS>
+C<Razor>
+
+=cut
+

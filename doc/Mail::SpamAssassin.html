@@ -1,0 +1,177 @@
+<HTML>
+<HEAD>
+<TITLE>Mail::SpamAssassin - Mail::Audit spam detector plugin</TITLE>
+<LINK REV="made" HREF="mailto:feedback@suse.de">
+</HEAD>
+
+<BODY>
+
+<!-- INDEX BEGIN -->
+
+<UL>
+
+	<LI><A HREF="#NAME">NAME</A>
+	<LI><A HREF="#SYNOPSIS">SYNOPSIS</A>
+	<LI><A HREF="#DESCRIPTION">DESCRIPTION</A>
+	<LI><A HREF="#METHODS">METHODS</A>
+	<LI><A HREF="#PREREQUISITES">PREREQUISITES</A>
+	<LI><A HREF="#COREQUISITES">COREQUISITES</A>
+	<LI><A HREF="#MORE_DOCUMENTATION">MORE DOCUMENTATION</A>
+	<LI><A HREF="#SEE_ALSO">SEE ALSO</A>
+	<LI><A HREF="#AUTHOR">AUTHOR</A>
+	<LI><A HREF="#COPYRIGHT">COPYRIGHT</A>
+	<LI><A HREF="#AVAILABILITY">AVAILABILITY</A>
+</UL>
+<!-- INDEX END -->
+
+<HR>
+<P>
+<H1><A NAME="NAME">NAME</A></H1>
+<P>
+Mail::SpamAssassin - Mail::Audit spam detector plugin
+
+<P>
+<HR>
+<H1><A NAME="SYNOPSIS">SYNOPSIS</A></H1>
+<P>
+<PRE>  my $spamtest = new Mail::SpamAssassin();
+  my $mail = Mail::Audit-&gt;new();
+</PRE>
+<P>
+<PRE>  my $status = $spamtest-&gt;check ($mail);
+  if ($status-&gt;is_spam ()) {
+    $status-&gt;rewrite_mail ();
+    $mail-&gt;accept(&quot;caught_spam&quot;);
+  }
+  ...
+</PRE>
+<P>
+<HR>
+<H1><A NAME="DESCRIPTION">DESCRIPTION</A></H1>
+<P>
+Mail::SpamAssassin is a Mail::Audit plugin to identify spam using text
+analysis.
+
+<P>
+Using its rule base, it uses a wide range of heuristic tests on mail
+headers and body text to identify ``spam'', also known as unsolicited
+commercial email.
+
+<P>
+Once identified, the mail can then be optionally tagged as spam for later
+filtering using the user's own mail user-agent application.
+
+<P>
+This module implements a Mail::Audit plugin, allowing SpamAssassin to be
+used in a Mail::Audit filter. In addition, a command-line filter tool is
+also provided.
+
+<P>
+<HR>
+<H1><A NAME="METHODS">METHODS</A></H1>
+<DL>
+<DT><STRONG><A NAME="item__f">$f = new Mail::SpamAssassin( [ { opt =&gt; val, ... } ] )</A></STRONG><DD>
+<P>
+Constructs a new <CODE>Mail::SpamAssassin</CODE> object. You may pass the following attribute-value pairs to the
+constructor.
+
+<DL>
+<DT><STRONG><A NAME="item_rules_filename">rules_filename</A></STRONG><DD>
+<P>
+The filename to load spam-identifying rules from. (optional)
+
+<DT><STRONG><A NAME="item_userprefs_filename">userprefs_filename</A></STRONG><DD>
+<P>
+The filename to load preferences from. (optional)
+
+<DT><STRONG><A NAME="item_config_text">config_text</A></STRONG><DD>
+<P>
+The text of all rules and preferences. If you prefer not to load the rules
+from files, read them in yourself and set this instead. This is optional,
+but note that at least one of <A HREF="#item_rules_filename">rules_filename</A>, <A HREF="#item_userprefs_filename">userprefs_filename</A> or
+<A HREF="#item_config_text">config_text</A> must be specified to provide configuration, otherwise SpamAssassin will not
+do anything!
+
+</DL>
+<DT><STRONG><A NAME="item__status">$status = $f-&gt;check ($mail)</A></STRONG><DD>
+<P>
+Check a mail, encapsulated in a <CODE>Mail::Audit</CODE> object, to determine if it is spam or not.
+
+<P>
+Returns a <CODE>Mail::SpamAssassin::PerMsgStatus</CODE> object which can be used to test or manipulate the mail message.
+
+<P>
+Note that the <CODE>Mail::SpamAssassin</CODE> object can be re-used for further messages without affecting this check; in
+OO terminology, the <CODE>Mail::SpamAssassin</CODE>
+object is a ``factory''.
+
+<DT><STRONG><A NAME="item__f_report_as_spam">$f-&gt;report_as_spam ($mail)</A></STRONG><DD>
+<P>
+Report a mail, encapsulated in a <CODE>Mail::Audit</CODE> object, as human-verified spam. This will submit the mail message to live,
+collaborative, spam-blocker databases, allowing other users to block this
+message.
+
+</DL>
+<P>
+<HR>
+<H1><A NAME="PREREQUISITES">PREREQUISITES</A></H1>
+<P>
+<CODE>Mail::Audit</CODE>
+
+<CODE>Mail::Internet</CODE>
+
+
+
+<P>
+<HR>
+<H1><A NAME="COREQUISITES">COREQUISITES</A></H1>
+<P>
+<CODE>Net::DNS</CODE>
+
+
+
+<P>
+<HR>
+<H1><A NAME="MORE_DOCUMENTATION">MORE DOCUMENTATION</A></H1>
+<P>
+See also <A
+HREF="http://spamassassin.taint.org/">http://spamassassin.taint.org/</A>
+for more information.
+
+<P>
+<HR>
+<H1><A NAME="SEE_ALSO">SEE ALSO</A></H1>
+<P>
+<CODE>Mail::SpamAssassin::PerMsgStatus</CODE>
+
+<CODE>spamassassin</CODE>
+
+
+
+<P>
+<HR>
+<H1><A NAME="AUTHOR">AUTHOR</A></H1>
+<P>
+Justin Mason &lt;jm /at/ jmason.org&gt;
+
+
+
+<P>
+<HR>
+<H1><A NAME="COPYRIGHT">COPYRIGHT</A></H1>
+<P>
+SpamAssassin is distributed under Perl's Artistic license.
+
+<P>
+<HR>
+<H1><A NAME="AVAILABILITY">AVAILABILITY</A></H1>
+<P>
+The latest version of this library is likely to be available from CPAN as
+well as:
+
+<P>
+<PRE>  <A HREF="http://spamassassin.taint.org/">http://spamassassin.taint.org/</A>
+</PRE>
+</BODY>
+
+</HTML>

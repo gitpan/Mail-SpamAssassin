@@ -1,0 +1,92 @@
+NAME
+    Mail::SpamAssassin - Mail::Audit spam detector plugin
+
+SYNOPSIS
+      my $spamtest = new Mail::SpamAssassin();
+      my $mail = Mail::Audit->new();
+
+      my $status = $spamtest->check ($mail);
+      if ($status->is_spam ()) {
+        $status->rewrite_mail ();
+        $mail->accept("caught_spam");
+      }
+      ...
+
+DESCRIPTION
+    Mail::SpamAssassin is a Mail::Audit plugin to identify spam
+    using text analysis.
+
+    Using its rule base, it uses a wide range of heuristic tests on
+    mail headers and body text to identify "spam", also known as
+    unsolicited commercial email.
+
+    Once identified, the mail can then be optionally tagged as spam
+    for later filtering using the user's own mail user-agent
+    application.
+
+    This module implements a Mail::Audit plugin, allowing
+    SpamAssassin to be used in a Mail::Audit filter. In addition, a
+    command-line filter tool is also provided.
+
+METHODS
+    $f = new Mail::SpamAssassin( [ { opt => val, ... } ] )
+        Constructs a new `Mail::SpamAssassin' object. You may pass
+        the following attribute-value pairs to the constructor.
+
+    rules_filename
+            The filename to load spam-identifying rules from.
+            (optional)
+
+    userprefs_filename
+            The filename to load preferences from. (optional)
+
+    config_text
+            The text of all rules and preferences. If you prefer not
+            to load the rules from files, read them in yourself and
+            set this instead. This is optional, but note that at
+            least one of `rules_filename', `userprefs_filename' or
+            `config_text' must be specified to provide
+            configuration, otherwise SpamAssassin will not do
+            anything!
+
+    $status = $f->check ($mail)
+        Check a mail, encapsulated in a `Mail::Audit' object, to
+        determine if it is spam or not.
+
+        Returns a `Mail::SpamAssassin::PerMsgStatus' object which
+        can be used to test or manipulate the mail message.
+
+        Note that the `Mail::SpamAssassin' object can be re-used for
+        further messages without affecting this check; in OO
+        terminology, the `Mail::SpamAssassin' object is a "factory".
+
+    $f->report_as_spam ($mail)
+        Report a mail, encapsulated in a `Mail::Audit' object, as
+        human-verified spam. This will submit the mail message to
+        live, collaborative, spam-blocker databases, allowing other
+        users to block this message.
+
+PREREQUISITES
+    `Mail::Audit' `Mail::Internet'
+
+COREQUISITES
+    `Net::DNS'
+
+MORE DOCUMENTATION
+    See also http://spamassassin.taint.org/ for more information.
+
+SEE ALSO
+    `Mail::SpamAssassin::PerMsgStatus' `spamassassin'
+
+AUTHOR
+    Justin Mason <jm /at/ jmason.org>
+
+COPYRIGHT
+    SpamAssassin is distributed under Perl's Artistic license.
+
+AVAILABILITY
+    The latest version of this library is likely to be available
+    from CPAN as well as:
+
+      http://spamassassin.taint.org/
+

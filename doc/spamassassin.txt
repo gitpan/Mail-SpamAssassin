@@ -1,0 +1,103 @@
+NAME
+    spamassassin - mail filter to identify spam using text analysis
+
+SYNOPSIS
+      spamassassin [option ...] < mailmessage
+      spamassassin -P [option ...] < mailmessage > output
+
+      -P               pipe message through, instead of delivering to mail spool
+      -t               only testing
+      -r               report this message as verified spam
+      -c config        configuration file
+      -p prefs         user preferences file
+      -D               produce diagnostic output
+
+DESCRIPTION
+    SpamAssassin is a mail filter to identify spam using text
+    analysis.
+
+    Using its rule base, it uses a wide range of heuristic tests on
+    mail headers and body text to identify "spam", also known as
+    unsolicited commercial email.
+
+    Once identified, the mail is then tagged as spam for later
+    filtering using the user's own mail user-agent application.
+
+    SpamAssassin also includes support for reporting spam messages
+    to collaborative filtering databases, such as Vipul's Razor (
+    http://razor.sourceforge.net/ ).
+
+    The default tagging operations that take place are detailed in
+    the the TAGGING manpage section below.
+
+OPTIONS
+    -P  Normally SpamAssassin will write the rewritten message to the
+        mail spool by default. The `-P' parameter will cause it to
+        pipe the output to STDOUT instead.
+
+    -t  Test mode.
+
+    -r  Report this message as verified spam. This will submit the mail
+        message read from STDIN to various spam-blocker databases,
+        such as Vipul's Razor ( http://razor.sourceforge.net/ ).
+
+        If the message contains SpamAssassin markup, this will be
+        stripped out automatically before submission.
+
+    -c config
+        Read configuration from `config'. The default configuration
+        file, if this is not specified, is
+        `$Config{installsitelib}/spamassassin.cf'.
+
+    -p prefs
+        Read user score preferences from `prefs'. The default
+        preferences file, if this is not specified, is
+        `~/.spamassassin.cf'.
+
+TAGGING FOR SPAM MAILS
+    The modifications made are as follows:
+
+    Subject: header
+        The string `*****SPAM*****' is prepended to the subject.
+
+    X-Spam-Status: header
+        A string, `Yes, hits=nn required=nn' is set in this header
+        to reflect the filter status.
+
+    X-Spam-Flag: header
+        Set to `YES'.
+
+    Content-Type: header
+        Set to `text/plain', in order to defang HTML mail or other
+        active content that could "call back" to the spammer.
+
+    spam mail body text
+        The SpamAssassin report is added to top of the mail message
+        body.
+
+TAGGING FOR NON-SPAM MAILS
+    X-Spam-Status: header
+        A string, `No, hits=nn required=nn' is set in this header to
+        reflect the filter status.
+
+INSTALLATION
+    The spamassassin command is part of the Mail::SpamAssassin Perl
+    module. Install this as a normal Perl module, using `perl -MCPAN
+    -e shell', or by hand.
+
+ENVIRONMENT
+    No environment variables, aside from those used by perl, are
+    required to be set.
+
+SEE ALSO
+    `Mail::SpamAssassin' `Mail::Audit' `Razor'
+
+AUTHOR
+    Justin Mason <jm /at/ jmason.org>
+
+PREREQUISITES
+    `Mail::Audit'
+
+COREQUISITES
+    `Net::DNS' `Razor'
+

@@ -1,0 +1,125 @@
+<HTML>
+<HEAD>
+<TITLE>Mail::SpamAssassin::PerMsgStatus - per-message status</TITLE>
+<LINK REV="made" HREF="mailto:feedback@suse.de">
+</HEAD>
+
+<BODY>
+
+<!-- INDEX BEGIN -->
+
+<UL>
+
+	<LI><A HREF="#NAME">NAME</A>
+	<LI><A HREF="#SYNOPSIS">SYNOPSIS</A>
+	<LI><A HREF="#DESCRIPTION">DESCRIPTION</A>
+	<LI><A HREF="#METHODS">METHODS</A>
+	<LI><A HREF="#SEE_ALSO">SEE ALSO</A>
+</UL>
+<!-- INDEX END -->
+
+<HR>
+<P>
+<H1><A NAME="NAME">NAME</A></H1>
+<P>
+Mail::SpamAssassin::PerMsgStatus - per-message status (spam or not-spam)
+
+<P>
+<HR>
+<H1><A NAME="SYNOPSIS">SYNOPSIS</A></H1>
+<P>
+<PRE>  my $spamtest = new Mail::SpamAssassin ({
+    'rules_filename'      =&gt; '/etc/spamassassin.rules',
+    'userprefs_filename'  =&gt; $ENV{HOME}.'/.spamassassin.cf'
+  });
+  my $mail = Mail::Audit-&gt;new();
+</PRE>
+<P>
+<PRE>  my $status = $spamtest-&gt;check ($mail);
+  if ($status-&gt;is_spam()) {
+    $status-&gt;rewrite_mail ();
+    $mail-&gt;accept(&quot;caught_spam&quot;);
+  }
+  ...
+</PRE>
+<P>
+<HR>
+<H1><A NAME="DESCRIPTION">DESCRIPTION</A></H1>
+<P>
+The Mail::SpamAssassin <CODE>check()</CODE> method returns an object of this class. This object encapsulates all the
+per-message state.
+
+<P>
+<HR>
+<H1><A NAME="METHODS">METHODS</A></H1>
+<DL>
+<DT><STRONG><A NAME="item__isspam">$isspam = $status-&gt;is_spam ()</A></STRONG><DD>
+<P>
+After a mail message has been checked, this method can be called. It will
+return 1 for mail determined likely to be spam, 0 if it does not seem
+spam-like.
+
+<DT><STRONG><A NAME="item__report">$report = $status-&gt;get_report ()</A></STRONG><DD>
+<P>
+Deliver a ``spam report'' on the checked mail message. This contains
+details of how many spam detection rules it triggered.
+
+<P>
+The report is returned as a multi-line string, with the lines separated by
+<CODE>\n</CODE> characters.
+
+<DT><STRONG><A NAME="item__status_rewrite_mail">$status-&gt;rewrite_mail ()</A></STRONG><DD>
+<P>
+Rewrite the mail message. This will add headers, and possibly body text, to
+reflect it's spam or not-spam status.
+
+<P>
+The modifications made are as follows:
+
+<DL>
+<DT><STRONG><A NAME="item_Subject">Subject: header for spam mails</A></STRONG><DD>
+<P>
+The string <CODE>*****SPAM*****</CODE> is prepended to the subject.
+
+<DT><STRONG><A NAME="item_X">X-Spam-Status: header for spam mails</A></STRONG><DD>
+<P>
+A string, <CODE>Yes, hits=nn required=nn</CODE> is set in this header to reflect the filter status.
+
+<DT><STRONG><A NAME="item_X">X-Spam-Flag: header for spam mails</A></STRONG><DD>
+<P>
+Set to <CODE>YES</CODE>.
+
+<DT><STRONG><A NAME="item_Content">Content-Type: header for spam mails</A></STRONG><DD>
+<P>
+Set to <CODE>text/plain</CODE>, in order to defang HTML mail or other active content that could ``call
+back'' to the spammer.
+
+<DT><STRONG><A NAME="item_spam">spam mail body text</A></STRONG><DD>
+<P>
+The SpamAssassin report is added to top of the mail message body.
+
+<DT><STRONG>X-Spam-Status: header for non-spam mails</STRONG><DD>
+<P>
+A string, <CODE>No, hits=nn required=nn</CODE> is set in this header to reflect the filter status.
+
+</DL>
+<DT><STRONG><A NAME="item__status_handle_auto_report">$status-&gt;handle_auto_report ()</A></STRONG><DD>
+<P>
+If this mail message has a high enough hit score, report it to
+spam-tracking services straight away, without waiting for user
+confirmation. See the documentation for <EM>spamassassin</EM>'s <CODE>-r</CODE> switch for details on what spam-tracking services are used.
+
+</DL>
+<P>
+<HR>
+<H1><A NAME="SEE_ALSO">SEE ALSO</A></H1>
+<P>
+<CODE>Mail::SpamAssassin</CODE>
+
+<CODE>spamassassin</CODE>
+
+
+
+</BODY>
+
+</HTML>

@@ -1,0 +1,221 @@
+2001-06-21 23:53  jmason
+
+	* t/forged_rcvd.t: hmm, tset turned off for now
+
+2001-06-21 18:40  jmason
+
+	* README: added test paragraph
+
+2001-06-21 16:33  jmason
+
+	* spamassassin.cf: changed ORBS check to ORDB check
+
+2001-06-11 15:00  jmason
+
+	* spamassassin.cf: added = before mailto:s in patterns
+
+2001-06-11 13:44  jmason
+
+	* Changes, spamassassin.cf, spamassassin.prefs, build/update_devel,
+	build/update_stable: updated build scripts
+
+2001-06-05 13:59  jmason
+
+	* spamassassin, spamassassin.prefs, lib/Mail/SpamAssassin/Conf.pm,
+	lib/Mail/SpamAssassin/PerMsgStatus.pm: added auto-reporting code
+
+2001-06-01 17:09  jmason
+
+	* spamassassin.cf: oops, forged received header support was not
+	great
+
+2001-05-31 13:23  jmason
+
+	* spamassassin.cf: fixed buglet in FORGED_RCVD_FOUND
+
+2001-05-31 13:21  jmason
+
+	* spamassassin.cf, spamassassin.prefs: avoided false positives from
+	mild javascript
+
+2001-05-31 13:17  jmason
+
+	* MANIFEST, spamassassin, spamassassin.cf, spamassassin.prefs,
+	lib/Mail/SpamAssassin/Dns.pm, lib/Mail/SpamAssassin/EvalTests.pm,
+	lib/Mail/SpamAssassin/PerMsgStatus.pm, t/forged_rcvd.t,
+	t/data/spam/002: added forged-received check, ALL header match
+
+2001-05-31 12:55  jmason
+
+	* lib/Mail/SpamAssassin/: Conf.pm, PerMsgStatus.pm: oops, missed
+	body tests
+
+2001-05-31 12:51  jmason
+
+	* spamassassin, spamassassin.cf, lib/Mail/SpamAssassin/Conf.pm,
+	lib/Mail/SpamAssassin/EvalTests.pm,
+	lib/Mail/SpamAssassin/PerMsgStatus.pm: added 'full' configuration
+	item
+
+2001-05-25 12:48  jmason
+
+	* Changes, spamassassin, spamassassin.cf, lib/Mail/SpamAssassin.pm:
+	added support for delivering to MAIL, DEFAULT etc. from Robert Klep
+	<robert /at/ ilse.nl>
+
+2001-05-22 15:06  jmason
+
+	* Changes, lib/Mail/SpamAssassin/Reporter.pm: bug in razor report
+	code fixed
+
+2001-05-22 14:48  jmason
+
+	* spamassassin.cf, lib/Mail/SpamAssassin/Conf.pm,
+	lib/Mail/SpamAssassin/EvalTests.pm,
+	lib/Mail/SpamAssassin/PerMsgStatus.pm: changed razor to list
+	hostname in config file arg
+
+2001-05-22 14:31  jmason
+
+	* lib/Mail/SpamAssassin/: EncappedMessage.pm, ExposedMessage.pm,
+	Message.pm, Reporter.pm: took out pod, it was confusing installer
+
+2001-05-22 14:28  jmason
+
+	* README, spamassassin, lib/Mail/SpamAssassin.pm,
+	lib/Mail/SpamAssassin/EncappedMessage.pm,
+	lib/Mail/SpamAssassin/ExposedMessage.pm,
+	lib/Mail/SpamAssassin/Message.pm,
+	lib/Mail/SpamAssassin/Reporter.pm: some doco changes
+
+2001-05-17 16:36  jmason
+
+	* README, spamassassin.prefs: added README notes
+
+2001-05-17 16:28  jmason
+
+	* spamassassin, lib/Mail/SpamAssassin/Reporter.pm: added Razor
+	support
+
+2001-05-17 16:24  jmason
+
+	* MANIFEST, spamassassin, spamassassin.cf,
+	lib/Mail/SpamAssassin.pm, lib/Mail/SpamAssassin/Conf.pm,
+	lib/Mail/SpamAssassin/EncappedMessage.pm,
+	lib/Mail/SpamAssassin/EvalTests.pm,
+	lib/Mail/SpamAssassin/ExposedMessage.pm,
+	lib/Mail/SpamAssassin/Message.pm,
+	lib/Mail/SpamAssassin/PerMsgStatus.pm,
+	lib/Mail/SpamAssassin/Reporter.pm, t/SATest.pm, t/nonspam.t,
+	t/spam.t, t/test_dir, t/data/nice/001, t/data/spam/001: added Razor
+	support
+
+2001-05-17 00:12  jmason
+
+	* MANIFEST, spamassassin, lib/Mail/SpamAssassin/EncappedMessage.pm,
+	lib/Mail/SpamAssassin/EvalTests.pm,
+	lib/Mail/SpamAssassin/ExposedMessage.pm,
+	lib/Mail/SpamAssassin/Message.pm,
+	lib/Mail/SpamAssassin/PerMsgStatus.pm: added Mail::Internet encap
+	code
+
+2001-05-16 23:31  jmason
+
+	* spamassassin.cf, spamassassin.prefs,
+	lib/Mail/SpamAssassin/Conf.pm, lib/Mail/SpamAssassin/EvalTests.pm,
+	lib/Mail/SpamAssassin/PerMsgStatus.pm: mods to isolate Mail::Audit
+	support
+
+2001-05-08 14:25  jmason
+
+	* Changes, spamassassin, spamassassin.cf, spamassassin.prefs: added
+	extra testing paths
+
+2001-05-02 17:55  jmason
+
+	* Changes, MANIFEST, spamassassin.cf, windows_install.pl,
+	lib/Mail/SpamAssassin.pm: added windows_install script
+
+2001-05-02 13:01  jmason
+
+	* testmails/positive.tar.gz: moved positive test mails into a
+	tarfile to speed up cvs
+
+2001-05-01 15:16  jmason
+
+	* spamassassin.cf: fixed RBL, new anti-porn patterns
+
+2001-05-01 15:10  jmason
+
+	* spamassassin, lib/Mail/SpamAssassin.pm,
+	lib/Mail/SpamAssassin/EvalTests.pm: RBL lookups were broken
+
+2001-04-24 16:30  jmason
+
+	* Changes, lib/Mail/SpamAssassin.pm,
+	lib/Mail/SpamAssassin/EvalTests.pm,
+	lib/Mail/SpamAssassin/PerMsgStatus.pm: changes to DNS lookup code
+
+2001-04-23 15:04  jmason
+
+	* Changes, spamassassin.cf, spamassassin.prefs: fixed RBL
+
+2001-04-23 15:01  jmason
+
+	* spamassassin.cf, lib/Mail/SpamAssassin/EvalTests.pm: fixed RBL
+	domain to use mail-abuse.org
+
+2001-04-23 13:56  jmason
+
+	* Changes: [no log message]
+
+2001-04-23 00:04  jmason
+
+	* MANIFEST.SKIP: added changes.bak
+
+2001-04-22 23:52  jmason
+
+	* .cvsignore: [no log message]
+
+2001-04-22 22:41  jmason
+
+	* Changes, MANIFEST: added Changes
+
+2001-04-22 22:40  jmason
+
+	* MANIFEST, MANIFEST.SKIP, Makefile.PL, rules.cf, userprefs.cf,
+	build/get_version, build/update_devel, build/update_stable: fixed
+	some stuff for disting
+
+2001-04-22 21:26  jmason
+
+	* lib/Mail/SpamAssassin/: Main.pm, Msg.pm: deld files
+
+2001-04-22 21:26  jmason
+
+	* MANIFEST.SKIP, sample-nonspam.txt, sample-spam.txt,
+	spamassassin.cf, spamassassin.prefs, lib/Mail/SpamAssassin.pm,
+	lib/Mail/SpamAssassin/PerMsgStatus.pm: added new files
+
+2001-04-22 21:24  jmason
+
+	* .cvsignore, MANIFEST, Makefile.PL, README, TODO, spamassassin,
+	lib/Mail/SpamAssassin/Conf.pm, lib/Mail/SpamAssassin/EvalTests.pm:
+	remodeled with factory interface, and added lotsa doco
+
+2001-04-20 19:47  jmason
+
+	* .cvsignore, MANIFEST, Makefile.PL, README, TODO, spamassassin,
+	rules.cf, userprefs.cf, lib/Mail/SpamAssassin/Main.pm,
+	lib/Mail/SpamAssassin/Conf.pm, lib/Mail/SpamAssassin/EvalTests.pm,
+	lib/Mail/SpamAssassin/Msg.pm, testmails/get_stats,
+	testmails/reorder_by_hits, testmails/stats: Initial revision
+
+2001-04-20 19:47  jmason
+
+	* .cvsignore, MANIFEST, Makefile.PL, README, TODO, spamassassin,
+	rules.cf, userprefs.cf, lib/Mail/SpamAssassin/Main.pm,
+	lib/Mail/SpamAssassin/Conf.pm, lib/Mail/SpamAssassin/EvalTests.pm,
+	lib/Mail/SpamAssassin/Msg.pm, testmails/get_stats,
+	testmails/reorder_by_hits, testmails/stats: Initial import
+
