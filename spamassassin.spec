@@ -5,9 +5,9 @@
 
 #%include        /usr/lib/rpm/macros.perl
 
-%define perl_archlib %(eval "`perl -V:installarchlib`"; echo "$installarchlib")
-%define perl_sitelib %(eval "`perl -V:installsitelib`"; echo "$installsitelib")
-%define perl_sitearch %(eval "`perl -V:installsitearch`"; echo "$installsitearch")
+%define perl_archlib %(eval "`%{__perl} -V:installarchlib`"; echo "$installarchlib")
+%define perl_sitelib %(eval "`%{__perl} -V:installsitelib`"; echo "$installsitelib")
+%define perl_sitearch %(eval "`%{__perl} -V:installsitearch`"; echo "$installsitearch")
 
 %define pdir    Mail
 %define pnam    SpamAssassin
@@ -16,8 +16,8 @@ Summary:        a spam filter for email which can be invoked from mail delivery 
 Summary(pl):    Filtr antyspamowy, przeznaczony dla programów dostarczaj±cych pocztê (MDA)
 
 Group:          Applications/Mail
-%define version 2.40
-%define real_version 2.40
+%define version 2.42
+%define real_version 2.42
 %define release 1
 
 %define name    spamassassin
@@ -29,11 +29,10 @@ Release: %{release}
 License: Artistic
 URL: http://spamassassin.org/
 Source: http://spamassassin.org/released/Mail-SpamAssassin-%{real_version}.tar.gz
-Requires: perl >= 5.004
 Buildroot: %{_tmppath}/%{name}-root
 Prefix: %{_prefix}
 Prereq: /sbin/chkconfig
-Requires: perl >= 5.004 perl(Pod::Usage) perl(HTML::Parser)
+Requires: perl-Mail-SpamAssassin = %{version}-%{release}
 Distribution: SpamAssassin
 
 %define __find_provides /usr/lib/rpm/find-provides.perl
@@ -65,6 +64,7 @@ poczty.
 Summary:        Miscleanous tools for SpamAssassin
 Summary(pl):    Przeró¿ne narzêdzia zwi±zane z SpamAssassin
 Group:          Applications/Mail
+Requires: perl-Mail-SpamAssassin = %{version}-%{release}
 
 %description tools
 Miscleanous tools from various authors, distributed with SpamAssassin.
@@ -77,6 +77,7 @@ Przeró¿ne narzêdzia, dystrybuowane razem z SpamAssassin. Zobacz
 %package -n perl-Mail-SpamAssassin
 Summary:        %{pdir}::%{pnam} -- SpamAssassin e-mail filter Perl modules
 Summary(pl):    %{pdir}::%{pnam} -- modu³y Perla filtru poczty SpamAssassin
+Requires: perl >= 5.004 perl(Pod::Usage) perl(HTML::Parser)
 # PLD version:
 #Group:          Development/Languages/Perl
 # Red Hat version:
@@ -126,8 +127,6 @@ mkdir -p %{buildroot}/etc/mail/spamassassin
 %doc README Changes sample-nonspam.txt sample-spam.txt spamd/README.spamd doc INSTALL
 %attr(755,root,root) %{_bindir}/*
 %config(noreplace) %attr(755,root,root) %{initdir}/spamassassin
-%config(noreplace) %{_sysconfdir}/mail/spamassassin
-%{_datadir}/spamassassin
 %{_mandir}/man1/*
 
 %files tools
@@ -137,6 +136,8 @@ mkdir -p %{buildroot}/etc/mail/spamassassin
 %files -n perl-Mail-SpamAssassin
 %defattr(644,root,root,755)
 %{perl_sitelib}/*
+%config(noreplace) %{_sysconfdir}/mail/spamassassin
+%{_datadir}/spamassassin
 %{_mandir}/man3/*
 
 %clean
@@ -161,6 +162,9 @@ if [ $1 = 0 ]; then
 fi
 
 %changelog
+
+* Wed Sep 11 2002 Justin Mason <jm-spec@jmason.org>
+- spamassassin RPM now requires perl-Mail-SpamAssassin; from Theo
 
 * Tue Sep 03 2002 Theo Van Dinter <felicity@kluge.net>
 - added INSTALL to documentation files

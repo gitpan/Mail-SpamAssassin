@@ -299,6 +299,12 @@ sub check_for_forged_received_trail {
       $from[$i] =~ s/.*\.(\S+\.\S+)$/$1/;
     }
 
+    # valid: bouncing around inside 1 machine, via the localhost interface.
+    # freshmeat newsletter does this.
+    if (defined ($from[$i]) && $from[$i] eq 'localhost.localdomain') {
+      $from[$i] = undef;
+    }
+
     if ($i > 0 && defined($by[$i]) && defined($from[$i - 1]) &&
 	($by[$i] ne $from[$i - 1]))
     {
@@ -1037,7 +1043,17 @@ sub word_is_in_dictionary {
   return 1 if ($word_len < 3);
 
   if (!$triplets_loaded) {
-    my $filename = $self->{main}->{rules_filename} . "/triplets.txt";
+    my $filename;
+    foreach my $tr_path ( $self->{main}->{DEF_RULES_DIR}, $self->{main}->{LOCAL_RULES_DIR} ) {
+        next unless -f "$tr_path/triplets.txt";
+        $filename = "$tr_path/triplets.txt";
+        last;
+    }
+
+    unless ( defined $filename ) {
+      dbg("failed to locate the triplets.txt file");
+      return 1;
+    }
 
     if (!open (TRIPLETS, "<$filename")) {
       dbg ("failed to open '$filename', cannot check dictionary");
@@ -2041,6 +2057,7 @@ sub check_for_fake_aol_relay_in_rcvd {
   # there's another set of spammers who generate fake hostnames to go with
   # it!
   if (/ rly-[a-z][a-z]\d\d\./i) {
+    return 0 if /\/AOL-\d+\.\d+\.\d+\)/;    # via AOL mail relay
     return 0 if /ESMTP id (?:RELAY|MAILRELAY|MAILIN)/; # AOLish
     return 1;
   }

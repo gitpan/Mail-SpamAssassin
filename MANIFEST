@@ -15,6 +15,7 @@ Changes
 acconfig.h
 binaries.mk.in
 build/README
+build/preprocessor
 build/cf_to_html
 build/get_version
 build/update_devel
@@ -25,7 +26,6 @@ configure.in
 contrib/communigate.sh
 contrib/snp.tar.gz
 contrib/spamcheck.py
-fixpath.pl
 lib/Mail/SpamAssassin.pm
 lib/Mail/SpamAssassin/AuditMessage.pm
 lib/Mail/SpamAssassin/AutoWhitelist.pm
@@ -131,6 +131,7 @@ t/data/spam/006
 t/data/spam/007
 t/data/spam/badmime.txt
 t/data/spam/base64.txt
+t/db_awl_path.t
 t/db_based_whitelist.t
 t/db_based_whitelist_ips.t
 t/forged_rcvd.t
@@ -157,3 +158,5 @@ tools/check_whitelist
 tools/speedtest
 tools/translation_prep.pl
 windows_install.pl
+masses/fp-fn-statistics
+t/whitelist_addrs.t

@@ -4,6 +4,7 @@
 package main;
 
 use Cwd;
+use Config;
 use File::Path;
 
 # Set up for testing. Exports (as global vars):
@@ -14,11 +15,22 @@ use File::Path;
 sub sa_t_init {
   my $tname = shift;
 
+  my $perl_path;
+  if ($config{PERL_PATH}) {
+    $perl_path = $config{PERL_PATH};
+  }
+  elsif ($^X =~ m|^/|) {
+    $perl_path = $^X;
+  }
+  else {
+    $perl_path = $Config{perlpath};
+    $perl_path =~ s|/[^/]*$|/$^X|;
+  }
   $scr = $ENV{'SCRIPT'};
-  $scr ||= "perl -w ../spamassassin";
+  $scr ||= "$perl_path -w ../spamassassin";
 
   $spamd = $ENV{'SPAMD_SCRIPT'};
-  $spamd ||= "../spamd/spamd -x";
+  $spamd ||= "$perl_path -w ../spamd/spamd -x";
 
   $spamc = $ENV{'SPAMC_SCRIPT'};
   $spamc ||= "../spamd/spamc";
@@ -143,7 +155,7 @@ sub spamcrun_background {
   $spamcargs =~ s!/!\\!g if ($^O =~ /^MS(DOS|Win)/i);
 
   print ("\t$spamcargs &\n");
-  system ("$spamcargs > log/$testname.out &") and return 0;
+  system ("$spamcargs > log/$testname.bg &") and return 0;
 
   1;
 }
@@ -214,8 +226,23 @@ sub start_spamd {
 }
 
 sub stop_spamd {
-  print ("Killed ",kill (15, $spamd_pid)," spamd instances\n");
-  $spamd_pid = 0;
+  if ( $spamd_pid <= 1) {
+    print ("Invalid spamd pid: $spamd_pid. Spamd not started/crashed?\n");
+    return 0;
+  } else {
+    my $killed = kill (15, $spamd_pid);
+    print ("Killed $killed spamd instances\n");
+
+    # wait for it to exit, before returning.
+    for my $waitfor (0 .. 5) {
+      if (kill (0, $spamd_pid) == 0) { last; }
+      print ("Waiting for spamd at pid $spamd_pid to exit...\n");
+      sleep 1;
+    }
+
+    $spamd_pid = 0;
+    return $killed;
+  }
 }
 
 # ---------------------------------------------------------------------------

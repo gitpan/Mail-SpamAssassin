@@ -1,5 +1,4 @@
 # SpamAssassin sample procmailrc
-# $Id: procmailrc.example,v 1.3.2.4 2002/09/03 16:11:38 jmason Exp $
 #
 # Pipe the mail through spamassassin (replace 'spamassassin' with 'spamc'
 # if you use the spamc/spamd combination)
@@ -23,3 +22,16 @@ almost-certainly-spam
 :0:
 * ^X-Spam-Status: Yes
 probably-spam
+
+# Work around procmail bug: any output on stderr will cause the "F" in "From"
+# to be dropped.  This will re-add it.
+:0 H
+* ! ^From[ ]
+* ^rom[ ]
+{
+  LOG="*** Dropped F off From_ header! Fixing up. "
+
+  :0 fhw
+  | sed -e 's/^rom /From /'
+}
+

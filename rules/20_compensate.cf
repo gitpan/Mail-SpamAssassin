@@ -1,9 +1,13 @@
-# SpamAssassin rules file: compensation for common false positives.
-# $Id: 20_compensate.cf,v 1.49.2.9 2002/09/04 21:58:51 quinlan Exp $
+# SpamAssassin rules file: compensation for common false positives
+#
+# Please don't modify this file as your changes will be overwritten with
+# the next update. Use @@LOCAL_RULES_DIR@@/local.cf instead.
+# See 'perldoc Mail::SpamAssassin::Conf' for details.
+#
 ###########################################################################
 # Header compensation tests
 
-require_version 2.41
+require_version @@VERSION@@
 
 # support for Habeas sender-warranted email: http://www.habeas.com/
 header HABEAS_SWE               eval:message_is_habeas_swe()
@@ -83,7 +87,7 @@ body MSN_GROUPS                 eval:check_for_msn_groups_headers()
 describe MSN_GROUPS             Came from MSN Communities
 tflags MSN_GROUPS               nice
 
-header NMS_CGI_NOT_BUGGY        X-Mailer =~ /^NMS FormMail.pl.*v\d/
+header NMS_CGI_NOT_BUGGY        X-Mailer =~ /^NMS FormMail\.pl.*v\d/
 describe NMS_CGI_NOT_BUGGY      Not Matt's Scripts formmail.pl
 tflags NMS_CGI_NOT_BUGGY	nice
 
@@ -129,7 +133,7 @@ header SUBJECT_MONTH_2          Subject =~ /\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(
 describe SUBJECT_MONTH_2        Subject contains a month name - probable newsletter (2)
 tflags SUBJECT_MONTH_2		nice
 
-header FROM_EGROUPS             X-eGroups-Return =~ /^sentto-.*\@returns.groups.yahoo.com$/
+header FROM_EGROUPS             X-eGroups-Return =~ /^sentto-.*\@returns\.groups\.yahoo\.com$/
 describe FROM_EGROUPS           Appears to be from yahoo groups
 tflags FROM_EGROUPS		nice
 
@@ -138,7 +142,7 @@ tflags FROM_EGROUPS		nice
 
 
 # compensate for common false pos on above rule: Yahoo! webmail
-header YAHOO_MSGID_ADDED        ALL =~ /Message-Id: <\S+\.mail.yahoo.com>\nReceived: .*by \S+mail.yahoo.com via HTTP;/s
+header YAHOO_MSGID_ADDED        ALL =~ /Message-Id: <\S+\.mail\.yahoo\.com>\nReceived: .*by \S+mail\.yahoo\.com via HTTP;/s
 describe YAHOO_MSGID_ADDED      'Message-Id' was added by yahoo.com, that's OK
 tflags YAHOO_MSGID_ADDED        nice
 

@@ -166,10 +166,15 @@ sub check {
 
   $self->delete_fulltext_tmpfile();
 
+  # Round the hits to 3 decimal places to avoid rounding issues
+  # We assume required_hits to be properly rounded already.
+  # add 0 to force it back to numeric representation instead of string.
+  $self->{hits} = (sprintf "%0.3f", $self->{hits}) + 0;
+  
   dbg ("is spam? score=".$self->{hits}.
-  			" required=".$self->{conf}->{required_hits}.
+                        " required=".$self->{conf}->{required_hits}.
                         " tests=".$self->get_names_of_tests_hit());
-  $self->{is_spam} = ($self->{hits} >= $self->{conf}->{required_hits});
+  $self->{is_spam} = $self->is_spam();
 
   if ($self->{conf}->{use_terse_report}) {
     $_ = $self->{conf}->{terse_report_template};
@@ -1669,18 +1674,21 @@ sub do_awl_tests {
 
       if(defined($meanscore))
       {
-          $delta = ($meanscore - $self->{hits})*$self->{main}->{conf}->{auto_whitelist_factor};
+          $delta = ($meanscore - $self->{hits}) * $self->{main}->{conf}->{auto_whitelist_factor};
       }
 
-      if($delta != 0)
-      {
+      # Update the AWL *before* adding the new score, otherwise
+      # early high-scoring messages are reinforced compared to
+      # later ones.  See
+      # http://bugs.debian.org/cgi-bin/bugreport.cgi?bug=159704
+      #
+      $whitelist->add_score($self->{hits});
+
+      if($delta != 0) {
           $self->_handle_hit("AWL",$delta,"AWL: ","Auto-whitelist adjustment");
       }
 
       dbg("Post AWL score: ".$self->{hits});
-
-      # Update the AWL
-      $whitelist->add_score($self->{hits});
       $whitelist->finish();
       1;
     };
