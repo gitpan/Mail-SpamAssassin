@@ -89,7 +89,7 @@ sub check_for_forged_hotmail_received_headers {
   # spammers do not ;)
 
   if ($rcvd =~ /from hotmail.com/
-  	&& $rcvd !~ /from hotmail.com \(\S+\.\S+\.hotmail\.com /)
+  	&& $rcvd !~ /from \S*hotmail.com \(\S+\.hotmail\.com /)
   {
     return 1;
   } else {
@@ -112,11 +112,16 @@ sub check_for_bad_helo {
 sub check_subject_for_lotsa_8bit_chars {
   my ($self) = @_;
   local ($_);
+
   $_ = $self->get ('Subject');
 
-  # include [ and ] because 8-bit posts to mailing lists may not get
-  # hit otherwise. e.g.: Subject: [ILUG] 出售傳真號碼 
-  my @highbits = /[\[\] \200-\377]/g; my $numhis = $#highbits+1;
+  # cut [ and ] because 8-bit posts to mailing lists may not get
+  # hit otherwise. e.g.: Subject: [ILUG] 出售傳真號碼 .  Also cut
+  # *, since mail that goes through spamassassin multiple times will
+  # not be tagged on the second pass otherwise.
+  s/\[\]\* //g;
+
+  my @highbits = /[\200-\377]/g; my $numhis = $#highbits+1;
   my $numlos = length($_) - $numhis;
 
   ($numlos <= $numhis && $numhis > 3);
@@ -155,7 +160,13 @@ sub check_rbl {
     @ips = @ips[$#ips-1 .. $#ips];        # only check the originating 2
   }
 
+  if (!defined $self->{rbl_IN_As_found}) {
+    $self->{rbl_IN_As_found} = ' ';
+    $self->{rbl_matches_found} = ' ';
+  }
+
   init_rbl_check_reserved_ips();
+  my $already_matched_in_other_zones = ' '.$self->{rbl_matches_found}.' ';
   my $found = 0;
 
   # First check that DNS is available, if not do not perform this check.
@@ -163,12 +174,68 @@ sub check_rbl {
   eval q{
     foreach my $ip (@ips) {
       next if ($ip =~ /${IP_IN_RESERVED_RANGE}/o);
+      next if ($already_matched_in_other_zones =~ / ${ip} /);
       next unless ($ip =~ /(\d+)\.(\d+)\.(\d+)\.(\d+)/);
-      $found = $self->do_rbl_lookup ("$4.$3.$2.$1.".$rbl_domain, $found);
+      $found = $self->do_rbl_lookup ("$4.$3.$2.$1.".$rbl_domain, $ip, $found);
     }
   };
 
   $found;
+}
+
+###########################################################################
+
+sub check_rbl_results_for {
+  my ($self, $addr) = @_;
+
+  return 0 unless $self->is_dns_available();
+  return 0 unless defined ($self->{rbl_IN_As_found});
+
+  my $inas = ' '.$self->{rbl_IN_As_found}.' ';
+  if ($inas =~ / ${addr} /) { return 1; }
+
+  return 0;
+}
+
+###########################################################################
+
+sub check_for_unique_subject_id {
+  my ($self) = @_;
+  local ($_);
+  $_ = $self->get ('Subject');
+
+  my $id = undef;
+  if (/[-_\s]{7,}([-a-z0-9]{4,})$/
+	|| /\s+[-:\#\(\[]+([-a-zA-Z0-9]{4,})[\]\)]+$/
+	|| /\s+[-:\#]([-a-zA-Z0-9]{4,})$/)
+  {
+    $id = $1;
+  }
+
+  if (!defined($id) || $self->word_is_in_dictionary ($id)) {
+    return 0;
+  } else {
+    return 1;
+  }
+}
+
+sub word_is_in_dictionary {
+  my ($self, $word) = @_;
+  local ($_);
+
+  $word =~ tr/A-Z/a-z/;
+  if (!open (DICT, "</usr/dict/words") &&
+  	!open (DICT, "</usr/share/dict/words"))
+  {
+    dbg ("failed to open /usr/dict/words, cannot check dictionary");
+    return 1;		# fail safe
+  }
+
+  while (<DICT>) {
+    chop; if ($word eq $_) { close DICT; return 1; }
+  }
+
+  close DICT; return 0;
 }
 
 ###########################################################################

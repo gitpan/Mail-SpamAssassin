@@ -1,7 +1,6 @@
-#!/usr/bin/perl -w
+#!/usr/bin/perl
 
 use Getopt::Std;
-use Config;
 
 use FindBin;
 
@@ -48,55 +47,31 @@ BEGIN {
 use lib 'lib';
 use lib '../lib';		# for testing in ./t
 
-@default_rules_path = qw(
-	./spamassassin.cf
-	../spamassassin.cf
-	/etc/spamassassin.cf
-	__installsitelib__/spamassassin.cf
-);
-
-@default_prefs_path = qw(
-	/etc/spamassassin.prefs
-	__installsitelib__/spamassassin.prefs
-);
-
-@default_userprefs_path = qw(
-	./spamassassin.prefs
-	../spamassassin.prefs
-	~/.spamassassin.cf
-);
-
 sub usage {
   my $ver = Mail::SpamAssassin::Version();
-  my $rules = join ("\n\t\t\t\t", @default_rules_path);
-  my $prefs = join ("\n\t\t\t\t", @default_userprefs_path);
+  my $rules = join ("\n\t\t\t\t", @Mail::SpamAssassin::default_rules_path);
+  my $prefs = join ("\n\t\t\t\t", @Mail::SpamAssassin::default_userprefs_path);
   die <<EOUSAGE;
 
 Usage: spamassassin [option ...] < mailmessage
        spamassassin -P [option ...] < mailmessage > output
 
 Options:
- 
+
+  -h		   print this help and terminate without further action
   -P               pipe message through, instead of delivering to mail spool
- 
-  -t               only testing
-
+  -t               only testing; pipe message through and add extra report
   -r               mail message is verified as spam, report it
-
   -w fromaddr	   send a warning mail back to the sender of the message,
                    notifying them that their message has been marked as spam
 		   (only useful if -r is used)
-
   -l filename      Log all mail messages to a mbox-format file
-
-  -d		   Remove SpamAssassin reports from a mail message
-
+  -L               Local tests only, do not do internet-based checks
+  -d		   Remove SpamAssassin reports from a mail message and print
   -c config        configuration file
                    (default:	$rules )
-
   -p prefs         user preferences file
                    (default:	$prefs )
-
   -D		   log diagnostic messages
 
 Version: $ver      Home: http://spamassassin.taint.org/
@@ -110,10 +85,10 @@ require Mail::Audit;
 
 use vars qw{
   $opt_t $opt_c $opt_p $opt_h $opt_V $opt_D $opt_r $opt_P $opt_w $opt_l
-  $opt_d
+  $opt_d $opt_L
 };
 
-getopts ('tc:p:hVDrPw:l:d') or usage();
+getopts ('tc:p:hVDrPw:l:dL') or usage();
 
 if (defined $opt_h) { usage(); }
 if (defined $opt_V) {
@@ -134,34 +109,14 @@ my $mail = Mail::Audit->new();
 # You can then use the rewrite() method (passing in the Mail::Audit object) to
 # rewrite the spam.
 #
-# (This implementation does other stuff though, such as -t support, and setting
-# up the user's rules files if they don't exist; ignore that stuff.)
-
-if (!defined $opt_c) {
-  $opt_c = first_existing_path (@default_rules_path);
-}
-
-if (!defined $opt_p) {
-  $opt_p = first_existing_path (@default_userprefs_path);
-
-  if (!-f $opt_p) {
-    # copy in the default one for later editing
-
-    my $defprefs = first_existing_path (@default_prefs_path);
-    use File::Copy;
-    if (copy ($defprefs, $opt_p)) {
-      warn "Created user preferences file: $opt_p\n";
-    } else {
-      warn "Failed to create user preferences file\n".
-      		"\"$opt_p\" from default \"$defprefs\".\n";
-    }
-  }
-}
+# (This implementation does other stuff though, such as -t support; ignore that
+# stuff.)
 
 # finally, now that we've found the configuration, start testing the message...
 my $spamtest = new Mail::SpamAssassin ({
   'rules_filename'	=> $opt_c,
   'userprefs_filename'	=> $opt_p,
+  'local_tests_only'	=> $opt_L,
   'debug'		=> $opt_D
 });
 
@@ -213,29 +168,12 @@ my $where = $ENV{'MAIL'} || $ENV{'DEFAULT'} || undef;
 $mail->accept($where);
 exit;
 
-# ---------------------------------------------------------------------------
 
-sub expand_name ($) {
-  my $name = shift;
-  return (getpwnam($name))[7] if ($name ne '');
-  return $ENV{HOME} if defined $ENV{HOME};
-  return (getpwuid($>))[7];
-}
 
-sub sed_path {
-  my $path = shift;
-  $path =~ s/__installsitelib__/$Config{installsitelib}/gs;
-  $path =~ s/^\~([^\/]*)/&expand_name($1)/es;
-  $path;
-}
-
-sub first_existing_path {
-  my $path;
-  foreach my $p (@_) { 
-    $path = sed_path ($p);
-    if (-e $path) { return $path; }
-  }
-  $path;
+# this is never called, it's just used to shut up the warnings
+sub NEVERCALLED {
+  @Mail::SpamAssassin::default_rules_path =
+  			@Mail::SpamAssassin::default_userprefs_path;
 }
 
 # ---------------------------------------------------------------------------
@@ -249,14 +187,16 @@ spamassassin - mail filter to identify spam using text analysis
   spamassassin [option ...] < mailmessage
   spamassassin -P [option ...] < mailmessage > output
 
+  -h		   print this help and terminate without further action
   -P               pipe message through, instead of delivering to mail spool
-  -t               only testing
+  -t               only testing; pipe message through and add extra report
   -r               report this message as verified spam
   -w fromaddr	   send a warning mail back to the sender of the message,
                    notifying them that their message has been marked as spam
 		   (only useful if -r is used)
   -l filename      Log all mail messages to a mbox-format file
-  -d		   Remove SpamAssassin reports from a mail message
+  -L               Local tests only, do not do internet-based checks
+  -d		   Remove SpamAssassin reports from a mail message and print
   -c config        configuration file
   -p prefs         user preferences file
   -D               produce diagnostic output
@@ -323,6 +263,13 @@ TRAPPING> section below for more details.
 
 Log all mail messages that pass through the filter, to an mbox-format file
 named by C<filename>.  Handy for use with C<-r> and C<-w>.
+
+=item -L
+
+Do only the ''local'' tests, ones that do not require an internet connection to
+operate.  Normally, SpamAssassin will try to detect whether you are connected
+to the net before doing these tests anyway, but for faster checks you may wish
+to use this.
 
 =item -d
 

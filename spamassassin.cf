@@ -88,10 +88,13 @@ describe NO_REAL_NAME		From: does not include a real name
 header FROM_ENDS_IN_NUMS	From =~ /\d+\@/
 describe FROM_ENDS_IN_NUMS	From: ends in numbers
 
-header PLING_PLING		Subject =~ /\!+/
+header PLING			Subject =~ /\!/
+describe PLING			Subject has an exclamation mark
+
+header PLING_PLING		Subject =~ /\!\!+/
 describe PLING_PLING		Subject has lots of exclamation marks
 
-header SUBJ_HAS_UNIQ_ID		Subject =~ /(?:[-_\s]{7,}[-a-z0-9]{4,}|\s+[-:\#\(\[]+[-a-zA-Z0-9]{4,}[\]\)]+|\s+[-:\#][-a-zA-Z0-9]{4,})$/
+header SUBJ_HAS_UNIQ_ID		eval:check_for_unique_subject_id()
 describe SUBJ_HAS_UNIQ_ID	Subject contains a unique ID number
 
 header UNDISC_RECIPS		To =~ /Undisclosed.*Recipients/i
@@ -109,8 +112,11 @@ describe INVALID_DATE		Invalid Date: header (has AM/PM)
 header INVALID_DATE_NO_TZ	Date =~ /^..., .. ... .... ..:..:..$/
 describe INVALID_DATE_NO_TZ	Invalid Date: header (no timezone)
 
-header SUBJ_HAS_Q_MARK		Subject =~ /\?/
-describe SUBJ_HAS_Q_MARK	Subject: ends in a question mark
+header SUBJ_HAS_Q_MARK		Subject =~ /\?.{2,}$/
+describe SUBJ_HAS_Q_MARK	Subject: contains a question mark
+
+header SUBJ_ENDS_IN_Q_MARK	Subject =~ /\?+\s*$/
+describe SUBJ_ENDS_IN_Q_MARK	Subject: ends in a question mark
 
 header ADVERT_CODE		Subject =~ /(^\s*|\s+)ADV:/i
 describe ADVERT_CODE		Subject: contains advertising tag
@@ -142,6 +148,18 @@ describe BAD_HELO_WARNING	Fake name used in SMTP HELO command
 header SUBJ_FULL_OF_8BITS	eval:check_subject_for_lotsa_8bit_chars()
 describe SUBJ_FULL_OF_8BITS	Subject is full of 8-bit characters
 
+header RCVD_IN_RELAYS_ORDB_ORG	eval:check_rbl('relays.ordb.org.')
+describe RCVD_IN_RELAYS_ORDB_ORG Received via a relay in relays.ordb.org
+
+header RCVD_IN_OSIRUSOFT_COM	eval:check_rbl('relays.osirusoft.com.')
+describe RCVD_IN_OSIRUSOFT_COM	Received via a relay in relays.osirusoft.com
+
+header OSIRU_CONFIRMED_SPAM_SOURCE eval:check_rbl_results_for('127.0.0.4')
+describe OSIRU_CONFIRMED_SPAM_SOURCE Osirusoft.com: sender is Confirmed Spam Source
+
+header OSIRU_SPAMWARE_SITE	eval:check_rbl_results_for('127.0.0.6')
+describe OSIRU_SPAMWARE_SITE	Osirusoft.com: sender is a Spamware site or vendor
+
 header RCVD_IN_RBL		eval:check_rbl('blackholes.mail-abuse.org.')
 describe RCVD_IN_RBL		Received via RBL-listed relay, see http://www.mail-abuse.org/rbl/
 
@@ -150,12 +168,6 @@ describe RCVD_IN_RSS		Received via RSS-listed relay, see http://www.mail-abuse.o
 
 header RCVD_IN_DUL		eval:check_rbl('dialups.mail-abuse.org.')
 describe RCVD_IN_DUL		Received from a dialup IP, see http://www.mail-abuse.org/dul/
-
-header RCVD_IN_OSIRUSOFT_COM	eval:check_rbl('relays.osirusoft.com.')
-describe RCVD_IN_OSIRUSOFT_COM	Received from an IP in Osirusoft zone, see http://relays.osirusoft.com/
-
-header RCVD_IN_RELAYS_ORDB_ORG	eval:check_rbl('relays.ordb.org.')
-describe RCVD_IN_RELAYS_ORDB_ORG Received via a relay in relays.ordb.org
 
 header FORGED_RCVD_FOUND	ALL =~ /\n(?:Date|Subject|From):.*\nReceived: .*\n\n/s
 describe FORGED_RCVD_FOUND	Possibly-forged 'Received:' header found
@@ -178,6 +190,9 @@ describe X_PRIORITY_HIGH	Sent with 'X-Priority' set to high
 header X_MSMAIL_PRIORITY_HIGH	X-Msmail-Priority =~ /^High/
 describe X_MSMAIL_PRIORITY_HIGH	Sent with 'X-Msmail-Priority' set to high
 
+header MAY_BE_FORGED            Received =~ /\(may be forged\)/i
+describe MAY_BE_FORGED          'Received:' has 'may be forged' warning
+
 ###########################################################################
 
 full RAZOR_CHECK		eval:check_razor('razor.vipul.net:2702')
@@ -190,25 +205,28 @@ body SUBJ_REMOVE		/subject.*remove/i
 body REPLY_REMOVE_SUBJECT	/reply.*remove.*subject/i
 body REMOVE_IN_QUOTES		/\"remove\"/i
 
-body JAVASCRIPT			/<SCRIPT LANGUAGE=[^ ]*"JavaScript">/i
+body JAVASCRIPT			/<SCRIPT.*LANGUAGE.*JavaScript/i
 body REALLY_UNSAFE_JAVASCRIPT	/<body .*onLoad/i
 body SLIGHTLY_UNSAFE_JAVASCRIPT	/on(?:Blur|Error|KeyDown|KeyUp|Load|MouseOver|Resize|Unload)/i
 body HTML_WITH_BGCOLOR		/<body .*bgcolor=\S+/i
 body SPAM_FORM			/CHANGE EMAIL ADDRESS IN ACTION OF FORM/
 body SPAM_FORM_RETURN		/return validate_form/
 body SPAM_FORM_INPUT		/<input name=.*submit type=.*submit value=.*" *Submit By E-Mail *">/i
+body DOLLAR_DOLLAR_DOLLAR	/\$\$\$/
 
-body SENT_IN_COMPLIANCE		/message .*sen(?:d|t) in compliance (?:of|with)/
-body PARA_A_2_C_OF_1618		/Paragraph .a.*2.*C. of S. 1618/i
-body BILL_1618			/Bill.*1618.*TITLE.*III/i
-body S_1618			/S.\s*1618\s*-\s*SECTION\s*301/i
-body SECTION_301		/SECTION\s*301/
+# these are now full tests instead of body tests, to catch QP-encoded
+# split lines
+full SENT_IN_COMPLIANCE		/message .{0,10}sen(?:d|t) in compliance (?:of|with)/
+full PARA_A_2_C_OF_1618		/Paragraph .a.{0,10}2.{0,10}C. of S. 1618/i
+full BILL_1618			/Bill.{0,10}1618.{0,10}TITLE.{0,10}III/i
+full S_1618			/S..{0,10}1618.{0,10}-.{0,10}SECTION.{0,10}301/i
+full SECTION_301		/SECTION.{0,10}301/
 
 body POPLAUNCH			/StealthLaunch PopLaunch.\s/
 
 body NUMERIC_HTTP_ADDR		/http\:\/\/\d+\//i
 body SUPERLONG_LINE		/.{199,}/
-body ASCII_FORM_ENTRY		/[A-Za-z].* _{30,}/
+body ASCII_FORM_ENTRY		/[A-Za-z][A-Za-z]+.*\s+_{30,}/
 
 body AMAZING			/AMAZING/
 body GUARANTEE			/GUARANTEE/
@@ -272,6 +290,19 @@ body PURE_PROFIT		/PURE PROFIT/
 body FREE_CONSULTATION		/FREE CONSULTATION/i
 body INCREASE_SALES		/INCREASE SALES/i
 
+# somehow "/name.*\bcredit.?card\b/is" won't match, even if
+# it's there.  *boggle* (contrib: WW)
+body WANTS_CREDIT_CARD          /\bcredit.?card\b/i
+describe WANTS_CREDIT_CARD      Asks for credit card details
+
+# (contrib: WW)
+body ASKS_BILLING_ADDRESS       /\bbilling address\b/i
+describe ASKS_BILLING_ADDRESS   Asks for a billing address
+
+# (contrib: WW)
+body CYBER_FIRE_POWER           /(?:by|for) Cyber FirePower\!/
+describe CYBER_FIRE_POWER       mentions Cyber FirePower!, a spam-tool
+
 ###########################################################################
 # some full-text matches; note the [3D=\s"']* bits of the patterns, which
 # match some gibberish produced by quoted-printable encoding of HTML, often
@@ -286,14 +317,29 @@ describe A_HREF_TO_IP		Link to an IP-address instead of a named host
 full A_HREF_TO_REMOVE		/href[3D=\s\"\']*\S+(?:unsubscribe|remove)/i
 describe A_HREF_TO_REMOVE	Link to a URL containing "remove"
 
-full MAILTO_LINK		/=[3D=\s"']*mailto:/is
+# include the \n\n so we don't match mailto's in the headers!  Some list software
+# uses these to handle auto-subscribe/unsubscribe features
+full MAILTO_LINK		/\n\n.*=[3D=\s"']*mailto:/is
 full MAILTO_WITH_SUBJ_REMOVE	/mailto:\S+\?subject=[3D=\s"']*remove/is
-full MAILTO_WITH_SUBJ		/mailto:\S+\?subject=/is
+full MAILTO_WITH_SUBJ		/\n\n.*mailto:\S+\?subject=/is
 full FORM_W_MAILTO_ACTION	/action=[3D=\s"']*mailto:/is
 full AOL_USERS_LINK		/AOL\s+Users\s+Click\s+Here/is
 
 full WEB_BUGS			/<\s*img\s[^>]*src[^>]+\?/i
 describe WEB_BUGS		Image tag with an ID code to identify you
+
+# many spammers seem to do this nowadays (and probably track
+# their customers with it).  (contrib: WW)
+full RELAYING_FRAME		/<frame\b[^>]+\bsrc=[3D=\s"']*http:\/\//is
+describe RELAYING_FRAME		Frame wanted to load outside URL
+
+# Cyber FirePower! rants about 'Internet terrorists' aka spam fighters
+# (contrib: WW)
+full INTERNET_TERROR_RANT       /At the time of this mailing the return email address is a bonafide.*legitimate return email address that was signed up for with the express purpose .*Internet terrorists\./si
+describe INTERNET_TERROR_RANT   Cyber FirePower! rant about losing dropboxes
+
+full BASE64_ENC_TEXT		/\n\n.{0,100}\nContent-Type: text\/.{0,200}\nContent-Transfer-Encoding: base64/i
+describe BASE64_ENC_TEXT	Message text disguised using base-64 encoding
 
 ###########################################################################
 # Compensation for common false positives.
@@ -307,7 +353,186 @@ describe USER_IN_WHITELIST	From: address is in the user's white-list
 ###########################################################################
 # not quite spam, but dangerous/irritating nonetheless. Sircam worms etc.
 
-full SIRCAM_SIGNATURE		/Content-Disposition: attachment;\s+filename=..+\.\S\S\S\.(bat|com|lnk|pif)./s
+full SIRCAM_SIGNATURE		/Content-Disposition: attachment;\s+filename=.[^\n]+\.\S\S\S\.(bat|com|lnk|pif)./s
 describe SIRCAM_SIGNATURE	SECURITY: message contains the Sircam worm
 
+###########################################################################
+# Default scores: for header tests.  Note that if a test is named above,
+# but a score is not assigned here, the default score will be set to 1.
+
+# From: does not include a real name. (This gets *huge* hits.)
+#
+score NO_REAL_NAME		1
+
+# From: ends in numbers. Can also hit AOL/Yahoo/MSN etc., so this
+# is weighted quite low.
+#
+score FROM_ENDS_IN_NUMS		1
+
+# "What an incredible offer!" yeah right.
+#
+score PLING			1
+
+# "What an incredible offer!!" I still don't believe you.
+#
+score PLING_PLING		1
+
+# Another very-high-hit-rate rule; subject ends in a unique ID.
+#
+score SUBJ_HAS_UNIQ_ID		3
+
+# To "Undisclosed.Recipients" or similar.
+#
+score UNDISC_RECIPS		2
+
+# Subject is all capitals.
+#
+score SUBJ_ALL_CAPS		1
+
+# Message-Id has no @ sign
+#
+score MSGID_HAS_NO_AT		1
+
+# Invalid Date: header
+score INVALID_DATE		3
+
+# Invalid Date:, no timezone
+score INVALID_DATE_NO_TZ	2
+
+# Subject: ends in a question mark
+score SUBJ_HAS_Q_MARK		1
+
+# Subject: contains advertising tag, "ADV:" etc (unlikely, but still...)
+score ADVERT_CODE		3
+
+# sent to you@you.com or similar
+score FRIEND_AT_PUBLIC		2
+
+# To: or Reply-To: is empty
+score TO_EMPTY			3
+score REPLY_TO_EMPTY		3
+
+# No MX records for the domain in the From: address. Set this low,
+# as it's also used as a common anti-spam tactic.
+score NO_MX_FOR_FROM		1
+
+# Received via a set of known-spam-harbouring dialups.
+score KNOWN_BAD_DIALUPS		2
+
+# From: and To: the same address
+score FROM_AND_TO_SAME		3
+
+# Headers contain a warning from the MTA which received the first
+# mail, indicating a fake name was used in the SMTP HELO command.
+# Usually quite a good sign of spam.
+score BAD_HELO_WARNING		4
+
+# Subject: contains many 8-bit chars.  If you normally expect
+# to receive mails in non-ISO-Latin-1 charsets, set this to 0!
+score SUBJ_FULL_OF_8BITS	5
+
+# Received via a relay listed in the RBL (see maps.vix.com/rbl)
+score RCVD_IN_RBL		10
+
+# Received via a relay listed in relays.orbs.org
+score RCVD_IN_RELAYS_ORBS_ORG	1
+
+# Received via a relay listed in http://www.mail-abuse.org/rss/
+score RCVD_IN_RSS		1
+
+# Received via a dialup IP address listed in http://www.mail-abuse.org/dul/
+score RCVD_IN_DUL		1
+
+# confirmed codes from Osirusoft
+score OSIRU_CONFIRMED_SPAM_SOURCE	3
+score OSIRU_SPAMWARE_SITE	5
+
+# found an X-Em-Version: header, used by spamware vendor to track their
+# "customers" (spam spyware)
+score X_EM_VER_PRESENT		5
+
+# may-be-forged Received: header found in the headers.
+score FORGED_RCVD_FOUND		1
+
+# From: address claims to be sent from hotmail.com, but does not use
+# their formatting
+score FROM_FORGED_HOTMAIL	1
+
+# spam-tool gibberish in the X-Mailer line
+score X_MAILER_GIBBERISH	4
+
+###########################################################################
+
+score RAZOR_CHECK		4
+
+###########################################################################
+# Default scores for body tests.  Most of these are not listed, using the
+# default value of 1.
+
+score REMOVE_SUBJ		4
+score SUBJ_REMOVE		4
+score MAILTO_WITH_SUBJ_REMOVE	4
+score MAILTO_WITH_SUBJ		3
+score JAVASCRIPT		2
+score REALLY_UNSAFE_JAVASCRIPT	8
+score SLIGHTLY_UNSAFE_JAVASCRIPT 1
+score CLICK_HERE_LINK		3
+score SPAM_FORM			3
+score SPAM_FORM_RETURN		3
+score SPAM_FORM_INPUT		3
+score SENT_IN_COMPLIANCE	5	
+score PARA_A_2_C_OF_1618	4
+score BILL_1618			4
+score S_1618			4
+score SECTION_301		3
+score NUMERIC_HTTP_ADDR		3
+score TRACKER_ID		3
+score POPLAUNCH			4
+
+score ONLINE_BIZ_OPS		2
+score INTL_EXEC_GUILD		3
+score ANOTHER_NET_AD		3
+score LASER_PRINTER		3
+score DIGITAL_FX1		3
+score OFFICE_OF_MD		3
+score BRAND_NEW_PAGER		3
+
+score EXCUSE_1			2
+score EXCUSE_2			2
+score EXCUSE_7			2
+score EXCUSE_8			2
+score EXCUSE_9			2
+score GREEN_EXCUSE_1		3
+score GREEN_EXCUSE_2		3
+
+score FILTERED_BY_WORLDREMOVE	3
+
+score WEB_BUGS			5
+
+score FILL_OUT_HERE		2
+score CYBER_FIRE_POWER		4
+score INTERNET_TERROR_RANT	8
+score RELAYING_FRAME		5
+score BASE64_ENC_TEXT		4
+
+# some re-scored tests: statistical analysis of my mail spool indicates
+# these scores work well without causing false positives.
+score CALL_888			3
+score CALL_1_800		3
+score CLICK_BELOW		3
+score OPT_IN			2
+score REMOVAL_INSTRUCTIONS	3
+score FORGED_HOTMAIL_RCVD	3
+
+###########################################################################
+# Compensation for common false positives.
+
+score BALANCE_FOR_LONG		-2
+score USER_IN_WHITELIST		-5
+
+###########################################################################
+# Some not-quite-spam scores; block common virii with these.  (it's feature
+# creep, but it's easy to implement ;)
+
+score SIRCAM_SIGNATURE		10
 

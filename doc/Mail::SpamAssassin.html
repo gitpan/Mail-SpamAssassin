@@ -98,16 +98,15 @@ The filename to load preferences from. (optional)
 <DT><STRONG><A NAME="item_config_text">config_text</A></STRONG><DD>
 <P>
 The text of all rules and preferences. If you prefer not to load the rules
-from files, read them in yourself and set this instead. This is optional,
-but note that at least one of <A HREF="#item_rules_filename">rules_filename</A>, <A HREF="#item_userprefs_filename">userprefs_filename</A> or
-<A HREF="#item_config_text">config_text</A> must be specified to provide configuration, otherwise SpamAssassin will not
-do anything!
+from files, read them in yourself and set this instead.
 
 <P>
-The <EM>spamassassin</EM> command-line tool includes quite a lot of logic to find its configuration
-files in a variety of locations, so see its documentation for more details
-on how it loads its configuration. (It is assumed that users of the <CODE>Mail::SpamAssassin</CODE> module will wish to load a ''canned'' configuration, which is why the
-config-searching logic is not included here.)
+If none of rules_filename, userprefs_filename, or config_text is set, the <CODE>Mail::SpamAssassin</CODE> module will search for the configuration files in the usual installed
+locations.
+
+<DT><STRONG><A NAME="item_local_tests_only">local_tests_only</A></STRONG><DD>
+<P>
+If set to 1, no tests that require internet access will be performed.
 
 </DL>
 <DT><STRONG><A NAME="item__status">$status = $f-&gt;check ($mail)</A></STRONG><DD>

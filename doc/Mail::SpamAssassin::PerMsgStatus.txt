@@ -26,6 +26,22 @@ METHODS
         called. It will return 1 for mail determined likely to be
         spam, 0 if it does not seem spam-like.
 
+    $list = $status->get_names_of_tests_hit ()
+        After a mail message has been checked, this method can be
+        called. It will return a comma-separated string, listing all
+        the symbolic test names of the tests which were trigged by
+        the mail.
+
+    $num = $status->get_hits ()
+        After a mail message has been checked, this method can be
+        called. It will return the number of hits this message
+        incurred.
+
+    $num = $status->get_required_hits ()
+        After a mail message has been checked, this method can be
+        called. It will return the number of hits required for a
+        mail to be considered spam.
+
     $report = $status->get_report ()
         Deliver a "spam report" on the checked mail message. This
         contains details of how many spam detection rules it
@@ -44,9 +60,13 @@ METHODS
             The string `*****SPAM*****' is prepended to the subject.
 
     X-Spam-Status: header for spam mails
-            A string, `Yes, hits=nn required=nn' is set in this
-            header to reflect the filter status.
+            A string, `Yes, hits=nn required=nn tests=...' is set in
+            this header to reflect the filter status. The keys in
+            this string are as follows:
 
+        hits=nn The number of hits the message triggered.
+        required=nn The threshold at which a mail is marked as spam.
+        tests=... The symbolic names of tests which were triggered.
     X-Spam-Flag: header for spam mails
             Set to `YES'.
 
@@ -60,8 +80,9 @@ METHODS
             message body.
 
     X-Spam-Status: header for non-spam mails
-            A string, `No, hits=nn required=nn' is set in this
-            header to reflect the filter status.
+            A string, `No, hits=nn required=nn tests=...' is set in
+            this header to reflect the filter status. The keys in
+            this string are the same as for spam mails (see above).
 
     $status->handle_auto_report ()
         If this mail message has a high enough hit score, report it

@@ -5,14 +5,16 @@ SYNOPSIS
       spamassassin [option ...] < mailmessage
       spamassassin -P [option ...] < mailmessage > output
 
+      -h               print this help and terminate without further action
       -P               pipe message through, instead of delivering to mail spool
-      -t               only testing
+      -t               only testing; pipe message through and add extra report
       -r               report this message as verified spam
       -w fromaddr      send a warning mail back to the sender of the message,
                        notifying them that their message has been marked as spam
                        (only useful if -r is used)
       -l filename      Log all mail messages to a mbox-format file
-      -d               Remove SpamAssassin reports from a mail message
+      -L               Local tests only, do not do internet-based checks
+      -d               Remove SpamAssassin reports from a mail message and print
       -c config        configuration file
       -p prefs         user preferences file
       -D               produce diagnostic output
@@ -71,6 +73,12 @@ OPTIONS
         Log all mail messages that pass through the filter, to an
         mbox-format file named by `filename'. Handy for use with `-
         r' and `-w'.
+
+    -L  Do only the ''local'' tests, ones that do not require an
+        internet connection to operate. Normally, SpamAssassin will
+        try to detect whether you are connected to the net before
+        doing these tests anyway, but for faster checks you may wish
+        to use this.
 
     -d  Remove SpamAssassin markup (the "SpamAssassin results" report,
         X-Spam-Status headers, etc.) from the mail message. The

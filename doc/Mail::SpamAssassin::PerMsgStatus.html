@@ -59,6 +59,22 @@ After a mail message has been checked, this method can be called. It will
 return 1 for mail determined likely to be spam, 0 if it does not seem
 spam-like.
 
+<DT><STRONG><A NAME="item__list">$list = $status-&gt;get_names_of_tests_hit ()</A></STRONG><DD>
+<P>
+After a mail message has been checked, this method can be called. It will
+return a comma-separated string, listing all the symbolic test names of the
+tests which were trigged by the mail.
+
+<DT><STRONG><A NAME="item__num">$num = $status-&gt;get_hits ()</A></STRONG><DD>
+<P>
+After a mail message has been checked, this method can be called. It will
+return the number of hits this message incurred.
+
+<DT><STRONG>$num = $status-&gt;get_required_hits ()</STRONG><DD>
+<P>
+After a mail message has been checked, this method can be called. It will
+return the number of hits required for a mail to be considered spam.
+
 <DT><STRONG><A NAME="item__report">$report = $status-&gt;get_report ()</A></STRONG><DD>
 <P>
 Deliver a ``spam report'' on the checked mail message. This contains
@@ -83,8 +99,14 @@ The string <CODE>*****SPAM*****</CODE> is prepended to the subject.
 
 <DT><STRONG><A NAME="item_X">X-Spam-Status: header for spam mails</A></STRONG><DD>
 <P>
-A string, <CODE>Yes, hits=nn required=nn</CODE> is set in this header to reflect the filter status.
+A string, <CODE>Yes, hits=nn required=nn tests=...</CODE> is set in this header to reflect the filter status. The keys in this string
+are as follows:
 
+<DL>
+<DT><STRONG><A NAME="item_hits">hits=nn The number of hits the message triggered.</A></STRONG><DD>
+<DT><STRONG><A NAME="item_required">required=nn The threshold at which a mail is marked as spam.</A></STRONG><DD>
+<DT><STRONG><A NAME="item_tests">tests=... The symbolic names of tests which were triggered.</A></STRONG><DD>
+</DL>
 <DT><STRONG><A NAME="item_X">X-Spam-Flag: header for spam mails</A></STRONG><DD>
 <P>
 Set to <CODE>YES</CODE>.
@@ -100,7 +122,8 @@ The SpamAssassin report is added to top of the mail message body.
 
 <DT><STRONG>X-Spam-Status: header for non-spam mails</STRONG><DD>
 <P>
-A string, <CODE>No, hits=nn required=nn</CODE> is set in this header to reflect the filter status.
+A string, <CODE>No, hits=nn required=nn tests=...</CODE> is set in this header to reflect the filter status. The keys in this string
+are the same as for spam mails (see above).
 
 </DL>
 <DT><STRONG><A NAME="item__status_handle_auto_report">$status-&gt;handle_auto_report ()</A></STRONG><DD>

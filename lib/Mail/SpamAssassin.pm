@@ -53,21 +53,42 @@ use Carp;
 use File::Basename;
 use File::Path;
 use File::Spec;
+use File::Copy;
 use Cwd;
+use Config;
 use strict;
 
 use vars	qw{
   	@ISA $VERSION $HOME_URL $DEBUG
+	@default_rules_path @default_prefs_path @default_userprefs_path
 };
 
 @ISA = qw();
 
-$VERSION = "1.0";
+$VERSION = "1.2";
 sub Version { $VERSION; }
 
 $HOME_URL = "http://spamassassin.taint.org/";
 
 $DEBUG = 0;
+
+@default_rules_path = qw(
+        ./spamassassin.cf
+        ../spamassassin.cf
+        /etc/spamassassin.cf
+        __installsitelib__/spamassassin.cf
+);
+    
+@default_prefs_path = qw(
+        /etc/spamassassin.prefs
+        __installsitelib__/spamassassin.prefs
+);
+    
+@default_userprefs_path = qw(
+        ./spamassassin.prefs 
+        ../spamassassin.prefs
+        ~/.spamassassin.cf
+);
 
 ###########################################################################
 
@@ -89,16 +110,15 @@ The filename to load preferences from. (optional)
 =item config_text
 
 The text of all rules and preferences.  If you prefer not to load the rules
-from files, read them in yourself and set this instead.  This is optional, but
-note that at least one of C<rules_filename>, C<userprefs_filename> or
-C<config_text> must be specified to provide configuration, otherwise
-SpamAssassin will not do anything!
+from files, read them in yourself and set this instead.
 
-The L<spamassassin> command-line tool includes quite a lot of logic to find its
-configuration files in a variety of locations, so see its documentation for
-more details on how it loads its configuration.   (It is assumed that users of
-the C<Mail::SpamAssassin> module will wish to load a ''canned'' configuration,
-which is why the config-searching logic is not included here.)
+If none of rules_filename, userprefs_filename, or config_text is set,
+the C<Mail::SpamAssassin> module will search for the configuration files
+in the usual installed locations.
+
+=item local_tests_only
+
+If set to 1, no tests that require internet access will be performed.
 
 =back
 
@@ -216,19 +236,37 @@ sub remove_spamassassin_markup {
   1 while $hdrs =~ s/^Subject: \*+SPAM\*+ /Subject: /gm;
 
   # ok, next, the report.
-  my $body = join ('', @{$mail->get_body()});
+  # This is a little tricky since we can have either 0, 1 or 2 reports;
+  # 0 for the non-spam case, 1 for normal filtering, and 2 for -t (where
+  # an extra report is appended at the end of the mail).
 
-  while ($body =~ /^SPAM: /m)
+  my @newbody = ();
+  my $inreport = 0;
+  foreach $_ (@{$mail->get_body()})
   {
-    # strip off all the SPAM: lines
-    1 while $body =~ s/\n*SPAM: [^\n]*?\n//gs;
+    if (/^SPAM: ----/ && $inreport == 0) {
+      # we've just entered a report.  If there's a blank line before the
+      # report, get rid of it...
+      if ($#newbody > 0 && $newbody[$#newbody-1] =~ /^$/) {
+	pop (@newbody);
+      }
+      # and skip on to the next line...
+      $inreport = 1; next;
+    }
 
-    # and finally, strip off an extra blank line at the start of the
-    # mail; the template is always added with an NL before and after it
-    $body =~ s/^\n//gs;
+    if ($inreport && /^$/) {
+      # blank line at end of report; skip it.  Also note that we're
+      # now out of the report.
+      $inreport = 0; next;
+    }
+
+    # finally, if we're not in the report, add it to the body array
+    if (!$inreport) {
+      push (@newbody, $_);
+    }
   }
 
-  return $hdrs."\n".$body;
+  return $hdrs."\n".join ('', @newbody);
 }
 
 ###########################################################################
@@ -240,25 +278,82 @@ sub init {
   if ($self->{_initted}) { return; }
   $self->{_initted} = 1;
 
-  $self->{config_text} ||= '';
+  if (!defined $self->{config_text}) {
+    $self->{config_text} = '';
 
-  if (defined $self->{rules_filename}) {
-    open (IN, "<".$self->{rules_filename}) or
-		warn "cannot open \"$self->{rules_filename}\"\n";
-    $self->{config_text} .= join ('', <IN>);
-    close IN;
-  }
+    my $fname = $self->{rules_filename};
+    if (!defined $fname) {
+      $fname = $self->first_existing_path (@default_rules_path);
+    }
+    dbg ("using \"$fname\" for rules file");
 
-  if (defined $self->{userprefs_filename}) {
-    open (IN, "<".$self->{userprefs_filename}) or
-		warn "cannot open \"$self->{userprefs_filename}\"\n";
-    $self->{config_text} .= join ('', <IN>);
-    close IN;
+    if (defined $fname) {
+      open (IN, "<".$fname) or
+		  warn "cannot open \"$fname\"\n";
+      $self->{config_text} .= join ('', <IN>);
+      close IN;
+    }
+
+    $fname = $self->{userprefs_filename};
+    if (!defined $fname) {
+      $fname = $self->first_existing_path (@default_userprefs_path);
+      dbg ("using \"$fname\" for user prefs file");
+
+      if (!-f $fname) {
+	# copy in the default one for later editing
+
+	my $defprefs = $self->first_existing_path
+				 (@Mail::SpamAssassin::default_prefs_path);
+	use File::Copy;
+	if (copy ($defprefs, $fname)) {
+	  warn "Created user preferences file: $fname\n";
+	} else {
+	  warn "Failed to create user preferences file\n".
+		    "\"$fname\" from default \"$defprefs\".\n";
+	}
+      }
+    }
+
+    if (defined $fname) {
+      open (IN, "<".$fname) or
+		  warn "cannot open \"$fname\"\n";
+      $self->{config_text} .= join ('', <IN>);
+      close IN;
+    }
   }
 
   $self->{conf}->parse_rules ($self->{config_text});
+  $self->{conf}->finish_parsing ();
 
   # TODO -- open DNS cache etc.
+}
+
+###########################################################################
+
+sub expand_name ($) {
+  my $self = shift;
+  my $name = shift;
+  return (getpwnam($name))[7] if ($name ne '');
+  return $ENV{'HOME'} if defined $ENV{'HOME'};
+  return (getpwuid($>))[7];
+}
+
+sub sed_path {
+  my $self = shift;
+  my $path = shift;
+  $path =~ s/__installsitelib__/$Config{installsitelib}/gs;
+  $path =~ s/^\~([^\/]*)/$self->expand_name($1)/es;
+  $path;
+}
+
+sub first_existing_path {
+  my $self = shift;
+  my $path;
+  foreach my $p (@_) {
+    $path = $self->sed_path ($p);
+    if (-e $path) { return $path; }
+  }
+  $path;
 }
 
 ###########################################################################
