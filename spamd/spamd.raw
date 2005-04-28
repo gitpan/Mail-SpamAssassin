@@ -84,7 +84,7 @@ my %resphash = (
 
 sub print_version {
   printf("%s version %s\n", "SpamAssassin Server", Mail::SpamAssassin::Version());
-  printf("  running on Perl %s\n", join(".", map { $_*1 } ($] =~ /(\d)\.(\d{3})(\d{3})/)));
+  printf("  running on Perl %s\n", join(".", map { $_||=0; $_*1 } ($] =~ /(\d)\.(\d{3})(\d{3})?/)));
   eval { require IO::Socket::SSL; };
   printf("  with SSL support (%s %s)\n", "IO::Socket::SSL", $IO::Socket::SSL::VERSION) unless ($@);
 }
@@ -1350,7 +1350,7 @@ sub auth_ident {
   my $ident_username = ident_lookup( $client, $opt{'ident-timeout'} );
   my $dn = $ident_username || 'NONE';    # display name
   warn "ident_username = $dn, spamc_username = $username\n" if $opt{'debug'};
-  if ( $username ne $ident_username ) {
+  if ( !defined($ident_username) || $username ne $ident_username ) {
     logmsg( "fatal: ident username ($dn) does not match "
         . "spamc username ($username)" );
     return 0;
@@ -2146,8 +2146,8 @@ Run as the named user.  If this option is not set, the default behaviour
 is to setuid() to the user running C<spamc>, if C<spamd> is running
 as root.
 
-Note: "--username=root" disables the setuid() functionality and leaves
-spamd running as root.
+Note: "--username=root" is not a valid option.  If specified, C<spamd> will
+exit with a fatal error on startup.
 
 Note: If this option is set to a non-root user, and spamd is to run on
 a privileged port (any < 1024, default 783 or via -p), the parent will

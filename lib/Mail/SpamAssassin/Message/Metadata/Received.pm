@@ -390,12 +390,15 @@ sub parse_received_line {
 
   # try to catch authenticated message identifier
   # the first one works for Sendmail, MDaemon, some webmail servers, and others
+  # the second one works for Critical Path Messaging Server
   # with ESMTPA, ESMTPSA, LMTPA, LMTPSA should cover RFC 3848 compliant MTAs
   # with ASMTP (Authenticated SMTP) is used by Earthlink, Exim 4.34, and others
   # with HTTP should only be authenticated webmail sessions
-  if (/^from .*?(\]\)|\)\]) .*?\(.*?authenticated.*?\).*? by/) {
+  if (/^from .*?(?:\]\)|\)\]) .*?\(.*?authenticated.*?\).*? by/) {
     $auth = 'Sendmail';
-  } elsif (/ by .*? with (ESMTPA|ESMTPSA|LMTPA|LMTPSA|ASMTP|HTTP) /i) {
+  } elsif (/\) by .+ \(\d{1,2}\.\d\.\d{3}(?:\.\d{1,3})?\) \(authenticated as .+\) id /) {
+    $auth = 'CriticalPath';
+  } elsif (/ by .*? with (ESMTPA|ESMTPSA|LMTPA|LMTPSA|ASMTP|HTTP)\;? /i) {
     $auth = $1;
   }
 
@@ -416,7 +419,7 @@ sub parse_received_line {
     if (/\[XMail /) { # bug 3791
       # Received: from list.brainbuzz.com (63.146.189.86:23198) by mx1.yourtech.net with [XMail 1.20 ESMTP Server] id <S72E> for <jason@ellingson.org> from <bounce-cscommunity-11965901@list.cramsession.com>; Sat, 18 Sep 2004 23:17:54 -0500
       # Received: from list.brainbuzz.com (63.146.189.86:23198) by mx1.yourtech.net (209.32.147.34:25) with [XMail 1.20 ESMTP Server] id <S72E> for <jason@ellingson.org> from <bounce-cscommunity-11965901@list.cramsession.com>; Sat, 18 Sep 2004 23:17:54 -0500
-      if (/^from (\S+) \((${IP_ADDRESS})(?::\d+)?\) by (\S+)(?: \(\S+\)|) with \[XMail/)
+      if (/^from (\S+) \((\[?${IP_ADDRESS}\]?)(?::\d+)?\) by (\S+)(?: \(\S+\)|) with \[XMail/)
       {
 	$helo = $1; $ip = $2; $by = $3;
         / id <(\S+)> / and $id = $1;

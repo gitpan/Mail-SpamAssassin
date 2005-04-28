@@ -1032,6 +1032,17 @@ sub bayes_report_make_list {
   } @{$info}[0..$amt-1];
 }
 
+###########################################################################
+
+# public API for plugins
+=item $status->set_tag($tagname, $value)
+
+Set a template tag, as used in C<add_header>, report templates, etc. This API
+is intended for use by plugins.   Tag names will be converted to an
+all-uppercase representation internally.  See C<Mail::SpamAssassin::Conf>'s
+C<TEMPLATE TAGS> section for more details on tags.
+
+=cut
 
 sub set_tag {
   my $self = shift;
@@ -1041,6 +1052,23 @@ sub set_tag {
   $self->{tag_data}->{$tag} = $val;
 }
 
+# public API for plugins
+=item $string = $status->get_tag($tagname)
+
+Get the current value of a template tag, as used in C<add_header>, report
+templates, etc. This API is intended for use by plugins.  Tag names will be
+converted to an all-uppercase representation internally.  See
+C<Mail::SpamAssassin::Conf>'s C<TEMPLATE TAGS> section for more details on
+tags.
+
+=cut
+
+sub get_tag {
+  # expose this previously-private API
+  return shift->_get_tag(uc shift);
+}
+
+###########################################################################
 
 sub _get_tag_value_for_yesno {
   my $self   = shift;
@@ -2510,6 +2538,23 @@ sub get_envelope_from {
   # http://bugzilla.spamassassin.org/show_bug.cgi?id=2142 .
 
   my $envf;
+
+  # use the "envelope-sender" string found in the Received headers,
+  # if possible... use the last untrusted header, in case there's
+  # trusted headers.
+  my $lasthop = $self->{relays_untrusted}->[0];
+  if (!defined $lasthop) {
+    # no untrusted headers?  in that case, the message is ALL_TRUSTED.
+    # use the first trusted header (ie. the oldest, originating one).
+    $lasthop = $self->{relays_trusted}->[-1];
+  }
+
+  if (defined $lasthop) {
+    $envf = $lasthop->{envfrom};
+    if ($envf && ($envf =~ /\@/)) {
+      goto ok;
+    }
+  }
 
   # Use the 'envelope-sender-header' header that the user has specified.
   # We assume this is correct, *even* if the fetchmail/X-Sender screwup

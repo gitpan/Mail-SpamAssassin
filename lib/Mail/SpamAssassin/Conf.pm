@@ -1145,6 +1145,20 @@ the SpamCop system.
     },
   });
 
+=item spamcop_max_report_size		(default: 50)
+
+The size (in kilobytes) at which SpamAssassin will truncate messages
+reported to SpamCop.  The default is the maximum size SpamCop will
+accept at the time of release.
+
+=cut
+
+  push (@cmds, {
+    setting => 'spamcop_max_report_size',
+    default => 50,
+    type => $CONF_TYPE_NUMERIC
+  });
+
 =item trusted_networks ip.add.re.ss[/mask] ...   (default: none)
 
 What networks or hosts are 'trusted' in your setup.  B<Trusted> in this case
@@ -2222,7 +2236,11 @@ including selections like '-notfirsthop' appearing at the end of the set name.
         $self->{descriptions}->{$1} = "Found a $2 header";
       }
       else {
-        $self->{parser}->add_test (split(/\s+/,$value,2), $TYPE_HEAD_TESTS);
+	my @values = split(/\s+/, $value, 2);
+	if (@values != 2) {
+	  return $MISSING_REQUIRED_VALUE;
+	}
+        $self->{parser}->add_test (@values, $TYPE_HEAD_TESTS);
       }
     }
   });
@@ -2256,7 +2274,11 @@ Define a body eval test.  See above.
         $self->{parser}->add_test ($1, $2, $TYPE_BODY_EVALS);
       }
       else {
-        $self->{parser}->add_test (split(/\s+/,$value,2), $TYPE_BODY_TESTS);
+	my @values = split(/\s+/, $value, 2);
+	if (@values != 2) {
+	  return $MISSING_REQUIRED_VALUE;
+	}
+        $self->{parser}->add_test (@values, $TYPE_BODY_TESTS);
       }
     }
   });
@@ -2285,7 +2307,11 @@ points of the URI, and will also be faster.
     is_priv => 1,
     code => sub {
       my ($self, $key, $value, $line) = @_;
-      $self->{parser}->add_test (split(/\s+/,$value,2), $TYPE_URI_TESTS);
+      my @values = split(/\s+/, $value, 2);
+      if (@values != 2) {
+        return $MISSING_REQUIRED_VALUE;
+      }
+      $self->{parser}->add_test (@values, $TYPE_URI_TESTS);
     }
   });
 
@@ -2315,7 +2341,11 @@ Define a raw-body eval test.  See above.
       if ($value =~ /^(\S+)\s+eval:(.*)$/) {
         $self->{parser}->add_test ($1, $2, $TYPE_RAWBODY_EVALS);
       } else {
-        $self->{parser}->add_test (split(/\s+/,$value,2), $TYPE_RAWBODY_TESTS);
+	my @values = split(/\s+/, $value, 2);
+	if (@values != 2) {
+	  return $MISSING_REQUIRED_VALUE;
+	}
+        $self->{parser}->add_test (@values, $TYPE_RAWBODY_TESTS);
       }
     }
   });
@@ -2344,7 +2374,11 @@ Define a full message eval test.  See above.
       if ($value =~ /^(\S+)\s+eval:(.*)$/) {
         $self->{parser}->add_test ($1, $2, $TYPE_FULL_EVALS);
       } else {
-        $self->{parser}->add_test (split(/\s+/,$value,2), $TYPE_FULL_TESTS);
+	my @values = split(/\s+/, $value, 2);
+	if (@values != 2) {
+	  return $MISSING_REQUIRED_VALUE;
+	}
+        $self->{parser}->add_test (@values, $TYPE_FULL_TESTS);
       }
     }
   });
@@ -2383,7 +2417,11 @@ ignore these for scoring.
     is_priv => 1,
     code => sub {
       my ($self, $key, $value, $line) = @_;
-      $self->{parser}->add_test (split(/\s+/,$value,2), $TYPE_META_TESTS);
+      my @values = split(/\s+/, $value, 2);
+      if (@values != 2) {
+        return $MISSING_REQUIRED_VALUE;
+      }
+      $self->{parser}->add_test (@values, $TYPE_META_TESTS);
     }
   });
 
@@ -2455,6 +2493,36 @@ No matter what C<allow_user_rules> is set to, these can never be set from a
 user's C<user_prefs> file.
 
 =over 4
+
+=item version_tag string
+
+This tag is appended to the SA version in the X-Spam-Status header. You should
+include it when modify your ruleset, especially if you plan to distribute it.
+A good choice for I<string> is your last name or your initials followed by a
+number which you increase with each change.
+
+The version_tag will be lowercased, and any non-alphanumeric or period
+character will be replaced by an underscore.
+
+e.g.
+
+  version_tag myrules1    # version=2.41-myrules1
+
+=cut
+
+  push (@cmds, {
+    setting => 'version_tag',
+    is_admin => 1,
+    code => sub {
+      my ($self, $key, $value, $line) = @_;
+      my $tag = lc($value);
+      $tag =~ tr/a-z0-9./_/c;
+      foreach (@Mail::SpamAssassin::EXTRA_VERSION) {
+        if($_ eq $tag) { $tag = undef; last; }
+      }
+      push(@Mail::SpamAssassin::EXTRA_VERSION, $tag) if($tag);
+    }
+  });
 
 =item test SYMBOLIC_TEST_NAME (ok|fail) Some string to test against
 
@@ -3048,35 +3116,6 @@ version.  So 3.0.0 is C<3.000000>, and 3.4.80 is C<3.004080>.
   push (@cmds, {
     setting => 'require_version',
     code => sub {
-    }
-  });
-
-=item version_tag string
-
-This tag is appended to the SA version in the X-Spam-Status header. You should
-include it when modify your ruleset, especially if you plan to distribute it.
-A good choice for I<string> is your last name or your initials followed by a
-number which you increase with each change.
-
-The version_tag will be lowercased, and any non-alphanumeric or period
-character will be replaced by an underscore.
-
-e.g.
-
-  version_tag myrules1    # version=2.41-myrules1
-
-=cut
-
-  push (@cmds, {
-    setting => 'version_tag',
-    code => sub {
-      my ($self, $key, $value, $line) = @_;
-      my $tag = lc($value);
-      $tag =~ tr/a-z0-9./_/c;
-      foreach (@Mail::SpamAssassin::EXTRA_VERSION) {
-        if($_ eq $tag) { $tag = undef; last; }
-      }
-      push(@Mail::SpamAssassin::EXTRA_VERSION, $tag) if($tag);
     }
   });
 

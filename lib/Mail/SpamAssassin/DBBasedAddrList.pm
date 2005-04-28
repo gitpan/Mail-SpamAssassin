@@ -163,11 +163,12 @@ sub remove_entry {
     # try to delete any per-IP entries for this addr as well.
     # could be slow...
     my $mailaddr = $1;
-    my @keys = grep { /^\Q${mailaddr}\E\|ip=\d+\.\d+$/ }
-					keys %{$self->{accum}};
-    foreach my $key (@keys) {
-      delete $self->{accum}->{$key};
-      delete $self->{accum}->{$key.'|totscore'};
+
+    while (my ($key, $value) = each %{$self->{accum}}) {
+      # regex will catch both key and key|totscore entries and delete them
+      if ($key =~ /^\Q${mailaddr}\E\|/) {
+        delete $self->{accum}->{$key};
+      }
     }
   }
 }

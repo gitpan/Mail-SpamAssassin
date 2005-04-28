@@ -98,19 +98,19 @@ use vars qw{
   @site_rules_path
 };
 
-$VERSION = "3.000002";      # update after release (same format as perl $])
-$IS_DEVEL_BUILD = 0;        # change for release versions
+$VERSION = "3.000003";      # update after release (same format as perl $])
+#$IS_DEVEL_BUILD = 1;        # change for release versions
 
 @ISA = qw();
 
 # SUB_VERSION is now just <yyyy>-<mm>-<dd>
-$SUB_VERSION = (split(/\s+/,'$LastChangedDate: 2004-11-16 16:50:46 -0800 (Tue, 16 Nov 2004) $ updated by SVN'))[1];
+$SUB_VERSION = (split(/\s+/,'$LastChangedDate: 2005-04-27 14:08:43 -0700 (Wed, 27 Apr 2005) $ updated by SVN'))[1];
 
 # If you hacked up your SA, you should add a version_tag to you .cf files.
 # This variable should not be modified directly.
 @EXTRA_VERSION = qw();
 if (defined $IS_DEVEL_BUILD && $IS_DEVEL_BUILD) {
-  push(@EXTRA_VERSION, ( 'r' . qw{$LastChangedRevision: 76069 $ updated by SVN}[1] ));
+  push(@EXTRA_VERSION, ( 'r' . qw{$LastChangedRevision: 165049 $ updated by SVN}[1] ));
 }
 
 sub Version { $VERSION=~/^(\d+)\.(\d\d\d)(\d\d\d)$/; join('-', sprintf("%d.%d.%d",$1,$2,$3), @EXTRA_VERSION) }
@@ -1788,6 +1788,9 @@ sub copy_config {
         }
       }
     }
+    elsif ($k eq 'scores') {
+      # this is dealt with below, but we need to ignore it for now
+    }
     elsif ($i eq 'SCALAR' || $i eq 'ARRAY' || $i eq 'HASH') {
       # IMPORTANT: DO THIS AFTER EVERYTHING ELSE!
       # If we don't do this at the end, any "special" object handling
@@ -1801,6 +1804,10 @@ sub copy_config {
 #      warn ">> $k, $i\n";
 #    }
   }
+
+  # deal with $conf->{scores}, it needs to be a reference into the scoreset
+  # hash array dealy
+  $dest->{scores} = $dest->{scoreset}->[$dest->{scoreset_current}];
 
   return 1;
 }
