@@ -387,6 +387,17 @@ sub parse_rfc822_date {
 
   $hh ||= 0; $mm ||= 0; $ss ||= 0; $dd ||= 0; $mmm ||= 0; $yyyy ||= 0;
 
+  # Time::Local (v1.10 at least) throws warnings when the dates cause
+  # a 32-bit overflow.  So force a min/max for year.
+  if ($yyyy > 2037) {
+    dbg("util: forcing year to 2037: $date");
+    $yyyy=2037;
+  }
+  elsif ($yyyy < 1970) {
+    dbg("util: forcing year to 1970: $date");
+    $yyyy=1970;
+  }
+
   my $time;
   eval {		# could croak
     $time = timegm($ss, $mm, $hh, $dd, $mmm-1, $yyyy);
@@ -663,6 +674,9 @@ sub parse_content_type {
   $ct =~ tr/\000-\040\177-\377\042\050\051\054\056\072-\077\100\133-\135//d;    # strip inappropriate chars
   $ct = lc $ct;
 
+  # bug 4298: If at this point we don't have a content-type, assume text/plain
+  $ct ||= "text/plain";
+
   # Now that the header has been parsed, return the requested information.
   # In scalar context, just the MIME type, in array context the
   # four important data parts (type, boundary, charset, and filename).
@@ -787,7 +801,7 @@ sub uri_to_domain {
   $uri =~ s,#.*$,,gs;			# drop fragment
   $uri =~ s#^[a-z]+:/{0,2}##gsi;	# drop the protocol
   $uri =~ s,^[^/]*\@,,gs;		# username/passwd
-  $uri =~ s,[/\?\&].*$,,gs;		# path/cgi params
+  $uri =~ s,[/\?].*$,,gs;		# path/cgi params
   $uri =~ s,:\d*$,,gs;			# port, bug 4191: sometimes the # is missing
 
   return if $uri =~ /\%/;         # skip undecoded URIs.
@@ -813,6 +827,7 @@ sub uri_list_canonify {
   # make sure we catch bad encoding tricks
   my @nuris = ();
   for my $uri (@uris) {
+    # we're interested in http:// and so on, skip mailto:
     next if $uri =~ /^mailto:/i;
 
     # sometimes we catch URLs on multiple lines
@@ -822,65 +837,110 @@ sub uri_list_canonify {
     $uri =~ s/^\s+//;
     $uri =~ s/\s+$//;
 
-    # Make a copy so we don't trash the original
+    # CRs just confuse things down below, so trash them now
+    $uri =~ s/\r//g;
+
+    # Make a copy so we don't trash the original in the array
     my $nuri = $uri;
 
     # http:www.foo.biz -> http://www.foo.biz
     $nuri =~ s#^(https?:)/{0,2}#$1//#i;
 
+    # *always* make a dup with all %-encoding decoded, since
+    # important parts of the URL may be encoded (such as the
+    # scheme). (bug 4213)
+    if ($nuri =~ /\%[0-9a-fA-F]{2}/) {
+      $nuri = Mail::SpamAssassin::Util::url_encode($nuri);
+    }
+
+    # www.foo.biz -> http://www.foo.biz
+    # unschemed URIs: assume default of "http://" as most MUAs do
+    if ($nuri !~ /^[-_a-z0-9]+:/i) {
+      if ($nuri =~ /^ftp\./) {
+	$nuri =~ s@^@ftp://@g;
+      }
+      else {
+	$nuri =~ s@^@http://@g;
+      }
+    }
+
     # http://www.foo.biz?id=3 -> http://www.foo.biz/?id=3
-    $nuri =~ s/^(https?:\/\/[^\/\?]+)\?/$1\/?/;
+    $nuri =~ s@^(https?://[^/?]+)\?@$1/?@i;
 
     # deal with encoding of chars, this is just the set of printable
     # chars minus ' ' (that is, dec 33-126, hex 21-7e)
     $nuri =~ s/\&\#0*(3[3-9]|[4-9]\d|1[01]\d|12[0-6]);/sprintf "%c",$1/ge;
-    $nuri =~ s/\&\#x0*(2[1-9]|[3-6][a-f0-9]|7[0-9a-e]);/sprintf "%c",hex($1)/gei;
+    $nuri =~ s/\&\#x0*(2[1-9]|[3-6][a-fA-F0-9]|7[0-9a-eA-E]);/sprintf "%c",hex($1)/ge;
 
-    # deal with wierd hostname parts
-    if ($nuri =~ /^(https?:\/\/)([^\/]+)(\.?\/.*)$/i) {
-      my ($proto, $host, $rest) = ($1,$2,$3);
-
-      # remove "www.fakehostname.com@" username part
-      $host =~ s/^[^\@]+\@//gs;
-
-      # deal with 'http://213.172.0x1f.13/'; decode encoded octets
-      if ($host =~ /^([0-9a-fx]*\.)([0-9a-fx]*\.)([0-9a-fx]*\.)([0-9a-fx]*)$/ix)
-      {
-        my (@chunk) = ($1,$2,$3,$4);
-        for my $octet (0 .. 3) {
-          $chunk[$octet] =~ s/^0x([0-9a-f][0-9a-f])/sprintf "%d",hex($1)/gei;
-        }
-        my $parsed = join ('', $proto, @chunk, $rest);
-        if ($parsed ne $nuri) { push(@nuris, $parsed); }
-      }
-
-      # "http://0x7f000001/"
-      if ($host =~ /^0x[0-9a-f]+$/i) {
-        $host =~ s/^0x([0-9a-f]+)/sprintf "%d",hex($1)/gei;
-        $host = decode_ulong_to_ip ($host);
-        my $parsed = join ('', $proto, $host, $rest);
-        push(@nuris, $parsed);
-      }
-
-      # "http://1113343453/"
-      if ($host =~ /^[0-9]+$/) {
-        $host = decode_ulong_to_ip ($host);
-        my $parsed = join ('', $proto, $host, $rest);
-        push(@nuris, $parsed);
-      }
-    }
-
-    ($nuri) = Mail::SpamAssassin::Util::url_encode($nuri);
+    # put the new URI on the new list if it's different
     if ($nuri ne $uri) {
       push(@nuris, $nuri);
     }
 
-    # deal with http redirectors.  strip off one level of redirector
-    # and add back to the array.  the foreach loop will go over those
-    # and deal appropriately.
-    # bug 3308: redirectors like yahoo only need one '/' ... <grrr>
-    if ($nuri =~ m{^https?://.+?(https?:/{0,2}.+)$}i) {
-      push(@uris, $1);
+    # deal with wierd hostname parts, remove user/pass, etc.
+    if ($nuri =~ m{^(https?://)([^/]+)(\/.*)?$}i) {
+      my($proto, $host, $rest) = ($1,$2,$3);
+
+      # not required
+      $rest ||= '';
+
+      # bug 4146: deal with non-US ASCII 7-bit chars in the host portion
+      # of the URI according to RFC 1738 that's invalid, and the tested
+      # browsers (Firefox, IE) remove them before usage...
+      if ($host =~ tr/\000-\040\200-\377//d) {
+        push(@nuris, join ('', $proto, $host, $rest));
+      }
+
+      # deal with http redirectors.  strip off one level of redirector
+      # and add back to the array.  the foreach loop will go over those
+      # and deal appropriately.
+      # bug 3308: redirectors like yahoo only need one '/' ... <grrr>
+      if ($rest =~ m{(https?:/{0,2}.+)$}i) {
+        push(@uris, $1);
+      }
+
+      ########################
+      ## TVD: known issue, if host has multiple combinations of the following,
+      ## all permutations will be put onto @nuris.  shouldn't be an issue.
+
+      # Get rid of cruft that could cause confusion for rules...
+
+      # remove "www.fakehostname.com@" username part
+      if ($host =~ s/^[^\@]+\@//gs) {
+        push(@nuris, join ('', $proto, $host, $rest));
+      }
+
+      # bug 3186: If in a sentence, we might pick up odd characters ...
+      # ie: "visit http://example.biz." or "visit http://example.biz!!!"
+      # the host portion should end in some form of alpha-numeric, strip off
+      # the rest.
+      if ($host =~ s/[^0-9A-Za-z]+$//) {
+        push(@nuris, join ('', $proto, $host, $rest));
+      }
+
+      ########################
+
+      # deal with 'http://213.172.0x1f.13/', decode encoded octets
+      if ($host =~ /^([0-9a-fx]*\.)([0-9a-fx]*\.)([0-9a-fx]*\.)([0-9a-fx]*)$/ix) {
+        my (@chunk) = ($1,$2,$3,$4);
+        for my $octet (0 .. 3) {
+          $chunk[$octet] =~ s/^0x([0-9a-f][0-9a-f])/sprintf "%d",hex($1)/gei;
+        }
+        push(@nuris, join ('', $proto, @chunk, $rest));
+      }
+
+      # "http://0x7f000001/"
+      elsif ($host =~ /^0x[0-9a-f]+$/i) {
+        # only take last 4 octets
+        $host =~ s/^0x[0-9a-f]*?([0-9a-f]{1,8})$/sprintf "%d",hex($1)/gei;
+        push(@nuris, join ('', $proto, decode_ulong_to_ip($host), $rest));
+      }
+
+      # "http://1113343453/"
+      elsif ($host =~ /^[0-9]+$/) {
+        push(@nuris, join ('', $proto, decode_ulong_to_ip($host), $rest));
+      }
+
     }
   }
 
