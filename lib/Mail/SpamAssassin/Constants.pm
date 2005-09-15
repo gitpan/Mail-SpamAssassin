@@ -27,7 +27,7 @@ use vars qw (
 use base qw( Exporter );
 
 @IP_VARS = qw(
-	IP_IN_RESERVED_RANGE LOCALHOST IPV4_ADDRESS IP_ADDRESS
+	IP_IN_RESERVED_RANGE IP_PRIVATE LOCALHOST IPV4_ADDRESS IP_ADDRESS
 );
 @BAYES_VARS = qw(
 	DUMP_MAGIC DUMP_TOKEN DUMP_BACKUP 
@@ -36,7 +36,7 @@ use base qw( Exporter );
 @SA_VARS = qw(
 	META_TEST_MIN_PRIORITY HARVEST_DNSBL_PRIORITY MBX_SEPARATOR
 	MAX_BODY_LINE_LENGTH MAX_HEADER_KEY_LENGTH MAX_HEADER_VALUE_LENGTH
-	MAX_HEADER_LENGTH ARITH_EXPRESSION_LEXER
+	MAX_HEADER_LENGTH ARITH_EXPRESSION_LEXER AI_TIME_UNKNOWN
 );
 
 %EXPORT_TAGS = (
@@ -56,7 +56,7 @@ use constant DUMP_BACKUP => 8;
 
 # IP_VARS
 # ---------------------------------------------------------------------------
-# Initialize a regexp for reserved IPs, i.e. ones that could be
+# Initialize a regexp for private IPs, i.e. ones that could be
 # used inside a company and be the first or second relay hit by
 # a message. Some companies use these internally and translate
 # them using a NAT firewall. These are listed in the RBL as invalid
@@ -71,26 +71,18 @@ use constant DUMP_BACKUP => 8;
 #   CYMRU = <http://www.cymru.com/Documents/bogon-list.html>
 #
 # Last update
-#   2005-05-24 Daryl C. W. O'Shea - removed all but private ranges
-#   2004-07-23 Daniel Quinlan - added CYMRU source, sorted, many updates
-#   2004-05-22 Daniel Quinlan - removed 58/8 and 59/8
-#   2004-03-08 Justin Mason - reimplemented removed code
-#   2003-11-07 bug 1784 changes removed due to relicensing
-#   2003-04-15 Updated - bug 1784
-#   2003-04-07 Justin Mason - removed some now-assigned nets
-#   2002-08-24 Malte S. Stretz - added 172.16/12, 169.254/16
-#   2002-08-23 Justin Mason - added 192.168/16
-#   2002-08-12 Matt Kettler - mail to SpamAssassin-devel
-#              msgid:<5.1.0.14.0.20020812211512.00a33cc0@192.168.50.2>
+#   2005-01-10 Daniel Quinlan - reduced to standard private IP addresses
 #
-use constant IP_IN_RESERVED_RANGE => qr{^(?:
-# private use ranges
-  192\.168|			   # 192.168/16:       Private Use (3330)
+use constant IP_PRIVATE => qr{^(?:
   10|				   # 10/8:             Private Use (3330)
-  172\.(?:1[6-9]|2[0-9]|3[01])|	   # 172.16-172.31/16: Private Use (3330)
-  169\.254|			   # 169.254/16:       Private Use (APIPA)
   127|				   # 127/8:            Private Use (localhost)
+  169\.254|			   # 169.254/16:       Private Use (APIPA)
+  172\.(?:1[6-9]|2[0-9]|3[01])|	   # 172.16-172.31/16: Private Use (3330)
+  192\.168			   # 192.168/16:       Private Use (3330)
 )\.}ox;
+
+# backward compatibility
+use constant IP_IN_RESERVED_RANGE => IP_PRIVATE;
 
 # ---------------------------------------------------------------------------
 # match the various ways of saying "localhost".
@@ -109,7 +101,9 @@ use constant LOCALHOST => qr/
 		      127\.0\.0\.1 \b
 		    |
 		      # pure-IPv6 address
-		      (?<!:)
+		      (?:IPv6:    # with optional prefix
+                        | (?<!:)
+                      )
 		      (?:0{0,4}\:){0,7} 1 
 		    )
 		  /oxi;
@@ -146,7 +140,9 @@ use constant IP_ADDRESS => qr/
 		    |
 		      # a pure-IPv6 address
 		      # don't use \b here, it hits on :'s
-		      (?<!:)
+		      (?:IPv6:    # with optional prefix
+                        | (?<!:)
+                      )
 		      (?:[a-f0-9]{0,4}\:){0,7} [a-f0-9]{0,4}
 		    )
 		  /oxi;
@@ -192,5 +188,13 @@ use constant ARITH_EXPRESSION_LEXER => qr/(?:
         [\+\-\*\/]|                             # Mathematical Operator
         [\?:]                                   # ? : Operator
       )/ox;
+
+# ArchiveIterator
+
+# if AI doesn't read in the message in the first pass to see if the received
+# date makes the message useful or not, we need to mark it so that in the
+# second pass (when the message is actually read + processed) the received
+# date is calculated.  this value signifies "unknown" from the first pass.
+use constant AI_TIME_UNKNOWN => 0;
 
 1;

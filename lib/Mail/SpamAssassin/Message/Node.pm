@@ -1,5 +1,3 @@
-# $Id: MIME.pm,v 1.8 2003/10/02 22:59:00 quinlan Exp $
-
 # <@LICENSE>
 # Copyright 2004 Apache Software Foundation
 # 
@@ -34,14 +32,15 @@ the various MIME message parts.
 =cut
 
 package Mail::SpamAssassin::Message::Node;
+
 use strict;
+use warnings;
 use bytes;
 
 use Mail::SpamAssassin;
 use Mail::SpamAssassin::Constants qw(:sa);
 use Mail::SpamAssassin::HTML;
-use MIME::Base64;
-use MIME::QuotedPrint;
+use Mail::SpamAssassin::Logger;
 
 =item new()
 
@@ -60,6 +59,12 @@ sub new {
     body_parts		=> [],
     header_order	=> []
   };
+
+  # deal with any parameters
+  my($opts) = @_;
+  if (defined $opts->{'subparse'}) {
+    $self->{subparse} = $opts->{'subparse'};
+  }
 
   bless($self,$class);
   $self;
@@ -231,7 +236,7 @@ Adds a Node child object to the current node object.
 sub add_body_part {
   my($self, $part) = @_;
 
-  dbg("added part, type: ".$part->{'type'});
+  dbg("message: added part, type: ".$part->{'type'});
   push @{ $self->{'body_parts'} }, $part;
 }
 
@@ -274,16 +279,23 @@ sub decode {
     my $encoding = lc $self->header('content-transfer-encoding') || '';
 
     if ( $encoding eq 'quoted-printable' ) {
-      dbg("decoding: quoted-printable");
+      dbg("message: decoding quoted-printable");
       $self->{'decoded'} = [
         map { s/\r\n/\n/; $_; } split ( /^/m, Mail::SpamAssassin::Util::qp_decode( join ( "", @{$self->{'raw'}} ) ) )
 	];
     }
     elsif ( $encoding eq 'base64' ) {
-      dbg("decoding: base64");
+      dbg("message: decoding base64");
 
-      # Generate the decoded output
-      $self->{'decoded'} = [ Mail::SpamAssassin::Util::base64_decode(join("", @{$self->{'raw'}})) ];
+      # if it's not defined or is 0, do the whole thing, otherwise only decode
+      # a portion
+      if ($bytes) {
+        return Mail::SpamAssassin::Util::base64_decode(join("", @{$self->{'raw'}}), $bytes);
+      }
+      else {
+        # Generate the decoded output
+        $self->{'decoded'} = [ Mail::SpamAssassin::Util::base64_decode(join("", @{$self->{'raw'}})) ];
+      }
 
       # If it's a type text or message, split it into an array of lines
       if ( $self->{'type'} =~ m@^(?:text|message)\b/@i ) {
@@ -293,10 +305,10 @@ sub decode {
     else {
       # Encoding is one of 7bit, 8bit, binary or x-something
       if ( $encoding ) {
-        dbg("decoding: other encoding type ($encoding), ignoring");
+        dbg("message: decoding other encoding type ($encoding), ignoring");
       }
       else {
-        dbg("decoding: no encoding detected");
+        dbg("message: no encoding detected");
       }
       $self->{'decoded'} = $self->{'raw'};
     }
@@ -314,18 +326,20 @@ sub decode {
 }
 
 # Look at a text scalar and determine whether it should be rendered
-# as text/html.  Based on a heuristic which simulates a certain
-# well-used/common mail client.
+# as text/html.
 #
-# We don't need to advertise this in the POD doc.
+# This is not a public function.
 # 
-sub _html_near_start {
-  my ($pad) = @_;
-
-  my $count = 0;
-  $count += ($pad =~ tr/\n//d) * 2;
-  $count += ($pad =~ tr/\n//cd);
-  return ($count < 24);
+sub _html_render {
+  if ($_[0] =~ m/^(.{0,18}?<(?:body|head|html|img|pre|table|title)(?:\s.{0,18}?)?>)/is)
+  {
+    my $pad = $1;
+    my $count = 0;
+    $count += ($pad =~ tr/\n//d) * 2;
+    $count += ($pad =~ tr/\n//cd);
+    return ($count < 24);
+  }
+  return 0;
 }
 
 =item rendered()
@@ -344,68 +358,35 @@ sub rendered {
   # We don't render anything except text
   return(undef,undef) unless ( $self->{'type'} =~ /^text\b/i );
 
-  if ( !exists $self->{rendered} ) {
+  if (!exists $self->{rendered}) {
     my $text = $self->decode();
     my $raw = length($text);
 
     # render text/html always, or any other text|text/plain part as text/html
     # based on a heuristic which simulates a certain common mail client
-    if ( $raw > 0 && (
-        $self->{'type'} =~ m@^text/html\b@i || (
-        $self->{'type'} =~ m@^text(?:$|/plain)@i &&
-	  $text =~ m/^(.{0,18}?<(?:$Mail::SpamAssassin::HTML::re_start)(?:\s.{0,18}?)?>)/ois &&
-	  _html_near_start($1))
-        )
-       ) 
+    if ($raw > 0 && ($self->{'type'} =~ m@^text/html\b@i ||
+		     ($self->{'type'} =~ m@^text(?:$|/plain)@i &&
+		      _html_render(substr($text, 0, 23)))))
     {
-      $self->{'rendered_type'} = 'text/html';
-      my $html = Mail::SpamAssassin::HTML->new(); # object
-      my @lines = @{$html->html_render($text)};
-      $self->{rendered} = join('', @lines);
-      $self->{html_results} = $html->get_results(); # needed in eval tests
+      $self->{rendered_type} = 'text/html';
 
-      # the visible text parts of the message; all invisible or low-contrast
-      # text removed.  TODO: wonder if we should just replace 
-      # $self->{rendered} with this?
-      $self->{invisible_rendered} = join('',
-                                @{$html->{html_invisible_text}});
-      $self->{visible_rendered} = join('',
-                                @{$html->{html_visible_text}});
+      my $html = Mail::SpamAssassin::HTML->new();	# object
+      $html->parse($text);				# parse+render text
+      $self->{rendered} = $html->get_rendered_text();
+      $self->{visible_rendered} = $html->get_rendered_text(invisible => 0);
+      $self->{invisible_rendered} = $html->get_rendered_text(invisible => 1);
+      $self->{html_results} = $html->get_results();
 
-      # some tests done after rendering
-      my $r = $self->{html_results}; # temporary reference for brevity
-      $r->{html_message} = 1;
-      $r->{html_length} = 0;
-      my $space = 0;
-      for my $line (@lines) {
-        $line = pack ('C0A*', $line);
-        $space += ($line =~ tr/ \t\n\r\x0b\xa0/ \t\n\r\x0b\xa0/);
-        $r->{html_length} += length($line);
-      }
+      # end-of-document result values that require looking at the text
+      my $r = $self->{html_results};	# temporary reference for brevity
+      my $space = ($self->{rendered} =~ tr/ \t\n\r\x0b\xa0/ \t\n\r\x0b\xa0/);
+      $r->{html_length} = length($self->{rendered});
       $r->{non_space_len} = $r->{html_length} - $space;
       $r->{ratio} = ($raw - $r->{html_length}) / $raw;
-      if (exists $r->{elements} && exists $r->{tags}) {
-	$r->{bad_tag_ratio} = ($r->{tags} - $r->{elements}) / $r->{tags};
-      }
-      if (exists $r->{elements_seen} && exists $r->{tags_seen}) {
-	$r->{non_element_ratio} =
-	    ($r->{tags_seen} - $r->{elements_seen}) / $r->{tags_seen};
-      }
-      if (exists $r->{tags} && exists $r->{obfuscation}) {
-	$r->{obfuscation_ratio} = $r->{obfuscation} / $r->{tags};
-      }
-      if (exists $r->{attr_bad} && exists $r->{attr_all}) {
-	$r->{attr_bad} = $r->{attr_bad} / $r->{attr_all};
-      }
-      if (exists $r->{attr_unique_bad} && exists $r->{attr_unique_all}) {
-	$r->{attr_unique_bad} = $r->{attr_unique_bad} / $r->{attr_unique_all};
-      }
     }
     else {
       $self->{rendered_type} = $self->{type};
       $self->{rendered} = $text;
-      $self->{invisible_rendered} = '';
-      $self->{visible_rendered} = $text;
     }
   }
 
@@ -501,10 +482,15 @@ sub __decode_header {
   }
   elsif ( $cte eq 'Q' ) {
     # quoted printable
+
+    # the RFC states that in the encoded text, "_" is equal to "=20"
+    $data =~ s/_/=20/g;
+
     return Mail::SpamAssassin::Util::qp_decode($data);
   }
   else {
-    die "Unknown encoding type '$cte' in RFC2047 header";
+    # not possible since the input has already been limited to 'B' and 'Q'
+    die "message: unknown encoding type '$cte' in RFC2047 header";
   }
 }
 
@@ -521,8 +507,13 @@ sub _decode_header {
 
   return $header unless $header =~ /=\?/;
 
+  # multiple encoded sections must ignore the interim whitespace.
+  # to avoid possible FPs with (\s+(?==\?))?, look for the whole RE
+  # separated by whitespace.
+  1 while ($header =~ s/(=\?[\w_-]+\?[bqBQ]\?[^?]+\?=)\s+(=\?[\w_-]+\?[bqBQ]\?[^?]+\?=)/$1$2/g);
+
   $header =~
-    s/=\?([\w_-]+)\?([bqBQ])\?(.*?)\?=/__decode_header($1, uc($2), $3)/ge;
+    s/=\?([\w_-]+)\?([bqBQ])\?([^?]+)\?=/__decode_header($1, uc($2), $3)/ge;
 
   return $header;
 }
@@ -663,8 +654,6 @@ sub finish {
 }
 
 # ---------------------------------------------------------------------------
-
-sub dbg { Mail::SpamAssassin::dbg (@_); }
 
 1;
 __END__

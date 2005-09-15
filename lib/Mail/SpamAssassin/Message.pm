@@ -18,12 +18,20 @@
 
 Mail::SpamAssassin::Message - decode, render, and hold an RFC-2822 message
 
-=head1 SYNOPSIS
-
 =head1 DESCRIPTION
 
-This module will encapsulate an email message and allow access to
-the various MIME message parts and message metadata.
+This module encapsulates an email message and allows access to the various MIME
+message parts and message metadata.
+
+The message structure, after initiating a parse() cycle, looks like this:
+ 
+  Message object, also top-level node in Message::Node tree
+     |
+     +---> Message::Node for other parts in MIME structure
+     |       |---> [ more Message::Node parts ... ]
+     |       [ others ... ]
+     |
+     +---> Message::Metadata object to hold metadata
 
 =head1 PUBLIC METHODS
 
@@ -31,24 +39,17 @@ the various MIME message parts and message metadata.
 
 =cut
 
-# the message structure, after initiating a parse() cycle, is now:
-#
-# Message object, also top-level node in Message::Node tree
-#    |
-#    +---> Message::Node for other parts in MIME structure
-#    |       |---> [ more Message::Node parts ... ]
-#    |       [ others ... ]
-#    |
-#    +---> Message::Metadata object to hold metadata
-
 package Mail::SpamAssassin::Message;
+
 use strict;
+use warnings;
 use bytes;
 
 use Mail::SpamAssassin;
 use Mail::SpamAssassin::Message::Node;
 use Mail::SpamAssassin::Message::Metadata;
 use Mail::SpamAssassin::Constants qw(:sa);
+use Mail::SpamAssassin::Logger;
 
 use vars qw(@ISA);
 
@@ -65,6 +66,9 @@ C<message> is either undef (which will use STDIN), a scalar of the
 entire message, an array reference of the message with 1 line per array
 element, or a file glob which holds the entire contents of the message.
 
+Note: The message is expected to generally be in RFC 2822 format, optionally
+including an mbox message separator line (the "From " line) as the first line.
+
 C<parse_now> specifies whether or not to create the MIME tree
 at object-creation time or later as necessary.
 
@@ -74,6 +78,9 @@ Mail::SpamAssassin::Message::Node objects and their related data if the
 tree is not going to be used.  This is handy, for instance, when running
 C<spamassassin -d>, which only needs the pristine header and body which
 is always handled when the object is created.
+
+C<subparse> specifies how many levels of message/* attachment should be parsed
+into a subtree.  Defaults to 1.
 
 =cut
 
@@ -103,6 +110,11 @@ sub new {
   my $message = $opts->{'message'} || \*STDIN;
   my $parsenow = $opts->{'parsenow'} || 0;
 
+  # Specifies whether or not to parse message/rfc822 parts into its own tree.
+  # If the # > 0, it'll subparse, otherwise it won't.  By default, do one
+  # level deep.
+  $self->{subparse} = defined $opts->{'subparse'} ? $opts->{'subparse'} : 1;
+
   # protect it from abuse ...
   local $_;
 
@@ -120,50 +132,59 @@ sub new {
     @message = split ( /^/m, $message );
   }
 
+  return $self unless @message;
+
+  # Pull off mbox and mbx separators
+  if ( $message[0] =~ /^From\s/ ) {
+    # mbox formated mailbox
+    $self->{'mbox_sep'} = shift @message;
+  } elsif ($message[0] =~ MBX_SEPARATOR) {
+    $_ = shift @message;
+
+    # Munge the mbx message separator into mbox format as a sort of
+    # de facto portability standard in SA's internals.  We need to
+    # to this so that Mail::SpamAssassin::Util::parse_rfc822_date
+    # can parse the date string...
+    if (/([\s|\d]\d)-([a-zA-Z]{3})-(\d{4})\s(\d{2}):(\d{2}):(\d{2})/) {
+      # $1 = day of month
+      # $2 = month (text)
+      # $3 = year
+      # $4 = hour
+      # $5 = min
+      # $6 = sec
+      my @arr = localtime(timelocal($6,$5,$4,$1,$MONTH{lc($2)}-1,$3));
+      my $address;
+      foreach (@message) {
+  	if (/From:\s[^<]+<([^>]+)>/) {
+  	    $address = $1;
+  	    last;
+  	} elsif (/From:\s([^<^>]+)/) {
+  	    $address = $1;
+  	    last;
+  	}
+      }
+      $self->{'mbox_sep'} = "From $address $DAY_OF_WEEK[$arr[6]] $2 $1 $4:$5:$6 $3\n";
+    }
+  }
+
   # Go through all the headers of the message
   my $header = '';
-  while ( my $last = shift @message ) {
-    if ( $last =~ /^From\s/ ) {
-	# mbox formated mailbox
-	$self->{'mbox_sep'} = $last;
-	next;
-    } elsif ($last =~ MBX_SEPARATOR) {
-	# Munge the mbx message separator into mbox format as a sort of
-	# de facto portability standard in SA's internals.  We need to
-	# to this so that Mail::SpamAssassin::Util::parse_rfc822_date
-	# can parse the date string...
-	if (/([\s|\d]\d)-([a-zA-Z]{3})-(\d{4})\s(\d{2}):(\d{2}):(\d{2})/o) {
-	    # $1 = day of month
-	    # $2 = month (text)
-	    # $3 = year
-	    # $4 = hour
-	    # $5 = min
-	    # $6 = sec
-	    my @arr = localtime(timelocal($6,$5,$4,$1,$MONTH{lc($2)}-1,$3));
-	    my $address;
-	    foreach (@message) {
-		if (/From:\s[^<]+<([^>]+)>/) {
-		    $address = $1;
-		    last;
-		} elsif (/From:\s([^<^>]+)/) {
-		    $address = $1;
-		    last;
-		}
-	    }
-	    $self->{'mbox_sep'} = "From $address $DAY_OF_WEEK[$arr[6]] $2 $1 $4:$5:$6 $3\n";
-	    next;
-	}
-    }
-
-    # Store the non-modified headers in a scalar
+  while ( my $current = shift @message ) {
     unless ($self->{'missing_head_body_separator'}) {
-      $self->{'pristine_headers'} .= $last;
+      $self->{'pristine_headers'} .= $current;
     }
 
     # NB: Really need to figure out special folding rules here!
-    if ( $last =~ /^[ \t]+/ ) {                    # if its a continuation
+    if ( $current =~ /^[ \t]/ ) {
+      # This wasn't useful in terms of a rule, but we may want to treat it
+      # specially at some point.  Perhaps ignore it?
+      #unless ($current =~ /\S/) {
+      #  $self->{'obsolete_folding_whitespace'} = 1;
+      #}
+
+      # append continuations if there's a header in process
       if ($header) {
-        $header .= $last;                            # fold continuations
+        $header .= $current;
       }
     }
     else {
@@ -188,7 +209,7 @@ sub new {
       }
 
       # not a continuation...
-      $header = $last;
+      $header = $current;
     }
 
     if ($header) {
@@ -205,8 +226,8 @@ sub new {
 	#	Header, header continuation, blank line
         if (!@message || $message[0] !~ /^(?:[\041-\071\073-\176]+:|[ \t]|\r?$)/ || $message[0] =~ /^--/) {
 	  # No body or no separator before mime boundary is invalid
-	  $self->{'missing_head_body_separator'} = 1;
-
+          $self->{'missing_head_body_separator'} = 1;
+	  
 	  # we *have* to go back through again to make sure we catch the last
 	  # header, so fake a separator and loop again.
 	  unshift(@message, "\n");
@@ -214,14 +235,37 @@ sub new {
       }
     }
   }
+  undef $header;
 
   # Store the pristine body for later -- store as a copy since @message
   # will get modified below
   $self->{'pristine_body'} = join('', @message);
 
   # CRLF -> LF
-  for ( @message ) {
-    s/\r\n/\n/;
+  # also merge multiple blank lines into a single one
+  my $start;
+  # iterate over lines in reverse order
+  for (my $cnt=$#message; $cnt>=0; $cnt--) {
+    $message[$cnt] =~ s/\r\n/\n/;
+
+    # line is blank
+    if ($message[$cnt] !~ /\S/) {
+      if (!defined $start) {
+        $start=$cnt;
+      }
+      next unless $cnt == 0;
+    }
+
+    # line is not blank, or we've reached the beginning
+
+    # if we've got a series of blank lines, get rid of them
+    if (defined $start) {
+      my $num = $start-$cnt;
+      if ($num > 10) {
+        splice @message, $cnt+2, $num-1;
+      }
+      undef $start;
+    }
   }
 
   # If the message does need to get parsed, save off a copy of the body
@@ -265,17 +309,17 @@ sub _do_parse {
   # If we're called when we don't need to be, then just go ahead and return.
   return if (!defined $toparse);
 
-  dbg("---- MIME PARSER START ----");
+  dbg("message: ---- MIME PARSER START ----");
 
   # Figure out the boundary
   my ($boundary);
   ($self->{'type'}, $boundary) = Mail::SpamAssassin::Util::parse_content_type($self->header('content-type'));
-  dbg("main message type: ".$self->{'type'});
+  dbg("message: main message type: ".$self->{'type'});
 
   # Make the tree
   $self->parse_body( $self, $self, $boundary, $toparse, 1 );
 
-  dbg("---- MIME PARSER END ----");
+  dbg("message: ---- MIME PARSER END ----");
 }
 
 =item find_parts()
@@ -324,7 +368,7 @@ sub get_pristine_header {
   my ($self, $hdr) = @_;
   
   return $self->{pristine_headers} unless $hdr;
-  my(@ret) = $self->{pristine_headers} =~ /^(?:$hdr:[ \t]+(.*\n(?:\s+\S.*\n)*))/mig;
+  my(@ret) = $self->{pristine_headers} =~ /^\Q$hdr\E:[ \t]+(.*?\n(?![ \t]))/smgi;
   if (@ret) {
     return wantarray ? @ret : $ret[-1];
   }
@@ -378,6 +422,132 @@ Returns a scalar of the pristine message body.
 sub get_pristine_body {
   my ($self) = @_;
   return $self->{pristine_body};
+}
+
+# ---------------------------------------------------------------------------
+
+=item extract_message_metadata($main)
+
+=cut
+
+sub extract_message_metadata {
+  my ($self, $main) = @_;
+
+  # do this only once per message, it can be expensive
+  if ($self->{already_extracted_metadata}) { return; }
+  $self->{already_extracted_metadata} = 1;
+
+  $self->{metadata}->extract ($self, $main);
+}
+
+# ---------------------------------------------------------------------------
+
+=item $str = get_metadata($hdr)
+
+=cut
+
+sub get_metadata {
+  my ($self, $hdr) = @_;
+  if (!$self->{metadata}) {
+    warn "metadata: oops! get_metadata() called after finish_metadata()"; return;
+  }
+  $self->{metadata}->{strings}->{$hdr};
+}
+
+=item put_metadata($hdr, $text)
+
+=cut
+
+sub put_metadata {
+  my ($self, $hdr, $text) = @_;
+  if (!$self->{metadata}) {
+    warn "metadata: oops! put_metadata() called after finish_metadata()"; return;
+  }
+  $self->{metadata}->{strings}->{$hdr} = $text;
+}
+
+=item delete_metadata($hdr)
+
+=cut
+
+sub delete_metadata {
+  my ($self, $hdr) = @_;
+  if (!$self->{metadata}) {
+    warn "metadata: oops! delete_metadata() called after finish_metadata()"; return;
+  }
+  delete $self->{metadata}->{strings}->{$hdr};
+}
+
+=item $str = get_all_metadata()
+
+=cut
+
+sub get_all_metadata {
+  my ($self) = @_;
+
+  if (!$self->{metadata}) {
+    warn "metadata: oops! get_all_metadata() called after finish_metadata()"; return;
+  }
+  my @ret = ();
+  foreach my $key (sort keys %{$self->{metadata}->{strings}}) {
+    push (@ret, "$key: " . $self->{metadata}->{strings}->{$key} . "\n");
+  }
+  return (wantarray ? @ret :  join('', @ret));
+}
+
+# ---------------------------------------------------------------------------
+
+=item finish_metadata()
+
+Destroys the metadata for this message.  Once a message has been
+scanned fully, the metadata is no longer required.   Destroying
+this will free up some memory.
+
+=cut
+
+sub finish_metadata {
+  my ($self) = @_;
+  if (defined ($self->{metadata})) {
+    $self->{metadata}->finish();
+    delete $self->{metadata};
+  }
+}
+
+=item finish()
+
+Clean up an object so that it can be destroyed.
+
+=cut
+
+sub finish {
+  my ($self) = @_;
+
+  # Clean ourself up
+  $self->finish_metadata();
+  undef $self->{pristine_headers};
+  undef $self->{pristine_body};
+  delete $self->{pristine_headers};
+  delete $self->{pristine_body};
+  delete $self->{text_decoded};
+  delete $self->{text_rendered};
+
+  # Destroy the tree ...
+  $self->SUPER::finish();
+}
+
+# ---------------------------------------------------------------------------
+
+=item receive_date()
+
+Return a time_t value with the received date of the current message,
+or current time if received time couldn't be determined.
+
+=cut
+
+sub receive_date {
+  my($self) = @_;
+
+  return Mail::SpamAssassin::Util::receive_date(scalar $self->get_all_headers(0,1));
 }
 
 # ---------------------------------------------------------------------------
@@ -447,7 +617,7 @@ to generate the tree.
 sub _parse_multipart {
   my($self, $msg, $_msg, $boundary, $body) = @_;
 
-  dbg("parsing multipart, got boundary: ".(defined $boundary ? $boundary : ''));
+  dbg("message: parsing multipart, got boundary: ".(defined $boundary ? $boundary : ''));
 
   # NOTE: The MIME boundary REs here are very specific to be mostly RFC 1521
   # compliant, but also allow possible malformations to still work.  Please
@@ -474,7 +644,8 @@ sub _parse_multipart {
     # Else, there's no boundary, so leave the whole part...
   }
 
-  my $part_msg = Mail::SpamAssassin::Message::Node->new();    # prepare a new tree node
+  # prepare a new tree node
+  my $part_msg = Mail::SpamAssassin::Message::Node->new({ subparse=>$msg->{subparse} });
   my $in_body = 0;
   my $header;
   my $part_array;
@@ -483,7 +654,7 @@ sub _parse_multipart {
   foreach ( @{$body} ) {
     # if we're on the last body line, or we find any boundary marker,
     # deal with the mime part
-    if ( --$line_count == 0 || (defined $boundary && /^--\Q$boundary\E(?:--|\s*$)/) ) {
+    if ( --$line_count == 0 || (defined $boundary && /^--\Q$boundary\E(?:--)?\s*$/) ) {
       my $line = $_; # remember the last line
 
       # per rfc 1521, the CRLF before the boundary is part of the boundary:
@@ -507,13 +678,13 @@ sub _parse_multipart {
       my($p_boundary);
       ($part_msg->{'type'}, $p_boundary) = Mail::SpamAssassin::Util::parse_content_type($part_msg->header('content-type'));
       $p_boundary ||= $boundary;
-      dbg("found part of type ".$part_msg->{'type'}.", boundary: ".(defined $p_boundary ? $p_boundary : ''));
+      dbg("message: found part of type ".$part_msg->{'type'}.", boundary: ".(defined $p_boundary ? $p_boundary : ''));
       $self->parse_body( $msg, $part_msg, $p_boundary, $part_array, 0 );
 
-      # rfc 1521 says /^--boundary--$/ but MUAs have a tendancy to just
-      # require /^--boundary--/ due to malformed messages, so that'll work for
-      # us as well.
-      if (defined $boundary && $line =~ /^--\Q${boundary}\E--/) {
+      # rfc 1521 says /^--boundary--$/, some MUAs may just require /^--boundary--/
+      # but this causes problems with horizontal lines when the boundary is
+      # made up of dashes as well, etc.
+      if (defined $boundary && $line =~ /^--\Q${boundary}\E--\s*$/) {
 	# Make a note that we've seen the end boundary
 	$self->{mime_boundary_state}->{$boundary}--;
         last;
@@ -521,46 +692,56 @@ sub _parse_multipart {
 
       # make sure we start with a new clean node
       $in_body  = 0;
-      $part_msg = Mail::SpamAssassin::Message::Node->new();
+      $part_msg = Mail::SpamAssassin::Message::Node->new({ subparse=>$msg->{subparse} });
       undef $part_array;
       undef $header;
 
       next;
     }
 
-    if ($in_body) {
-      # we run into a perl bug if the lines are astronomically long (probably
-      # due to lots of regexp backtracking); so cut short any individual line
-      # over MAX_BODY_LINE_LENGTH bytes in length.  This can wreck HTML
-      # totally -- but IMHO the only reason a luser would use
-      # MAX_BODY_LINE_LENGTH-byte lines is to crash filters, anyway.
-      while (length ($_) > MAX_BODY_LINE_LENGTH) {
-        push (@{$part_array}, substr($_, 0, MAX_BODY_LINE_LENGTH)."\n");
-        substr($_, 0, MAX_BODY_LINE_LENGTH) = '';
-      }
-      push ( @{$part_array}, $_ );
-    }
-    else {
+    if (!$in_body) {
       s/\s+$//;
-      if (m/^\S/) {
+      if (m/^[\041-\071\073-\176]+:/) {
         if ($header) {
           my ( $key, $value ) = split ( /:\s*/, $header, 2 );
           $part_msg->header( $key, $value );
         }
         $header = $_;
+	next;
       }
-      elsif (/^$/) {
+      elsif (/^[ \t]/) {
+        $_ =~ s/^\s*//;
+        $header .= $_;
+	next;
+      }
+      else {
         if ($header) {
           my ( $key, $value ) = split ( /:\s*/, $header, 2 );
           $part_msg->header( $key, $value );
         }
         $in_body = 1;
-      }
-      else {
-        $_ =~ s/^\s*//;
-        $header .= $_;
+
+	# if there's a blank line separator, that's good.  if there isn't,
+	# it's a body line, so drop through.
+	if (/^\r?$/) {
+	  next;
+	}
+	else {
+          $self->{'missing_mime_head_body_separator'} = 1;
+	}
       }
     }
+
+    # we run into a perl bug if the lines are astronomically long (probably
+    # due to lots of regexp backtracking); so cut short any individual line
+    # over MAX_BODY_LINE_LENGTH bytes in length.  This can wreck HTML
+    # totally -- but IMHO the only reason a luser would use
+    # MAX_BODY_LINE_LENGTH-byte lines is to crash filters, anyway.
+    while (length ($_) > MAX_BODY_LINE_LENGTH) {
+      push (@{$part_array}, substr($_, 0, MAX_BODY_LINE_LENGTH)."\n");
+      substr($_, 0, MAX_BODY_LINE_LENGTH) = '';
+    }
+    push ( @{$part_array}, $_ );
   }
 
 }
@@ -574,7 +755,7 @@ Generate a leaf node and add it to the parent.
 sub _parse_normal {
   my ($self, $msg, $part_msg, $boundary, $body) = @_;
 
-  dbg("parsing normal part");
+  dbg("message: parsing normal part");
 
   # 0: content-type, 1: boundary, 2: charset, 3: filename
   my @ct = Mail::SpamAssassin::Util::parse_content_type($part_msg->header('content-type'));
@@ -598,12 +779,16 @@ sub _parse_normal {
 
   # If this part is a message/* part, and the parent isn't also a
   # message/* part (ie: the main part) go ahead and parse into a tree.
-  if ($part_msg->{'type'} =~ /^message\b/i) {
+  if ($part_msg->{'type'} =~ /^message\b/i && ($msg->{subparse} > 0)) {
     # Get the part ready...
     my $message = $part_msg->decode();
 
     if ($message) {
-      my $msg_obj = Mail::SpamAssassin::Message->new({message=>$message, parsenow=>1});
+      my $msg_obj = Mail::SpamAssassin::Message->new({
+      	message		=>	$message,
+	parsenow	=>	1,
+	subparse	=>	$msg->{subparse}-1,
+	});
 
       # main message is a message/* part ...
       if ($msg == $part_msg) {
@@ -620,6 +805,10 @@ sub _parse_normal {
 
       return;
     }
+  }
+  else {
+    # leaves don't need the subparse value, so get rid of it
+    delete $part_msg->{subparse};
   }
 
   # Add the new part as a child to the parent
@@ -650,6 +839,10 @@ sub get_rendered_body_text_array {
   my @parts = $self->find_parts(qr/^(?:text|message)\b/i,1);
   return $self->{text_rendered} unless @parts;
 
+  # the html metadata may have already been set, so let's not bother if it's
+  # already been done.
+  my $html_needs_setting = !exists $self->{metadata}->{html};
+
   # Go through each part
   my $text = $self->get_header ('subject') || '';
   for(my $pt = 0 ; $pt <= $#parts ; $pt++ ) {
@@ -664,8 +857,12 @@ sub get_rendered_body_text_array {
       $text .= $rnd;
 
       # TVD - if there are multiple parts, what should we do?
-      # right now, just use the last one ...
-      $self->{metadata}->{html} = $p->{html_results} if ( $type eq 'text/html' );
+      # right now, just use the last one.  we may need to give some priority
+      # at some point, ie: use text/html rendered if it exists, or
+      # text/plain rendered as html otherwise.
+      if ($html_needs_setting && $type eq 'text/html') {
+        $self->{metadata}->{html} = $p->{html_results};
+      }
     }
     else {
       $text .= $p->decode();
@@ -677,7 +874,7 @@ sub get_rendered_body_text_array {
   $text =~ tr/ \t\n\r\x0b\xa0/ /s;	# whitespace => space
   $text =~ tr/\f/\n/;			# form feeds => newline
   
-  # warn "JMD $text";
+  # warn "message: $text";
 
   my @textary = split_into_array_of_short_lines ($text);
   $self->{text_rendered} = \@textary;
@@ -702,6 +899,10 @@ sub get_visible_rendered_body_text_array {
   my @parts = $self->find_parts(qr/^(?:text|message)\b/i,1);
   return $self->{text_visible_rendered} unless @parts;
 
+  # the html metadata may have already been set, so let's not bother if it's
+  # already been done.
+  my $html_needs_setting = !exists $self->{metadata}->{html};
+
   # Go through each part
   my $text = $self->get_header ('subject') || '';
   for(my $pt = 0 ; $pt <= $#parts ; $pt++ ) {
@@ -714,6 +915,14 @@ sub get_visible_rendered_body_text_array {
     if ( defined $rnd ) {
       # Only text/* types are rendered ...
       $text .= $rnd;
+
+      # TVD - if there are multiple parts, what should we do?
+      # right now, just use the last one.  we may need to give some priority
+      # at some point, ie: use text/html rendered if it exists, or
+      # text/plain rendered as html otherwise.
+      if ($html_needs_setting && $type eq 'text/html') {
+        $self->{metadata}->{html} = $p->{html_results};
+      }
     }
     else {
       $text .= $p->decode();
@@ -721,9 +930,9 @@ sub get_visible_rendered_body_text_array {
   }
 
   # whitespace handling (warning: small changes have large effects!)
-  $text =~ s/\n+\s*\n+/\f/gs;                # double newlines => form feed
-  $text =~ tr/ \t\n\r\x0b\xa0/ /s;        # whitespace => space
-  $text =~ tr/\f/\n/;                        # form feeds => newline
+  $text =~ s/\n+\s*\n+/\f/gs;		# double newlines => form feed
+  $text =~ tr/ \t\n\r\x0b\xa0/ /s;	# whitespace => space
+  $text =~ tr/\f/\n/;			# form feeds => newline
 
   my @textary = split_into_array_of_short_lines ($text);
   $self->{text_visible_rendered} = \@textary;
@@ -744,6 +953,10 @@ sub get_invisible_rendered_body_text_array {
   my @parts = $self->find_parts(qr/^(?:text|message)\b/i,1);
   return $self->{text_invisible_rendered} unless @parts;
 
+  # the html metadata may have already been set, so let's not bother if it's
+  # already been done.
+  my $html_needs_setting = !exists $self->{metadata}->{html};
+
   # Go through each part
   my $text = '';
   for(my $pt = 0 ; $pt <= $#parts ; $pt++ ) {
@@ -756,13 +969,21 @@ sub get_invisible_rendered_body_text_array {
     if ( defined $rnd ) {
       # Only text/* types are rendered ...
       $text .= $rnd;
+
+      # TVD - if there are multiple parts, what should we do?
+      # right now, just use the last one.  we may need to give some priority
+      # at some point, ie: use text/html rendered if it exists, or
+      # text/plain rendered as html otherwise.
+      if ($html_needs_setting && $type eq 'text/html') {
+        $self->{metadata}->{html} = $p->{html_results};
+      }
     }
   }
 
   # whitespace handling (warning: small changes have large effects!)
-  $text =~ s/\n+\s*\n+/\f/gs;                # double newlines => form feed
-  $text =~ tr/ \t\n\r\x0b\xa0/ /s;        # whitespace => space
-  $text =~ tr/\f/\n/;                        # form feeds => newline
+  $text =~ s/\n+\s*\n+/\f/gs;		# double newlines => form feed
+  $text =~ tr/ \t\n\r\x0b\xa0/ /s;	# whitespace => space
+  $text =~ tr/\f/\n/;			# form feeds => newline
 
   my @textary = split_into_array_of_short_lines ($text);
   $self->{text_invisible_rendered} = \@textary;
@@ -807,130 +1028,8 @@ sub split_into_array_of_short_lines {
 
 # ---------------------------------------------------------------------------
 
-=item $str = get_metadata($hdr)
-
-=cut
-
-sub extract_message_metadata {
-  my ($self, $main) = @_;
-
-  # do this only once per message, it can be expensive
-  if ($self->{already_extracted_metadata}) { return; }
-  $self->{already_extracted_metadata} = 1;
-
-  $self->{metadata}->extract ($self, $main);
-}
-
-# ---------------------------------------------------------------------------
-
-=item $str = get_metadata($hdr)
-
-=cut
-
-sub get_metadata {
-  my ($self, $hdr) = @_;
-  if (!$self->{metadata}) {
-    warn "oops! get_metadata() called after finish_metadata()"; return;
-  }
-  $self->{metadata}->{strings}->{$hdr};
-}
-
-=item put_metadata($hdr, $text)
-
-=cut
-
-sub put_metadata {
-  my ($self, $hdr, $text) = @_;
-  if (!$self->{metadata}) {
-    warn "oops! put_metadata() called after finish_metadata()"; return;
-  }
-  $self->{metadata}->{strings}->{$hdr} = $text;
-}
-
-=item delete_metadata($hdr)
-
-=cut
-
-sub delete_metadata {
-  my ($self, $hdr) = @_;
-  if (!$self->{metadata}) {
-    warn "oops! delete_metadata() called after finish_metadata()"; return;
-  }
-  delete $self->{metadata}->{strings}->{$hdr};
-}
-
-=item $str = get_all_metadata()
-
-=cut
-
-sub get_all_metadata {
-  my ($self) = @_;
-
-  if (!$self->{metadata}) {
-    warn "oops! get_all_metadata() called after finish_metadata()"; return;
-  }
-  my @ret = ();
-  foreach my $key (sort keys %{$self->{metadata}->{strings}}) {
-    push (@ret, "$key: " . $self->{metadata}->{strings}->{$key} . "\n");
-  }
-  return (wantarray ? @ret :  join('', @ret));
-}
-
-# ---------------------------------------------------------------------------
-
-=item finish_metadata()
-
-Destroys the metadata for this message.  Once a message has been
-scanned fully, the metadata is no longer required.   Destroying
-this will free up some memory.
-
-=cut
-
-sub finish_metadata {
-  my ($self) = @_;
-  if (defined ($self->{metadata})) {
-    $self->{metadata}->finish();
-    delete $self->{metadata};
-  }
-}
-
-=item finish()
-
-Clean up an object so that it can be destroyed.
-
-=cut
-
-sub finish {
-  my ($self) = @_;
-
-  # Clean ourself up
-  $self->finish_metadata();
-  delete $self->{pristine_headers};
-  delete $self->{pristine_body};
-  delete $self->{text_decoded};
-  delete $self->{text_rendered};
-
-  # Destroy the tree ...
-  $self->SUPER::finish();
-}
-
-# ---------------------------------------------------------------------------
-
-=item receive_date()
-
-Return a time_t value with the received date of the current message,
-or current time if received time couldn't be determined.
-
-=cut
-
-sub receive_date {
-  my($self) = @_;
-
-  return Mail::SpamAssassin::Util::receive_date(scalar $self->get_all_headers(0,1));
-}
-
-# ---------------------------------------------------------------------------
-
-sub dbg { Mail::SpamAssassin::dbg (@_); }
-
 1;
+
+=back
+
+=cut

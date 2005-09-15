@@ -46,6 +46,7 @@ See C<Mail::SpamAssassin::DBBasedAddrList> for an example.
 package Mail::SpamAssassin::PersistentAddrList;
 
 use strict;
+use warnings;
 use bytes;
 
 use vars qw{
@@ -82,7 +83,7 @@ SpamAssassin classes.
 
 sub new_checker {
   my ($factory, $main) = @_;
-  die "unimpled base method";	# override this
+  die "auto-whitelist: unimplemented base method";	# override this
 }
 
 ###########################################################################
@@ -110,7 +111,7 @@ a C<count> key and a C<totscore> key.
 sub get_addr_entry {
   my ($self, $addr) = @_;
   my $entry = { };
-  die "unimpled base method";	# override this
+  die "auto-whitelist: unimplemented base method";	# override this
   return $entry;
 }
 
@@ -125,7 +126,7 @@ given entry, and then return the new entry.
 
 sub add_score {
     my ($self, $entry, $score) = @_;
-    die "unimpled base method"; # override this
+    die "auto-whitelist: unimplemented base method"; # override this
 }
 
 ###########################################################################
@@ -138,7 +139,7 @@ This method should remove the given entry from the whitelist database.
 
 sub remove_entry {
   my ($self, $entry) = @_;
-  die "unimpled base method";	# override this
+  die "auto-whitelist: unimplemented base method";	# override this
 }
 
 ###########################################################################
@@ -157,3 +158,7 @@ sub finish {
 ###########################################################################
 
 1;
+
+=back
+
+=cut

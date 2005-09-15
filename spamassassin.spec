@@ -1,10 +1,5 @@
-# includes some tricks from the RPM wizards at PLD:
-# http://cvs.pld.org.pl/SPECS/spamassassin.spec
-# namely, making the tools RPM for masses, sql, and tools, and
-# the perl-Mail-SpamAssassin rpm for the modules only.
-
 # the version in the tar name
-%define real_version 3.0.4
+%define real_version 3.1.0
 # the display version number
 %define version %{real_version}
 
@@ -66,16 +61,6 @@ they can be filtered by the user's mail reading software.  This distribution
 includes the spamc/spamc components which considerably speeds processing of
 mail.
 
-%package tools
-Summary:        Miscellaneous tools and documentation for SpamAssassin
-Summary(pl):    Przeró¿ne narzêdzia zwi±zane z SpamAssassin
-Group:          Applications/Mail
-Requires: perl-Mail-SpamAssassin = %{version}-%{release}
-
-%description tools
-Miscellaneous tools and documentation from various authors, distributed
-with SpamAssassin.  See /usr/share/doc/SpamAssassin-tools-*/.
-
 %package -n perl-Mail-SpamAssassin
 Summary:        %{pdir}::%{pnam} -- SpamAssassin e-mail filter Perl modules
 Summary(pl):    %{pdir}::%{pnam} -- modu³y Perla filtru poczty SpamAssassin
@@ -126,16 +111,12 @@ mkdir -p %{buildroot}/etc/mail/spamassassin
 
 %files 
 %defattr(-,root,root)
-%doc README Changes sample-nonspam.txt sample-spam.txt spamd/README.spamd INSTALL BUGS LICENSE TRADEMARK USAGE sql
+%doc README Changes sample-nonspam.txt sample-spam.txt spamd/README.spamd INSTALL BUGS LICENSE TRADEMARK USAGE sql UPGRADE
 %attr(755,root,root) %{_bindir}/*
 %attr(644,root,root) %{_includedir}/*
 %attr(644,root,root) %{_libdir}/*.so
 %config(noreplace) %attr(755,root,root) %{initdir}/spamassassin
 %{_mandir}/man1/*
-
-%files tools
-%defattr(644,root,root,755)
-%doc tools masses contrib
 
 %files -n perl-Mail-SpamAssassin
 %defattr(644,root,root,755)

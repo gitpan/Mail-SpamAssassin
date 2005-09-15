@@ -17,22 +17,19 @@ if (-e 'test_dir') {            # running from test directory, not ..
 
 use strict;
 use Test;
+use SATest; sa_t_init("uri");
+
 use Mail::SpamAssassin;
 use Mail::SpamAssassin::HTML;
 use Mail::SpamAssassin::Util;
 
-plan tests => 64;
+plan tests => 82;
 
 ##############################################
 
 # initialize SpamAssassin
-my $sa = Mail::SpamAssassin->new({
-    rules_filename => "$prefix/t/log/test_rules_copy",
-    site_rules_filename => "$prefix/t/log/test_default.cf",
-    local_tests_only    => 1,
-    debug             => 0,
-    dont_copy_prefs   => 1,
-});
+my $sa = create_saobj({'dont_copy_prefs' => 1});
+
 $sa->init(0); # parse rules
 
 open (IN, "<data/spam/009");
@@ -49,6 +46,9 @@ ok ($urimap{'http://66.92.69.221/'});
 ok ($urimap{'http://66.92.69.222/'});
 ok ($urimap{'http://66.92.69.223/'});
 ok ($urimap{'http://66.92.69.224/'});
+ok ($urimap{'spamassassin.org'});
+ok (!$urimap{'CUMSLUTS.'});
+ok (!$urimap{'CUMSLUTS..VIRGIN'});
 
 ##############################################
 
@@ -59,6 +59,9 @@ sub try_domains {
   # undef is valid in some situations, so deal with it...
   if (!defined $expect) {
     return !defined $result;
+  }
+  elsif (!defined $result) {
+    return 0;
   }
 
   if ($expect eq $result) {
@@ -80,8 +83,17 @@ ok(try_domains('http:/%77%77%77.spamassassin.org/lists.html', undef));
 ok(try_domains('http:/www.spamassassin.org/lists.html', 'spamassassin.org'));
 ok(try_domains('http:www.spamassassin.org/lists.html', 'spamassassin.org'));
 ok(try_domains('http://kung.pao.com.cn', 'pao.com.cn'));
-ok(try_domains('http://blah.blah.com:/', 'blah.com'));
+ok(try_domains('kung.pao.com.cn', 'pao.com.cn'));
+ok(try_domains('kung-pao.com.cn', 'kung-pao.com.cn'));
+ok(try_domains('username:password@www.spamassassin.org/lists.html', 'spamassassin.org'));
+ok(try_domains('spamassassin.org', 'spamassassin.org'));
+ok(try_domains('SPAMASSASSIN.ORG', 'spamassassin.org'));
+ok(try_domains('WWW.SPAMASSASSIN.ORG', 'spamassassin.org'));
+ok(try_domains('spamassassin.txt', undef));
+ok(try_domains('longer.url.but.not.spamassassin.txt', undef));
 ok(try_domains('http://ebg&vosxfov.com.munged-rxspecials.net/b/Tr3f0amG','munged-rxspecials.net'));
+ok(try_domains('http://blah.blah.com:/', 'blah.com'));
+ok(try_domains('http://example.com.%20.host.example.info/', 'example.info'));
 
 ##############################################
 
@@ -96,7 +108,8 @@ sub array_cmp {
 
 sub try_canon {
   my($input, $expect) = @_;
-  my @input = sort { $a cmp $b } Mail::SpamAssassin::Util::uri_list_canonify(@{$input});
+  my $redirs = $sa->{conf}->{redirector_patterns};
+  my @input = sort { $a cmp $b } Mail::SpamAssassin::Util::uri_list_canonify($redirs, @{$input});
   my @expect = sort { $a cmp $b } @{$expect};
 
   # output what we want/get for debugging
@@ -111,10 +124,12 @@ sub try_canon {
 ok(try_canon([
    'http:www.spamassassin.org',
    'http:/www.spamassassin.org',
+   "ht\rtp:/\r/www.exa\rmple.com",
    ], [
    'http://www.spamassassin.org',
    'http:www.spamassassin.org',
    'http:/www.spamassassin.org',
+   'http://www.example.com',
    ]));
 
 # Try a simple redirector.  Should return the redirector and the URI
@@ -127,12 +142,53 @@ ok(try_canon(['http://rd.yahoo.com/?http:/www.spamassassin.org'],
    ]));
 
 ok(try_canon(['http://images.google.ca/imgres?imgurl=gmib.free.fr/viagra.jpg&imgrefurl=http://www.google.com/url?q=http://www.google.com/url?q=%68%74%74%70%3A%2F%2F%77%77%77%2E%65%78%70%61%67%65%2E%63%6F%6D%2F%6D%61%6E%67%65%72%33%32'],
+
    [
    'http://images.google.ca/imgres?imgurl=gmib.free.fr/viagra.jpg&imgrefurl=http://www.google.com/url?q=http://www.google.com/url?q=%68%74%74%70%3A%2F%2F%77%77%77%2E%65%78%70%61%67%65%2E%63%6F%6D%2F%6D%61%6E%67%65%72%33%32',
    'http://images.google.ca/imgres?imgurl=gmib.free.fr/viagra.jpg&imgrefurl=http://www.google.com/url?q=http://www.google.com/url?q=http://www.expage.com/manger32',
    'http://www.expage.com/manger32',
    'http://www.google.com/url?q=http://www.expage.com/manger32',
    'http://www.google.com/url?q=http://www.google.com/url?q=http://www.expage.com/manger32',
+   ]));
+
+# redirector_pattern test
+ok(try_canon(['http://chkpt.zdnet.com/chkpt/baz/jmason.org'],
+   [
+   'http://chkpt.zdnet.com/chkpt/baz/jmason.org',
+   'http://jmason.org',
+   'jmason.org',
+   ]));
+
+ok(try_canon(['http://emf0.com/r.cfm?foo=bar&r=jmason.org'],
+   [
+   'http://emf0.com/r.cfm?foo=bar&r=jmason.org',
+   'http://jmason.org',
+   'jmason.org',
+   ]));
+
+ok(try_canon(["ht\rtp\r://www.kl\nuge.n\net/"],
+  ['http://www.kluge.net/']
+  ));
+
+ok(try_canon(['http:\\\\people.apache.org\\~felicity\\'],
+  ['http:\\\\people.apache.org\\~felicity\\',
+  'http://people.apache.org/~felicity/']
+  ));
+
+ok(try_canon([
+   'http%3A//ebg&vosxfov.com%2Emunged-%72xspecials%2Enet/b/Tr3f0amG'
+   ], [
+   'http%3A//ebg&vosxfov.com%2Emunged-%72xspecials%2Enet/b/Tr3f0amG',
+   'http://ebg&vosxfov.com.munged-rxspecials.net/b/Tr3f0amG'
+   ]));
+
+ok(try_canon([
+   'http://www.nate.com/r/DM03/n%65verp4%79re%74%61%69%6c%2eco%6d/%62%61m/?m%61%6e=%6Di%634%39'
+   ], [
+   'http://www.nate.com/r/DM03/n%65verp4%79re%74%61%69%6c%2eco%6d/%62%61m/?m%61%6e=%6Di%634%39',
+   'http://www.nate.com/r/DM03/neverp4yretail.com/bam/?man=mic49',
+   'http://neverp4yretail.com/bam/?man=mic49',
+   'neverp4yretail.com/bam/?man=mic49',
    ]));
 
 ##############################################
@@ -196,3 +252,4 @@ ok(try($base, "g?y/../x", "http://a/b/c/g?y/../x"));
 ok(try($base, "g#s/./x", "http://a/b/c/g#s/./x"));
 ok(try($base, "g#s/../x", "http://a/b/c/g#s/../x"));
 ok(try($base, "http:g", "http://a/b/c/g"));
+

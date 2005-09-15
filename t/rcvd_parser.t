@@ -18,7 +18,7 @@ if (-e 'test_dir') {            # running from test directory, not ..
 
 use lib '.'; use lib 't';
 use SATest; sa_t_init("rcvd_parser");
-use Test; BEGIN { plan tests => 42 };
+use Test; BEGIN { plan tests => 43 };
 
 
 use strict;
@@ -157,6 +157,23 @@ Received: from 24.8.231.233 by by1fd.bay1.hotmail.msn.com with HTTP;
 } => q{
 
   [ ip=65.54.245.95 rdns=bay1-f95.bay1.hotmail.com helo=hotmail.com by=Daffy.timing.com ident= envfrom= id= auth= ] [ ip=24.8.231.233 rdns= helo= by=by1fd.bay1.hotmail.msn.com ident= envfrom= id= auth=HTTP ]
+
+},
+q{
+
+Received: (qmail 22147 invoked by uid 526); 6 Feb 2005 21:11:38 -0000
+Received: from 156.56.111.196 by blazing.arsecandle.org (envelope-from <gentoo-announce-return-530-rod=arsecandle.org@lists.gentoo.org>, uid 502) with qmail-scanner-1.24
+ (clamdscan: 0.80/594. f-prot: 4.4.2/3.14.11.
+ Clear:RC:0(156.56.111.196):.
+ Processed in 0.288806 secs); 06 Feb 2005 21:11:38 -0000
+DomainKey-Status: no signature
+Received: from lists.gentoo.org (HELO parrot.gentoo.org) (156.56.111.196)
+  by blazing.arsecandle.org with (DHE-RSA-AES256-SHA encrypted) SMTP; 6 Feb 2005 21:11:37 -0000
+Received: (qmail 3988 invoked by uid 89); 6 Feb 2005 21:11:12 +0000
+
+} => q{
+
+  [ ip=156.56.111.196 rdns=lists.gentoo.org helo=parrot.gentoo.org by=blazing.arsecandle.org ident= envfrom=gentoo-announce-return-530-rod=arsecandle.org@lists.gentoo.org id= auth= ]
 
 },
 q{
@@ -425,7 +442,7 @@ Received: from 83-70-48-2.bas2.dbn.dublin.eircom.net (HELO ?192.168.23.32?) (83.
 
 } => q{
 
-[ ip=159.134.118.16 rdns=mail00.svc.cra.dublin.eircom.net helo=mail00.svc.cra.dublin.eircom.net by=amgod.boxhost.net ident= envfrom= id=0ACFC31014D auth= ] [ ip=83.70.48.2 rdns=83-70-48-2.bas2.dbn.dublin.eircom.net helo=?192.168.23.32? by=mail00.svc.cra.dublin.eircom.net ident= envfrom= id= auth= ]
+[ ip=159.134.118.16 rdns=mail00.svc.cra.dublin.eircom.net helo=mail00.svc.cra.dublin.eircom.net by=amgod.boxhost.net ident= envfrom= id=0ACFC31014D auth= ] [ ip=83.70.48.2 rdns=83-70-48-2.bas2.dbn.dublin.eircom.net helo=?192.168.23.32? by=mail00.svc.cra.dublin.eircom.net ident= envfrom= id= auth= ] [ ip=127.0.0.1 rdns=localhost helo=localhost by=radish.zzzz.org ident= envfrom= id=1398F5900D9 auth= ]
 
 },
 q{
@@ -448,7 +465,7 @@ Received: from localhost (wwwwww@localhost)
 
 } => q{
   
-[ ip=128.200.80.6 rdns=smtp3.es.uci.edu helo=smtp3.es.uci.edu by=amgod.boxhost.net ident= envfrom= id=87D0A310091 auth= ] [ ip=128.200.80.22 rdns=rigel.oac.uci.edu helo=rigel.oac.uci.edu by=smtp3.es.uci.edu ident= envfrom= id=i2907ZaF008726 auth= ]
+[ ip=128.200.80.6 rdns=smtp3.es.uci.edu helo=smtp3.es.uci.edu by=amgod.boxhost.net ident= envfrom= id=87D0A310091 auth= ] [ ip=128.200.80.22 rdns=rigel.oac.uci.edu helo=rigel.oac.uci.edu by=smtp3.es.uci.edu ident= envfrom= id=i2907ZaF008726 auth= ] [ ip=127.0.0.1 rdns=localhost helo=localhost by=radish.jmason.org ident= envfrom= id=27B275900D9 auth= ]
   
 },
 q{
@@ -498,7 +515,7 @@ Received: from p50894de7.dip0.t-ipconnect.de ([80.137.77.231]:11218 helo=sandpip
 
 } => q{
  
-  [ ip=66.92.76.133 rdns=dsl092-076-133.bos1.dsl.speakeasy.net helo=pendaran.arborius.net by=sc8-sf-mx1.sourceforge.net ident= envfrom= id=1CIlfc-0003Pa-8W auth= ] [ ip=158.64.60.71 rdns=gilmore.ael.be helo=gilmore.ael.be by=castlerea.stdlib.net ident= envfrom= id=1CIusZ-00049K-45 auth= ] [ ip=198.189.237.214 rdns=rubel.csumb.edu helo=rubel.csumb.edu by=sf1.isc.org ident= envfrom=snort@csumb.edu id=23587284EE auth= ] [ ip=80.137.77.231 rdns=p50894de7.dip0.t-ipconnect.de helo=sandpiper by=mail1.isc.de ident= envfrom= id=1CJaZW-0006rU-00 auth= ]
+  [ ip=66.92.76.133 rdns=dsl092-076-133.bos1.dsl.speakeasy.net helo=pendaran.arborius.net by=sc8-sf-mx1.sourceforge.net ident= envfrom= id=1CIlfc-0003Pa-8W auth= ] [ ip=158.64.60.71 rdns=gilmore.ael.be helo= by=castlerea.stdlib.net ident= envfrom= id=1CIusZ-00049K-45 auth= ] [ ip=198.189.237.214 rdns=rubel.csumb.edu helo=rubel.csumb.edu by=sf1.isc.org ident= envfrom=snort@csumb.edu id=23587284EE auth= ] [ ip=80.137.77.231 rdns=p50894de7.dip0.t-ipconnect.de helo=sandpiper by=mail1.isc.de ident= envfrom= id=1CJaZW-0006rU-00 auth= ]
   
 },
 q{
@@ -557,7 +574,7 @@ foreach my $hdrs (sort keys %data) {
 
   #warn "JMD $result";
   $result =~ s/\n[ \t]+/ /gs;
-  $result =~ /\nX-Spam-Relays: ([^\n]*)\n/s;
+  $result =~ /(?:\n|^)X-Spam-Relays: ([^\n]*)\n/s;
   my $relays = $1;
   
   $relays =~ s/\s+/ /gs;

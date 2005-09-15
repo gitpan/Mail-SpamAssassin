@@ -102,7 +102,8 @@ Set to 1 if this setting requires 'allow_user_rules' when run from spamd.
 =item is_admin
 
 Set to 1 if this setting can only be set in the system-wide config when run
-from spamd.
+from spamd.  (All settings can be used by local programs run directly by the
+user.)
 
 =item is_frequent
 
@@ -111,9 +112,6 @@ up first for speed.
 
 =back
 
-Note that the registered commands array can be extended by plugins, by adding
-the new config settings to the C<$conf-<gt>{registered_commands}> array ref.
-
 =head1 METHODS
 
 =over 4
@@ -121,10 +119,13 @@ the new config settings to the C<$conf-<gt>{registered_commands}> array ref.
 =cut
 
 package Mail::SpamAssassin::Conf::Parser;
+
 use Mail::SpamAssassin::Conf;
 use Mail::SpamAssassin::Constants qw(:sa);
+use Mail::SpamAssassin::Logger;
 
 use strict;
+use warnings;
 use bytes;
 use Carp;
 
@@ -145,16 +146,29 @@ sub new {
     'conf'      => $conf
   };
 
+  $self->{command_luts} = { };
+  $self->{command_luts}->{frequent} = { };
+  $self->{command_luts}->{remaining} = { };
+
   bless ($self, $class);
   $self;
 }
 
 ###########################################################################
 
-sub set_defaults_from_command_list {
-  my ($self) = @_;
+sub register_commands {
+  my($self, $arrref) = @_;
   my $conf = $self->{conf};
-  foreach my $cmd (@{$conf->{registered_commands}}) {
+
+  $self->set_defaults_from_command_list($arrref);
+  $self->build_command_luts($arrref);
+  push(@{$conf->{registered_commands}}, @{$arrref});
+}
+
+sub set_defaults_from_command_list {
+  my ($self, $arrref) = @_;
+  my $conf = $self->{conf};
+  foreach my $cmd (@{$arrref}) {
     # note! exists, not defined -- we want to be able to set
     # "undef" default values.
     if (exists($cmd->{default})) {
@@ -164,19 +178,12 @@ sub set_defaults_from_command_list {
 }
 
 sub build_command_luts {
-  my ($self) = @_;
+  my ($self, $arrref) = @_;
 
-  return if $self->{already_built_config_lookup};
-  $self->{already_built_config_lookup} = 1;
-
-  $self->{command_luts} = { };
-  $self->{command_luts}->{frequent} = { };
-  $self->{command_luts}->{remaining} = { };
   my $conf = $self->{conf};
 
   my $set;
-  foreach my $cmd (@{$conf->{registered_commands}})
-  {
+  foreach my $cmd (@{$arrref}) {
     # first off, decide what set this is in.
     if ($cmd->{is_frequent}) { $set = 'frequent'; }
     else { $set = 'remaining'; }
@@ -216,10 +223,11 @@ sub parse {
     $lang =~ s/[@.+,].*$//;    # Strip codeset, modifier/audience, etc.
   }                            # (eg. .utf8 or @euro)
 
-  # build and get fast-access handles on the command lookup tables
-  $self->build_command_luts();
+  # get fast-access handles on the command lookup tables
   my $lut_frequent = $self->{command_luts}->{frequent};
   my $lut_remaining = $self->{command_luts}->{remaining};
+  my %migrated_keys = map { $_ => 1 }
+            @Mail::SpamAssassin::Conf::MIGRATED_SETTINGS;
 
   $self->{currentfile} = '(no file)';
   my $skip_parsing = 0;
@@ -262,11 +270,13 @@ sub parse {
           my $cond = pop @if_stack;
 
           if ($cond->{type} eq 'if') {
-            warn "unclosed 'if' in ".
+            warn "config: unclosed 'if' in ".
                   $self->{currentfile}.": if ".$cond->{conditional}."\n";
           }
           else {
-            die "unknown 'if' type: ".$cond->{type}."\n";
+            # die seems a bit excessive here, but this shouldn't be possible
+            # so I suppose it's okay.
+            die "config: unknown 'if' type: ".$cond->{type}."\n";
           }
 
           $conf->{errors}++;
@@ -329,7 +339,7 @@ sub parse {
       #$value =~ s/^(\d+)\.(\d{1,3}).*$/sprintf "%d.%d", $1, $2/e;
 
       if ($ver ne $value) {
-        warn "configuration file \"$self->{currentfile}\" requires version ".
+        warn "config: configuration file \"$self->{currentfile}\" requires version ".
                 "$value of SpamAssassin, but this is code version ".
                 "$ver. Maybe you need to use ".
                 "the -C switch, or remove the old config files? ".
@@ -350,17 +360,19 @@ sub parse {
     if ($cmd) {
       if ($self->{scoresonly}) {              # reading user config from spamd
         if ($cmd->{is_priv} && !$conf->{allow_user_rules}) {
-          dbg ("config: not parsing, 'allow_user_rules' is 0: $line");
+          info("config: not parsing, 'allow_user_rules' is 0: $line");
           goto failed_line;
         }
         if ($cmd->{is_admin}) {
-          dbg ("config: not parsing, administrator setting: $line");
+          info("config: not parsing, administrator setting: $line");
           goto failed_line;
         }
       }
 
       if (!$cmd->{code}) {
-        $self->setup_default_code_cb ($cmd);
+        if (! $self->setup_default_code_cb($cmd)) {
+          goto failed_line;
+        }
       }
 
       my $ret = &{$cmd->{code}} ($conf, $cmd->{setting}, $value, $line);
@@ -385,7 +397,7 @@ sub parse {
     }
 
     # last ditch: try to see if the plugins know what to do with it
-    if ($conf->{main}->call_plugins ("parse_config", {
+    if ($conf->{main}->call_plugins("parse_config", {
                 key => $key,
                 value => $value,
                 line => $line,
@@ -399,18 +411,28 @@ sub parse {
 
 failed_line:
     my $msg = $parse_error;
+    my $is_error = 1;
     if (!$msg) {
-      # the default warning, if a more specific one isn't output
-      $msg = "config: SpamAssassin failed to parse line, ".
-                        "skipping: $line";
+      # use a default warning, if a more specific one wasn't output
+      if ($migrated_keys{$key}) {
+        # this key was moved into a plugin; non-fatal for lint
+        $is_error = 0;
+        $msg = "config: failed to parse, now a plugin, skipping: $line";
+      } else {
+        # a real syntax error; this is fatal for --lint
+        $msg = "config: failed to parse line, skipping: $line";
+      }
     }
 
     if ($conf->{lint_rules}) {
       warn $msg."\n";
     } else {
-      dbg ($msg);
+      info($msg);
     }
-    $conf->{errors}++;
+
+    if ($is_error) {
+      $conf->{errors}++;
+    }
   }
 
   $self->lint_check();
@@ -443,7 +465,8 @@ sub handle_conditional {
       $eval .= "\"$1\" ";       # note: untaints!
     }
     else {
-      $bad++; warn "unparseable chars in 'if $value': '$token'\n";
+      $bad++;
+      warn "config: unparseable chars in 'if $value': '$token'\n";
     }
   }
 
@@ -484,19 +507,15 @@ sub lint_check {
   {
     # Check for description and score issues in lint fashion
     while ( ($k,$v) = each %{$conf->{descriptions}} ) {
-      if (length($v) > 50) {
-        warn "warning: description for $k is over 50 chars\n";
-        $conf->{errors}++;
-      }
       if (!exists $conf->{tests}->{$k}) {
-        warn "warning: description exists for non-existent rule $k\n";
+        warn "config: warning: description exists for non-existent rule $k\n";
         $conf->{errors}++;
       }
     }
 
     while ( my($sk) = each %{$conf->{scores}} ) {
       if (!exists $conf->{tests}->{$sk}) {
-        warn "warning: score set for non-existent rule $sk\n";
+        warn "config: warning: score set for non-existent rule $sk\n";
         $conf->{errors}++;
       }
     }
@@ -515,8 +534,8 @@ sub set_default_scores {
 
   while ( ($k,$v) = each %{$conf->{tests}} ) {
     if ($conf->{lint_rules}) {
-      if (length($k) > 22 && $k !~ /^__/ && $k !~ /^T_/) {
-        warn "warning: rule '$k' is over 22 chars\n";
+      if (length($k) > 50 && $k !~ /^__/ && $k !~ /^T_/) {
+        warn "config: warning: rule name '$k' is over 50 chars\n";
         $conf->{errors}++;
       }
     }
@@ -558,14 +577,19 @@ sub setup_default_code_cb {
     $cmd->{code} = \&set_template_append;
   }
   else {
-    die "unknown conf type $type!";
+    warn "config: unknown conf type $type!";
+    return 0;
   }
+  return 1;
 }
 
 sub set_numeric_value {
   my ($conf, $key, $value, $line) = @_;
 
-  unless (defined $value && $value =~ /^-?\d+(?:\.\d+)?$/) {
+  unless (defined $value && $value !~ /^$/) {
+    return $Mail::SpamAssassin::Conf::MISSING_REQUIRED_VALUE;
+  }
+  unless ($value =~ /^-?\d+(?:\.\d+)?$/) {
     return $Mail::SpamAssassin::Conf::INVALID_VALUE;
   }
 
@@ -575,7 +599,10 @@ sub set_numeric_value {
 sub set_bool_value {
   my ($conf, $key, $value, $line) = @_;
 
-  unless (defined $value && ($value == 1 || $value == 0) ) {
+  unless (defined $value && $value !~ /^$/) {
+    return $Mail::SpamAssassin::Conf::MISSING_REQUIRED_VALUE;
+  }
+  unless ($value == 1 || $value == 0) {
     return $Mail::SpamAssassin::Conf::INVALID_VALUE;
   }
 
@@ -585,7 +612,7 @@ sub set_bool_value {
 sub set_string_value {
   my ($conf, $key, $value, $line) = @_;
 
-  unless (defined $value) {
+  unless (defined $value && $value !~ /^$/) {
     return $Mail::SpamAssassin::Conf::MISSING_REQUIRED_VALUE;
   }
 
@@ -605,11 +632,19 @@ sub set_hash_key_value {
 
 sub set_addrlist_value {
   my ($conf, $key, $value, $line) = @_;
+
+  unless (defined $value && $value !~ /^$/) {
+    return $Mail::SpamAssassin::Conf::MISSING_REQUIRED_VALUE;
+  }
   $conf->{parser}->add_to_addrlist ($key, split (' ', $value));
 }
 
 sub remove_addrlist_value {
   my ($conf, $key, $value, $line) = @_;
+
+  unless (defined $value && $value !~ /^$/) {
+    return $Mail::SpamAssassin::Conf::MISSING_REQUIRED_VALUE;
+  }
   $conf->{parser}->remove_from_addrlist ($key, split (' ', $value));
 }
 
@@ -626,7 +661,6 @@ sub set_template_clear {
 
 ###########################################################################
 
-# note: error 70 == SA_SOFTWARE
 sub finish_parsing {
   my ($self) = @_;
   my $conf = $self->{conf};
@@ -640,11 +674,25 @@ sub finish_parsing {
     if (($type & 1) == 1) {
       my @args;
       if (my ($function, $args) = ($text =~ m/(.*?)\s*\((.*?)\)\s*$/)) {
-        if ($args) {
-          @args = ($args =~ m/['"](.*?)['"]\s*(?:,\s*|$)/g);
-        }
+	if ($args) {
+	  # bug 4419: Parse quoted strings, unquoted alphanumerics/floats and
+	  # both unquoted IPv4 and IPv6 addresses.  s// is used so that we can
+	  # determine whether or not we successfully parsed ALL arguments.
+	  while ($args =~ s/^\s*(?:['"](.*?)['"]|([\d\.:A-Za-z]+?))\s*(?:,\s*|$)//) {
+	    if (defined $1) {
+	      push @args, $1;
+	    }
+	    else {
+	      push @args, $2;
+	    }
+	  }
+	}
         unshift(@args, $function);
-        if ($type == $Mail::SpamAssassin::Conf::TYPE_BODY_EVALS) {
+	if ($args) {
+	  $conf->{errors}++;
+	  warn("syntax error (unparsable argument: $args) for eval function: $name: $text");
+	}
+        elsif ($type == $Mail::SpamAssassin::Conf::TYPE_BODY_EVALS) {
           $conf->{body_evals}->{$priority}->{$name} = \@args;
         }
         elsif ($type == $Mail::SpamAssassin::Conf::TYPE_HEAD_EVALS) {
@@ -665,12 +713,12 @@ sub finish_parsing {
         #}
         else {
           $conf->{errors}++;
-          sa_die(70, "unknown type $type for $name: $text");
+	  warn("unknown type $type for $name: $text");
         }
       }
       else {
         $conf->{errors}++;
-        sa_die(70, "syntax error for eval function $name: $text");
+        warn("syntax error for eval function $name: $text");
       }
     }
     # non-eval tests
@@ -704,10 +752,13 @@ sub finish_parsing {
       }
       else {
         $conf->{errors}++;
-        sa_die(70, "unknown type $type for $name: $text");
+        warn("unknown type $type for $name: $text");
       }
     }
   }
+
+  # named this way just in case we ever want a "finish_parsing_start"
+  $conf->{main}->call_plugins("finish_parsing_end", { conf => $conf });
 
   delete $conf->{tests};                # free it up
   delete $conf->{priority};             # free it up
@@ -721,19 +772,28 @@ sub add_test {
 
   # Don't allow invalid names ...
   if ($name !~ /^\w+$/) {
-    warn "error: rule '$name' has invalid characters (not Alphanumeric + Underscore)\n";
+    warn "config: error: rule '$name' has invalid characters (not Alphanumeric + Underscore)\n";
     $conf->{errors}++;
     return;
   }
 
   # all of these rule types are regexps
-  if ($type == $Mail::SpamAssassin::Conf::TYPE_HEAD_TESTS
-        || $type == $Mail::SpamAssassin::Conf::TYPE_BODY_TESTS
-        || $type == $Mail::SpamAssassin::Conf::TYPE_FULL_TESTS
-        || $type == $Mail::SpamAssassin::Conf::TYPE_RAWBODY_TESTS
-        || $type == $Mail::SpamAssassin::Conf::TYPE_URI_TESTS)
+  if ($type == $Mail::SpamAssassin::Conf::TYPE_BODY_TESTS ||
+      $type == $Mail::SpamAssassin::Conf::TYPE_FULL_TESTS ||
+      $type == $Mail::SpamAssassin::Conf::TYPE_RAWBODY_TESTS ||
+      $type == $Mail::SpamAssassin::Conf::TYPE_URI_TESTS)
   {
-    return unless $self->is_regexp_valid($name, $text);
+    return unless $self->is_delimited_regexp_valid($name, $text);
+  }
+  if ($type == $Mail::SpamAssassin::Conf::TYPE_HEAD_TESTS)
+  {
+    my ($pat) = ($text =~ /^\s*\S+\s*(?:\=|\!)\~\s*(\S.*?\S)\s*$/);
+    $pat =~ s/\s+\[if-unset:\s+(.+)\]\s*$//;
+    return unless $self->is_delimited_regexp_valid($name, $pat);
+  }
+  elsif ($type == $Mail::SpamAssassin::Conf::TYPE_META_TESTS)
+  {
+    return unless $self->is_meta_valid($name, $text);
   }
 
   $conf->{tests}->{$name} = $text;
@@ -761,16 +821,105 @@ sub add_regression_test {
   }
 }
 
-sub is_regexp_valid {
-  my ($self, $name, $re) = @_;
-  if (eval { ("" =~ m{$re}); 1; }) {
-    return 1;
+sub is_meta_valid {
+  my ($self, $name, $rule) = @_;
 
-  } else {
-    warn "invalid regexp for rule $name: $re\n";
+  my $meta = '';
+
+  # Lex the rule into tokens using a rather simple RE method ...
+  my $lexer = ARITH_EXPRESSION_LEXER;
+  my @tokens = ($rule =~ m/$lexer/g);
+  if (length($name) == 1) {
+    print "$name $_\n " for @tokens;
+  }
+  # Go through each token in the meta rule
+  foreach my $token (@tokens) {
+    # Numbers can't be rule names
+    if ($token =~ /^(?:\W+|\d+)$/) {
+      $meta .= "$token ";
+    }
+    # Zero will probably cause more errors
+    else {
+      $meta .= "0 ";
+    }
+  }
+
+  my $evalstr = 'my $x = ' . $meta . '; 1;';
+  if (eval $evalstr) {
+    return 1;
+  }
+  if ($@) {
+    my $err = $@;
+    $err =~ s/\s+(?:at|near)\b.*//s;
+    $err =~ s/Illegal division by zero/division by zero possible/i;
+    warn "config: invalid expression for rule $name: \"$rule\": $err\n";
     $self->{conf}->{errors}++;
     return 0;
   }
+}
+
+sub is_delimited_regexp_valid {
+  my ($self, $name, $re) = @_;
+
+  unless ($re =~ /^\s*m?(\W).*(?:\1|>|}|\)|\])[a-z]*\s*$/) {
+    warn "config: invalid regexp for rule $name: $re: missing or invalid delimiters\n";
+    $self->{conf}->{errors}++;
+    return 0;
+  }
+  return $self->is_regexp_valid($name, $re);
+}
+
+sub is_regexp_valid {
+  my ($self, $name, $re) = @_;
+
+  # OK, try to remove any normal perl-style regexp delimiters at
+  # the start and end, and modifiers at the end if present,
+  # so we can validate those too.
+  my $origre = $re;
+  my $safere = $re;
+  my $mods = '';
+  if ($re =~ s/^m{//) {
+    $re =~ s/}([a-z]*)$//; $mods = $1;
+  }
+  elsif ($re =~ s/^m\(//) {
+    $re =~ s/\)([a-z]*)$//; $mods = $1;
+  }
+  elsif ($re =~ s/^m<//) {
+    $re =~ s/>([a-z]*)$//; $mods = $1;
+  }
+  elsif ($re =~ s/^m(\W)//) {
+    $re =~ s/\Q$1\E([a-z]*)$//; $mods = $1;
+  }
+  elsif ($re =~ s/^\/(.*)\/([a-z]*)$/$1/) {
+    $mods = $2;
+  }
+  else {
+    $safere = "m#".$re."#";
+  }
+
+  # now prepend the modifiers, in order to check if they're valid
+  if ($mods) {
+    $re = "(?".$mods.")".$re;
+  }
+
+  # note: this MUST use m/...${re}.../ in some form or another, ie.
+  # interpolation of the $re variable into a code regexp, in order to test the
+  # security of the regexp.  simply using ("" =~ $re) will NOT do that, and
+  # will therefore open a hole!
+  if (eval { ("" =~ m#${re}#); 1; }) {
+
+    # now double-check -- try with the user-supplied delimiters as well
+    my $evalstr = '("" =~ '.$safere.'); 1;';
+    if (eval $evalstr) {
+      return 1;
+    }
+  }
+
+  my $err = $@;
+  $err =~ s/ at .*? line \d.*$//;
+  warn "config: invalid regexp for rule $name: $origre: $err\n";
+  $self->{conf}->{errors}++;
+  return 0;
 }
 
 ###########################################################################
@@ -785,7 +934,7 @@ sub add_to_addrlist {
     $re =~ s/[\000\\\(]/_/gs;			# paranoia
     $re =~ s/([^\*\?_a-zA-Z0-9])/\\$1/g;	# escape any possible metachars
     $re =~ tr/?/./;				# "?" -> "."
-    $re =~ s/\*/\.\*/g;				# "*" -> "any string"
+    $re =~ s/\*+/\.\*/g;			# "*" -> "any string"
     $conf->{$singlelist}->{$addr} = "^${re}\$";
   }
 }
@@ -803,7 +952,7 @@ sub add_to_addrlist_rcvd {
     $re =~ s/[\000\\\(]/_/gs;			# paranoia
     $re =~ s/([^\*\?_a-zA-Z0-9])/\\$1/g;	# escape any possible metachars
     $re =~ tr/?/./;				# "?" -> "."
-    $re =~ s/\*/\.\*/g;				# "*" -> "any string"
+    $re =~ s/\*+/\.\*/g;			# "*" -> "any string"
     $conf->{$listname}->{$addr}{re} = "^${re}\$";
     $conf->{$listname}->{$addr}{domain} = [ $domain ];
   }
@@ -835,15 +984,10 @@ sub fix_path_relative_to_current_file {
   if (!File::Spec->file_name_is_absolute ($path)) {
     my ($vol, $dirs, $file) = File::Spec->splitpath ($self->{currentfile});
     $path = File::Spec->catpath ($vol, $dirs, $path);
-    dbg ("plugin: fixed relative path: $path");
+    dbg("plugin: fixed relative path: $path");
   }
   return $path;
 }
-
-###########################################################################
-
-sub dbg { Mail::SpamAssassin::dbg (@_); }
-sub sa_die { Mail::SpamAssassin::sa_die (@_); }
 
 ###########################################################################
 

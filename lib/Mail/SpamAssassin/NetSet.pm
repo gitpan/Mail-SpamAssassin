@@ -18,9 +18,11 @@
 package Mail::SpamAssassin::NetSet;
 
 use strict;
+use warnings;
 use bytes;
 
 use Mail::SpamAssassin::Util;
+use Mail::SpamAssassin::Logger;
 
 use vars qw{
   @ISA $TESTCODE $NUMTESTS
@@ -52,17 +54,19 @@ sub add_cidr {
   foreach (@nets) {
     my ($ip, $bits) = m#^\s*([\d\.]+)(?:/(\d+))?\s*$#;
 
-    my $err = "illegal network address given: '$_'\n";
+    my $err = "netset: illegal network address given: '$_'\n";
     if (!defined $ip) {
-      warn $err; next;
-
-    } elsif ($ip =~ /\.$/) {
+      warn $err;
+      next;
+    }
+    elsif ($ip =~ /\.$/) {
       # just use string matching; much simpler than doing smart stuff with arrays ;)
       if ($ip =~ /^(\d+)\.(\d+)\.(\d+)\.$/) { $ip = "$1.$2.$3.0"; $bits = 24; }
       elsif ($ip =~ /^(\d+)\.(\d+)\.$/) { $ip = "$1.$2.0.0"; $bits = 16; }
       elsif ($ip =~ /^(\d+)\.$/) { $ip = "$1.0.0.0"; $bits = 8; }
       else {
-	warn $err; next;
+	warn $err;
+	next;
       }
     }
 
@@ -98,9 +102,14 @@ sub contains_ip {
   0;
 }
 
-###########################################################################
-
-sub dbg { Mail::SpamAssassin::dbg (@_); }
+sub clone {
+  my ($self) = @_;
+  my $dup = Mail::SpamAssassin::NetSet->new();
+  if (defined $self->{nets}) {
+    @{$dup->{nets}} = @{$self->{nets}};
+  }
+  return $dup;
+}
 
 ###########################################################################
 
