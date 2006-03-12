@@ -214,6 +214,11 @@ it from running.
     code => sub {
       my ($self, $key, $value, $line) = @_;
       my($rule, @scores) = split(/\s+/, $value);
+      unless (defined $value && $value !~ /^$/ &&
+		(scalar @scores == 1 || scalar @scores == 4)) {
+	info("config: score: requires a symbolic rule name and 1 or 4 scores");
+	return $MISSING_REQUIRED_VALUE;
+      }
 
       # Figure out if we're doing relative scores, remove the parens if we are
       my $relative = 0;
@@ -221,18 +226,16 @@ it from running.
         if (s/^\((-?\d+(?:\.\d+)?)\)$/$1/) {
 	  $relative = 1;
 	}
+	unless (/^-?\d+(?:\.\d+)?$/) {
+	  info("config: score: the non-numeric score ($_) is not valid, " .
+	    "a numeric score is required");
+	  return $INVALID_VALUE;
+	}
       }
 
       if ($relative && !exists $self->{scoreset}->[0]->{$rule}) {
-        my $msg = "config: relative score without previous setting in ".
-                    "configuration, skipping: $line";
-
-        if ($self->{lint_rules}) {
-          warn $msg."\n";
-        } else {
-          info($msg);
-        }
-        $self->{errors}++;
+        info("config: score: relative score without previous setting in " .
+	  "configuration");
         return $INVALID_VALUE;
       }
 
@@ -250,17 +253,6 @@ it from running.
 
           $self->{scoreset}->[$index]->{$rule} = $score + 0.0;
         }
-      }
-      else {
-        my $msg = "config: score configuration option without actual scores, skipping: $line";
-
-        if ($self->{lint_rules}) {
-          warn $msg."\n";
-        } else {
-          info($msg);
-        }
-        $self->{errors}++;
-        return $MISSING_REQUIRED_VALUE;
       }
     }
   });
@@ -344,9 +336,9 @@ other words, if the host that connected to your MX had an IP address that
 mapped to 'sendinghost.spamassassin.org', you should specify
 C<sendinghost.spamassassin.org> or just C<spamassassin.org> here.
 
-Note that this requires that C<internal_networks> be correct.  For simple cases,
-it will be, but for a complex network, or running with DNS checks off
-or with C<-L>, you may get better results by setting that parameter.
+Note that this requires that C<internal_networks> be correct.  For simple
+cases, it will be, but for a complex network, or running with DNS checks
+off or with C<-L>, you may get better results by setting that parameter.
 
 e.g.
 
@@ -575,7 +567,8 @@ comment following the address in parantheses. For the Subject header,
 this will be prepended to the original subject. Note that you should
 only use the _REQD_ and _SCORE_ tags when rewriting the Subject header
 if C<report_safe> is 0. Otherwise, you may not be able to remove
-the SpamAssassin markup via the normal methods.  
+the SpamAssassin markup via the normal methods.  More information
+about tags is explained below in the B<TEMPLATE TAGS> section.
 
 Parentheses are not permitted in STRING if rewriting the From or To headers.
 (They will be converted to square brackets.)
@@ -870,11 +863,26 @@ trailing dot, that's considered a mask to allow all addresses in the remaining
 octets.  If a mask is not specified, and there is not trailing dot, then just
 the single IP address specified is used, as if the mask was C</32>.
 
+If a network or host address is prefaced by a C<!> the network or host will be
+excluded (or included) in a first listed match fashion.
+
 Examples:
 
     trusted_networks 192.168/16 127/8		# all in 192.168.*.* and 127.*.*.*
     trusted_networks 212.17.35.15		# just that host
     trusted_networks 127.			# all in 127.*.*.*
+
+Inclusion/Exclusion examples:
+
+    # include all of 10.0.1/24 except for 10.0.1.5
+    trusted_networks !10.0.1.5 10.0.1/24
+
+    # include all of 10.0.1/24, the !10.0.1.5 has no effect
+    trusted_networks 10.0.1/24 !10.0.1.5
+
+    # include all RFC1918 address space except subnet 172.16.3/24 but
+    # including host 172.16.3.3 within the excluded 172.16.3/24
+    trusted_networks 172.16.3.3 !172.16.3/24 172.16/12 10/8 192.168/16
 
 This operates additively, so a C<trusted_networks> line after another one
 will result in all those networks becoming trusted.  To clear out the
@@ -1743,7 +1751,7 @@ the start of a comment and not part of the regexp.
 If the C<[if-unset: STRING]> tag is present, then C<STRING> will
 be used if the header is not found in the mail message.
 
-Test names should not start with a number, and must contain only
+Test names must not start with a number, and must contain only
 alphanumerics and underscores.  It is suggested that lower-case characters
 not be used, and names have a length of no more than 22 characters,
 as an informal convention.  Dashes are not allowed.
@@ -1836,6 +1844,12 @@ the most recent header (the 'firsttrusted'), that data can be trusted.
 See the Wiki page at http://wiki.apache.org/spamassassin/TrustedRelays
 for more information on this.
 
+=item Selecting just the last external IP
+
+By using '-lastexternal' at the end of the set name, you can select only
+the external host that connected to your internal network, or at least
+the last external host with a public IP.
+
 =back
 
 =item header SYMBOLIC_TEST_NAME eval:check_rbl_txt('set', 'zone')
@@ -1856,7 +1870,8 @@ beginning with "sb:", or (if none of the preceding options seem to fit) a
 regular expression.
 
 Note: the set name must be exactly the same for as the main query rule,
-including selections like '-notfirsthop' appearing at the end of the set name.
+including selections like '-notfirsthop' appearing at the end of the set
+name.
 
 =cut
 
@@ -2066,6 +2081,10 @@ ignore these for scoring.
       if (@values != 2) {
         return $MISSING_REQUIRED_VALUE;
       }
+      if ($values[1] =~ /\*\s*\*/) {
+	info("config: found invalid '**' or '* *' operator in meta command");
+        return $INVALID_VALUE;
+      }
       $self->{parser}->add_test (@values, $TYPE_META_TESTS);
     }
   });
@@ -2244,9 +2263,12 @@ not have any execute bits set (the umask is set to 111).
 
 =item bayes_store_module Name::Of::BayesStore::Module
 
-If this option is set, the module given will be used as an alternate to the
-default bayes storage mechanism.  It must conform to the published storage
-specification (see Mail::SpamAssassin::BayesStore).
+If this option is set, the module given will be used as an alternate
+to the default bayes storage mechanism.  It must conform to the
+published storage specification (see
+Mail::SpamAssassin::BayesStore). For example, set this to
+Mail::SpamAssassin::BayesStore::SQL to use the generic SQL storage
+module.
 
 =cut
 
@@ -2591,7 +2613,9 @@ version.  So 3.0.0 is C<3.000000>, and 3.4.80 is C<3.004080>.
 =head1 TEMPLATE TAGS
 
 The following C<tags> can be used as placeholders in certain options.
-They will be replaced by the corresponding value when they are used.
+They will be replaced by the corresponding value when they are used.  Keep in
+mind that anything that looks like a tag will be replaced (C<_STRING_>), even
+in the middle of other characters (C<FOR_STRING_EXAMPLE>).
 
 Some tags can take an argument (in parentheses). The argument is
 optional, and the default is shown below.

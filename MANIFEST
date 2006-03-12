@@ -89,6 +89,7 @@ lib/Mail/SpamAssassin/Reporter.pm
 lib/Mail/SpamAssassin/SQLBasedAddrList.pm
 lib/Mail/SpamAssassin/SpamdForkScaling.pm
 lib/Mail/SpamAssassin/SubProcBackChannel.pm
+lib/Mail/SpamAssassin/Timeout.pm
 lib/Mail/SpamAssassin/Util.pm
 lib/Mail/SpamAssassin/Util/DependencyInfo.pm
 lib/Mail/SpamAssassin/Util/Progress.pm
@@ -208,6 +209,7 @@ rules/v310.pre
 rules/languages
 rules/local.cf
 rules/name-triplets.txt
+rules/sa-update-pubkey.txt
 rules/triplets.txt
 rules/user_prefs.template
 sa-learn.raw
@@ -310,6 +312,8 @@ t/data/nice/mime8
 t/data/nice/mime9
 t/data/nice/not_gtube.eml
 t/data/nice/spf1
+t/data/nice/spf2
+t/data/nice/spf3
 t/data/reporterplugin.pm
 t/data/spam/001
 t/data/spam/002
@@ -437,6 +441,7 @@ t/strip2.t
 t/strip_no_subject.t
 t/stripmarkup.t
 t/test_dir
+t/trust_path.t
 t/uri.t
 t/uri_html.t
 t/uri_text.t

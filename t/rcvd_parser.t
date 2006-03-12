@@ -18,7 +18,7 @@ if (-e 'test_dir') {            # running from test directory, not ..
 
 use lib '.'; use lib 't';
 use SATest; sa_t_init("rcvd_parser");
-use Test; BEGIN { plan tests => 43 };
+use Test; BEGIN { plan tests => 47 };
 
 
 use strict;
@@ -262,7 +262,7 @@ Received: from a1200 ([24.83.2.7])
 
 } => q{
 
-[ ip=66.199.2.3 rdns= helo=bigass1.example.com by=slim1.example.com ident= envfrom= id= auth= ] [ ip=24.83.2.4 rdns= helo=a1200 by=bigass1.example.com ident= envfrom= id= auth= ] [ ip=66.199.2.5 rdns=ns1.example.com helo=bigass1.example.com by=fiat.example.edu ident= envfrom= id=i06MBJ6U020255 auth= ] [ ip=24.83.2.6 rdns= helo=a1200 by=bigass1.example.com ident= envfrom= id= auth= ] [ ip=24.83.2.7 rdns= helo=a1200 by=bigass1.example.com ident= envfrom= id= auth= ]
+[ ip=66.199.2.3 rdns= helo=bigass1.example.com by=slim1.example.com ident= envfrom= id= auth= ] [ ip=24.83.2.4 rdns= helo=a1200 by=bigass1.example.com ident= envfrom= id= auth=LOGIN ] [ ip=66.199.2.5 rdns=ns1.example.com helo=bigass1.example.com by=fiat.example.edu ident= envfrom= id=i06MBJ6U020255 auth= ] [ ip=24.83.2.6 rdns= helo=a1200 by=bigass1.example.com ident= envfrom= id= auth=LOGIN ] [ ip=24.83.2.7 rdns= helo=a1200 by=bigass1.example.com ident= envfrom= id= auth=LOGIN ]
 
 },
 q{
@@ -442,7 +442,7 @@ Received: from 83-70-48-2.bas2.dbn.dublin.eircom.net (HELO ?192.168.23.32?) (83.
 
 } => q{
 
-[ ip=159.134.118.16 rdns=mail00.svc.cra.dublin.eircom.net helo=mail00.svc.cra.dublin.eircom.net by=amgod.boxhost.net ident= envfrom= id=0ACFC31014D auth= ] [ ip=83.70.48.2 rdns=83-70-48-2.bas2.dbn.dublin.eircom.net helo=?192.168.23.32? by=mail00.svc.cra.dublin.eircom.net ident= envfrom= id= auth= ] [ ip=127.0.0.1 rdns=localhost helo=localhost by=radish.zzzz.org ident= envfrom= id=1398F5900D9 auth= ]
+[ ip=159.134.118.16 rdns=mail00.svc.cra.dublin.eircom.net helo=mail00.svc.cra.dublin.eircom.net by=amgod.boxhost.net ident= envfrom= id=0ACFC31014D auth= ] [ ip=83.70.48.2 rdns=83-70-48-2.bas2.dbn.dublin.eircom.net helo=?192.168.23.32? by=mail00.svc.cra.dublin.eircom.net ident= envfrom= id= auth= ]
 
 },
 q{
@@ -465,7 +465,7 @@ Received: from localhost (wwwwww@localhost)
 
 } => q{
   
-[ ip=128.200.80.6 rdns=smtp3.es.uci.edu helo=smtp3.es.uci.edu by=amgod.boxhost.net ident= envfrom= id=87D0A310091 auth= ] [ ip=128.200.80.22 rdns=rigel.oac.uci.edu helo=rigel.oac.uci.edu by=smtp3.es.uci.edu ident= envfrom= id=i2907ZaF008726 auth= ] [ ip=127.0.0.1 rdns=localhost helo=localhost by=radish.jmason.org ident= envfrom= id=27B275900D9 auth= ]
+[ ip=128.200.80.6 rdns=smtp3.es.uci.edu helo=smtp3.es.uci.edu by=amgod.boxhost.net ident= envfrom= id=87D0A310091 auth= ] [ ip=128.200.80.22 rdns=rigel.oac.uci.edu helo=rigel.oac.uci.edu by=smtp3.es.uci.edu ident= envfrom= id=i2907ZaF008726 auth= ]
   
 },
 q{
@@ -554,8 +554,54 @@ Received: from bgp01132961bgs.ypeast01.mi.comcast.net ([68.42.119.201] helo=moon
  
   [ ip=84.131.183.192 rdns=p5483b7c0.dip.t-dialin.net helo=192.168.1.23 by=moonflower.de ident= envfrom= id=1CIoQP-0006SN-GV auth=asmtp ] [ ip=68.42.119.201 rdns=bgp01132961bgs.ypeast01.mi.comcast.net helo=moonweaver.home.awesomeplay.com by=outbound.mailhop.org ident= envfrom= id=1CJic5-00067m-U7 auth=esmtpsa ]
 
-  
 },
+q{
+
+Received: from gorkcomputer (my.dns.com [1.2.3.4])
+  (AUTH: LOGIN gork@mydomain.com, SSL: TLSv1/SSLv3,128bits,RC4-MD5)
+  by mydomain.com with esmtp; Thu, 10 Nov 2005 08:24:21 -0600
+  id 000000DB.43735815.00001E11
+
+} => q{
+
+  [ ip=1.2.3.4 rdns=my.dns.com helo=gorkcomputer by=mydomain.com ident= envfrom= id=000000DB.43735815.00001E11 auth=LOGIN ]
+
+},
+q{
+
+Received: FROM hackers.mr.itd.umich.edu (smtp.mail.umich.edu [141.211.14.81])
+	BY madman.mr.itd.umich.edu ID 434B508E.174A6.13932 ; 11 Oct 2005 01:41:34 -0400
+Received: FROM [192.168.1.24] (s233-64-90-216.try.wideopenwest.com [64.233.216.90])
+	BY hackers.mr.itd.umich.edu ID 434B5051.8CDE5.15436 ; 11 Oct 2005 01:40:33 -0400
+
+} => q{
+
+  [ ip=141.211.14.81 rdns=smtp.mail.umich.edu helo=hackers.mr.itd.umich.edu by=madman.mr.itd.umich.edu ident= envfrom= id=434B508E.174A6.13932 auth= ] [ ip=64.233.216.90 rdns=s233-64-90-216.try.wideopenwest.com helo=!192.168.1.24! by=hackers.mr.itd.umich.edu ident= envfrom= id=434B5051.8CDE5.15436 auth= ]
+
+},
+q{
+
+Received: from TCE-E-7-182-54.bta.net.cn(202.106.182.54) via SMTP
+	by st.tahina.priv.at, id smtpdEDUB8h; Sun Nov 13 14:50:12 2005
+Received: from pl027.nas934.d-osaka.nttpc.ne.jp(61.197.82.27), claiming to be "foo.woas.net" via SMTP
+	by st.tahina.priv.at, id smtpd1PBsZT; Sun Nov 13 15:38:52 2005
+
+} => q{
+
+  [ ip=202.106.182.54 rdns=TCE-E-7-182-54.bta.net.cn helo= by=st.tahina.priv.at ident= envfrom= id=smtpdEDUB8h auth= ] [ ip=61.197.82.27 rdns=pl027.nas934.d-osaka.nttpc.ne.jp helo=foo.woas.net by=st.tahina.priv.at ident= envfrom= id=smtpd1PBsZT auth= ]
+
+},
+q{
+
+Received: from [206.51.230.145] (helo=t-online.de)
+	by mxeu2.kundenserver.de with ESMTP (Nemesis),
+	id 0MKpdM-1CkRpr14PF-000608; Fri, 31 Dec 2004 19:49:15 +0100
+
+} => q{
+
+  [ ip=206.51.230.145 rdns= helo=t-online.de by=mxeu2.kundenserver.de ident= envfrom= id=0MKpdM-1CkRpr14PF-000608 auth= ]
+
+}
 );
 
 tstprefs ("add_header all Relays _RELAYSUNTRUSTED_ _RELAYSTRUSTED_\n");

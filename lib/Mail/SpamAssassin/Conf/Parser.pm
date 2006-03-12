@@ -533,13 +533,6 @@ sub set_default_scores {
   my ($k, $v);
 
   while ( ($k,$v) = each %{$conf->{tests}} ) {
-    if ($conf->{lint_rules}) {
-      if (length($k) > 50 && $k !~ /^__/ && $k !~ /^T_/) {
-        warn "config: warning: rule name '$k' is over 50 chars\n";
-        $conf->{errors}++;
-      }
-    }
-
     if ( ! exists $conf->{scores}->{$k} ) {
       # T_ rules (in a testing probationary period) get low, low scores
       my $set_score = ($k =~/^T_/) ? 0.01 : 1.0;
@@ -602,7 +595,7 @@ sub set_bool_value {
   unless (defined $value && $value !~ /^$/) {
     return $Mail::SpamAssassin::Conf::MISSING_REQUIRED_VALUE;
   }
-  unless ($value == 1 || $value == 0) {
+  unless ($value =~ /^[01]$/) {
     return $Mail::SpamAssassin::Conf::INVALID_VALUE;
   }
 
@@ -757,6 +750,8 @@ sub finish_parsing {
     }
   }
 
+  $self->lint_trusted_networks();
+
   # named this way just in case we ever want a "finish_parsing_start"
   $conf->{main}->call_plugins("finish_parsing_end", { conf => $conf });
 
@@ -766,15 +761,77 @@ sub finish_parsing {
 
 ###########################################################################
 
+sub lint_trusted_networks {
+  my ($self) = @_;
+  my $conf = $self->{conf};
+
+  my $nt = $conf->{trusted_networks};
+  my $ni = $conf->{internal_networks};
+
+  # validate trusted_networks and internal_networks, bug 4760.
+  # check that all internal_networks are listed in trusted_networks
+  # too.
+
+  if ($ni->get_num_nets() > 0 && $nt->get_num_nets() > 0) {
+    my $replace_nets;
+    my @valid_ni = ();
+
+    foreach my $net (@{$ni->{nets}}) {
+      # don't check to see if an excluded network is included - that's senseless
+      if (!$net->{exclude} && !$nt->contains_net($net)) {
+        my $msg = "trusted_networks doesn't contain internal_networks entry '".
+                ($net->{as_string})."'\n";
+
+        if ($conf->{lint_rules}) {
+          warn $msg;
+          $conf->{errors}++;
+        }
+        $replace_nets = 1;  # and omit it from the new internal set
+      }
+      else {
+        push @valid_ni, $net;
+      }
+    }
+
+    if ($replace_nets) {
+      # something was invalid. replace the old nets list with a fixed version
+      # (which may be empty)
+      $ni->{nets} = \@valid_ni;
+    }
+  }
+}
+
+###########################################################################
+
 sub add_test {
   my ($self, $name, $text, $type) = @_;
   my $conf = $self->{conf};
 
   # Don't allow invalid names ...
-  if ($name !~ /^\w+$/) {
-    warn "config: error: rule '$name' has invalid characters (not Alphanumeric + Underscore)\n";
+  if ($name !~ /^\D\w*$/) {
+    warn "config: error: rule '$name' has invalid characters ".
+	   "(not Alphanumeric + Underscore + starting with a non-digit)\n";
     $conf->{errors}++;
     return;
+  }
+
+  # Also set a hard limit for ALL rules (rule names longer than 242
+  # characters throw warnings).  Check this separately from the above
+  # pattern to avoid vague error messages.
+  if (length $name > 200) {
+    warn "config: error: rule '$name' is way too long ".
+	   "(recommended maximum length is 22 characters)\n";
+    $conf->{errors}++;
+    return;
+  }
+
+  # Warn about, but use, long rule names during --lint
+  if ($conf->{lint_rules}) {
+    if (length($name) > 50 && $name !~ /^__/ && $name !~ /^T_/) {
+      warn "config: warning: rule name '$name' is over 50 chars ".
+	     "(recommended maximum length is 22 characters)\n";
+      $conf->{errors}++;
+    }
   }
 
   # all of these rule types are regexps
@@ -907,12 +964,7 @@ sub is_regexp_valid {
   # security of the regexp.  simply using ("" =~ $re) will NOT do that, and
   # will therefore open a hole!
   if (eval { ("" =~ m#${re}#); 1; }) {
-
-    # now double-check -- try with the user-supplied delimiters as well
-    my $evalstr = '("" =~ '.$safere.'); 1;';
-    if (eval $evalstr) {
-      return 1;
-    }
+    return 1;
   }
 
   my $err = $@;

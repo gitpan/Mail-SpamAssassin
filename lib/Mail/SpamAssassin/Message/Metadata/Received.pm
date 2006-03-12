@@ -257,8 +257,10 @@ sub parse_received_headers {
 
     if ($in_trusted) {
       push (@{$self->{relays_trusted}}, $relay);
+      $self->{allow_fetchmail_markers} = 1;
     } else {
       push (@{$self->{relays_untrusted}}, $relay);
+      $self->{allow_fetchmail_markers} = 0;
     }
   }
 
@@ -361,17 +363,24 @@ sub parse_received_line {
   }
 
   # try to catch authenticated message identifier
-  # the first one works for Sendmail, MDaemon, some webmail servers, and others
-  # the second one works for Critical Path Messaging Server
+  #
   # with ESMTPA, ESMTPSA, LMTPA, LMTPSA should cover RFC 3848 compliant MTAs
   # with ASMTP (Authenticated SMTP) is used by Earthlink, Exim 4.34, and others
   # with HTTP should only be authenticated webmail sessions
-  if (/^from .*?(?:\]\)|\)\]) .*?\(.*?authenticated.*?\).*? by/) {
-    $auth = 'Sendmail';
-  } elsif (/\) by .+ \(\d{1,2}\.\d\.\d{3}(?:\.\d{1,3})?\) \(authenticated as .+\) id /) {
-    $auth = 'CriticalPath';
-  } elsif (/ by .*? with (ESMTPA|ESMTPSA|LMTPA|LMTPSA|ASMTP|HTTP)\;? /i) {
+  if (/ by .*? with (ESMTPA|ESMTPSA|LMTPA|LMTPSA|ASMTP|HTTP)\;? /i) {
     $auth = $1;
+  }
+  # Courier v0.47 and possibly others
+  elsif (/^from .*?(?:\]\)|\)\])\s+\(AUTH: (LOGIN|PLAIN|DIGEST-MD5|CRAM-MD5) \S+(?:, .*?)?\)\s+by\s+/) {
+    $auth = $1;
+  }
+  # Sendmail, MDaemon, some webmail servers, and others
+  elsif (/^from .*?(?:\]\)|\)\]) .*?\(.*?authenticated.*?\).*? by/) {
+    $auth = 'Sendmail';
+  }
+  # Critical Path Messaging Server
+  elsif (/\) by .+ \(\d{1,2}\.\d\.\d{3}(?:\.\d{1,3})?\) \(authenticated as .+\) id /) {
+    $auth = 'CriticalPath';
   }
 
   if (/^from /) {
@@ -844,13 +853,13 @@ sub parse_received_line {
 
     # Received: from ironport.com (10.1.1.5) by a50.ironport.com with ESMTP; 01 Apr 2003 12:00:51 -0800
     # Received: from dyn-81-166-39-132.ppp.tiscali.fr (81.166.39.132) by cpmail.dk.tiscali.com (6.7.018)
-    # note: must be before 'Content Technologies SMTPRS' rule, cf. bug 2787
     if (/^from ([^\d]\S+) \((${IP_ADDRESS})\) by (\S+) /) {
       $helo = $1; $ip = $2; $by = $3; goto enough;
     }
 
     # Received: from scv3.apple.com (scv3.apple.com) by mailgate2.apple.com (Content Technologies SMTPRS 4.2.1) with ESMTP id <T61095998e1118164e13f8@mailgate2.apple.com>; Mon, 17 Mar 2003 17:04:54 -0800
-    if (/^from (\S+) \((\S+)\) by (\S+) \(/) {
+    # bug 4704: Only let this match Content Technologies so it stops breaking things that come after it by matching first
+    if (/^from (\S+) \((\S+)\) by (\S+) \(Content Technologies /) {
       return;		# useless without the $ip anyway!
       #$helo = $1; $rdns = $2; $by = $3; goto enough;
     }
@@ -918,14 +927,50 @@ sub parse_received_line {
     }
 
     # Received: from [212.87.144.30] (account seiz [212.87.144.30] verified) by x.imd.net (CommuniGate Pro SMTP 4.0.3) with ESMTP-TLS id 5026665 for spamassassin-talk@lists.sourceforge.net; Wed, 15 Jan 2003 16:27:05 +0100
-    if (/^from \[(${IP_ADDRESS})\] \([^\)]+\) by (\S+) /) {
-      $ip = $1; $by = $2; goto enough;
+    # bug 4704 This pattern was checked as just an Exim format, but it does exist elsewhere
+    # Received: from [206.51.230.145] (helo=t-online.de)
+    #   by mxeu2.kundenserver.de with ESMTP (Nemesis),
+    #  id 0MKpdM-1CkRpr14PF-000608; Fri, 31 Dec 2004 19:49:15 +0100
+    # Received: from [218.19.142.229] (helo=hotmail.com ident=yiuhyotp)
+    #   by yzordderrex with smtp (Exim 3.35 #1 (Debian)) id 194BE5-0005Zh-00; Sat, 12 Apr 2003 03:58:53 +0100
+    if (/^from \[(${IP_ADDRESS})\] \(([^\)]+)\) by (\S+) /) {
+      $ip = $1; my $sub = $2; $by = $3;
+      $sub =~ s/helo=(\S+)// and $helo = $1;
+      $sub =~ s/ident=(\S*)// and $ident = $1;
+      goto enough;
     }
 
     # Received: from mtsbp606.email-info.net (?dXqpg3b0hiH9faI2OxLT94P/YKDD3rQ1?@64.253.199.166) by kde.informatik.uni-kl.de with SMTP; 30 Apr 2003 15:06:29
     if (/^from (\S+) \((?:\S+\@)?(${IP_ADDRESS})\) by (\S+) with /) {
       $rdns = $1; $ip = $2; $by = $3; goto enough;
     }
+
+    # Obtuse smtpd: http://www.obtuse.com/
+    # Received: from TCE-E-7-182-54.bta.net.cn(202.106.182.54) via SMTP
+    #  by st.tahina.priv.at, id smtpdEDUB8h; Sun Nov 13 14:50:12 2005
+    # Received: from pl027.nas934.d-osaka.nttpc.ne.jp(61.197.82.27), claiming to be "foo.woas.net" via SMTP
+    #  by st.tahina.priv.at, id smtpd1PBsZT; Sun Nov 13 15:38:52 2005
+    if (/^from (\S+)\((${IP_ADDRESS})\)(?:, claiming to be "(\S+)")? via \S+ by (\S+),/) {
+      $rdns = $1; $ip = $2; $helo = (defined $3) ? $3 : ''; $by = $4;
+      if ($1 ne 'UNKNOWN') {
+	$mta_looked_up_dns = 1;
+	$rdns = $1;
+      }
+      goto enough;
+    }
+  }
+
+  # simta: http://rsug.itd.umich.edu/software/simta/
+  # Note the ugly uppercase FROM/BY/ID
+  # Received: FROM hackers.mr.itd.umich.edu (smtp.mail.umich.edu [141.211.14.81])
+  #  BY madman.mr.itd.umich.edu ID 434B508E.174A6.13932 ; 11 Oct 2005 01:41:34 -0400
+  # Received: FROM [192.168.1.24] (s233-64-90-216.try.wideopenwest.com [64.233.216.90])
+  #  BY hackers.mr.itd.umich.edu ID 434B5051.8CDE5.15436 ; 11 Oct 2005 01:40:33 -0400
+  if (/^FROM (\S+) \((\S+) \[(${IP_ADDRESS})\]\) BY (\S+) (?:ID (\S+) )?/ ) {
+      $mta_looked_up_dns = 1;
+      $helo = $1; $rdns = $2; $ip = $3; $by = $4;
+      $id = $5 if (defined $5);
+      goto enough;
   }
 
   # ------------------------------------------------------------------------
@@ -1174,8 +1219,12 @@ sub make_relay_as_string {
 # spamcop does this, and it's a great idea ;)
 sub found_pop_fetcher_sig {
   my ($self) = @_;
-  dbg("received-header: found fetchmail marker, restarting parse");
-  $self->{relays} = [ ];
+  if ($self->{allow_fetchmail_markers}) {
+    dbg("received-header: found fetchmail marker, restarting parse");
+    $self->{relays_trusted} = [ ];
+  } else {
+    dbg("received-header: found fetchmail marker outside trusted area, ignored");
+  }
 }
 
 # ---------------------------------------------------------------------------

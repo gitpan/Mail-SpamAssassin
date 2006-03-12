@@ -79,8 +79,8 @@ tree is not going to be used.  This is handy, for instance, when running
 C<spamassassin -d>, which only needs the pristine header and body which
 is always handled when the object is created.
 
-C<subparse> specifies how many levels of message/* attachment should be parsed
-into a subtree.  Defaults to 1.
+C<subparse> specifies how many MIME recursion levels should be parsed.
+Defaults to 20.
 
 =cut
 
@@ -99,6 +99,7 @@ sub new {
   $self->{pristine_headers} =	'';
   $self->{pristine_body} =	'';
   $self->{mime_boundary_state} = {};
+  $self->{line_ending} =	"\n";
 
   bless($self,$class);
 
@@ -113,7 +114,7 @@ sub new {
   # Specifies whether or not to parse message/rfc822 parts into its own tree.
   # If the # > 0, it'll subparse, otherwise it won't.  By default, do one
   # level deep.
-  $self->{subparse} = defined $opts->{'subparse'} ? $opts->{'subparse'} : 1;
+  $self->{subparse} = defined $opts->{'subparse'} ? $opts->{'subparse'} : 20;
 
   # protect it from abuse ...
   local $_;
@@ -165,6 +166,14 @@ sub new {
       }
       $self->{'mbox_sep'} = "From $address $DAY_OF_WEEK[$arr[6]] $2 $1 $4:$5:$6 $3\n";
     }
+  }
+
+  # bug 4363
+  # Check to see if we should do CRLF instead of just LF
+  # For now, just check the first header and do whatever it does
+  if (@message && $message[0] =~ /\r\n/) {
+    $self->{line_ending} = "\r\n";
+    dbg("message: line ending changed to CRLF");
   }
 
   # Go through all the headers of the message
@@ -588,7 +597,7 @@ sub parse_body {
   # one doesn't, assume it's malformed and send it to be parsed as a
   # non-multipart section
   #
-  if ( $type =~ /^multipart\//i && defined $boundary ) {
+  if ( $type =~ /^multipart\//i && defined $boundary && ($msg->{subparse} > 0)) {
     # Treat an initial multipart parse differently.  This will keep the tree:
     # obj(multipart->[ part1, part2 ]) instead of
     # obj(obj(multipart ...))
@@ -645,7 +654,7 @@ sub _parse_multipart {
   }
 
   # prepare a new tree node
-  my $part_msg = Mail::SpamAssassin::Message::Node->new({ subparse=>$msg->{subparse} });
+  my $part_msg = Mail::SpamAssassin::Message::Node->new({ subparse=>$msg->{subparse}-1 });
   my $in_body = 0;
   my $header;
   my $part_array;
@@ -692,7 +701,7 @@ sub _parse_multipart {
 
       # make sure we start with a new clean node
       $in_body  = 0;
-      $part_msg = Mail::SpamAssassin::Message::Node->new({ subparse=>$msg->{subparse} });
+      $part_msg = Mail::SpamAssassin::Message::Node->new({ subparse=>$msg->{subparse}-1 });
       undef $part_array;
       undef $header;
 
@@ -1018,8 +1027,11 @@ sub split_into_array_of_short_lines {
   my @result = ();
   foreach my $line (split (/^/m, $_[0])) {
     while (length ($line) > MAX_BODY_LINE_LENGTH) {
-      push (@result, substr($line, 0, MAX_BODY_LINE_LENGTH));
-      substr($line, 0, MAX_BODY_LINE_LENGTH) = '';
+      # try splitting "nicely" so that we don't chop an url in half or
+      # something.  if there's no space, then just split at max length.
+      my $length = rindex($line, ' ', MAX_BODY_LINE_LENGTH) + 1;
+      $length ||= MAX_BODY_LINE_LENGTH;
+      push (@result, substr($line, 0, $length, ''));
     }
     push (@result, $line);
   }

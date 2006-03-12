@@ -34,6 +34,8 @@ package Mail::SpamAssassin::Plugin::DomainKeys;
 
 use Mail::SpamAssassin::Plugin;
 use Mail::SpamAssassin::Logger;
+use Mail::SpamAssassin::Timeout;
+
 use strict;
 use warnings;
 use bytes;
@@ -59,7 +61,35 @@ sub new {
   $self->register_eval_rule ("check_domainkeys_testing");
   $self->register_eval_rule ("check_domainkeys_signall");
 
+  $self->set_config($mailsaobject->{conf});
+
   return $self;
+}
+
+###########################################################################
+
+sub set_config {
+  my($self, $conf) = @_;
+  my @cmds = ();
+
+=head1 USER SETTINGS
+
+=over 4
+
+=item domainkeys_timeout n             (default: 5)
+
+How many seconds to wait for a DomainKeys query to complete, before
+scanning continues without the DomainKeys result.
+
+=cut
+
+  push (@cmds, {
+    setting => 'domainkeys_timeout',
+    default => 5,
+    type => $Mail::SpamAssassin::Conf::CONF_TYPE_NUMERIC
+  });
+
+  $conf->{parser}->register_commands(\@cmds);
 }
 
 
@@ -136,30 +166,23 @@ sub _check_domainkeys {
     return;
   }
 
-  my $timeout = 5;              # TODO: tunable timeout
-  my $oldalarm = 0;
+  my $timeout = $scan->{conf}->{domainkeys_timeout};
 
-  eval {
-    local $SIG{ALRM} = sub { die "__alarm__ignore__\n" };
-    $oldalarm = alarm($timeout);
+  my $timer = Mail::SpamAssassin::Timeout->new({ secs => $timeout });
+  my $err = $timer->run_and_catch(sub {
+
     $self->_dk_lookup_trapped($scan, $message, $domain);
-    if (defined $oldalarm) {
-      alarm $oldalarm; $oldalarm = undef;
-    }
-  };
 
-  my $err = $@;
-  if (defined $oldalarm) {
-    alarm $oldalarm; $oldalarm = undef;
+  });
+
+  if ($timer->timed_out()) {
+    dbg("dk: lookup timed out after $timeout seconds");
+    return 0;
   }
 
   if ($err) {
     chomp $err;
-    if ($err eq "__alarm__ignore__") {
-      dbg("dk: lookup timed out after $timeout seconds");
-    } else {
-      warn("dk: lookup failed: $err\n");
-    }
+    warn("dk: lookup failed: $err\n");
     return 0;
   }
 
@@ -210,7 +233,15 @@ sub _dk_lookup_trapped {
 # get the DK status "header" from the Mail::DomainKeys::Message object
 sub _dkmsg_hdr {
   my ($self, $message) = @_;
-  return $message->header->value();
+  # try to use the signature() API if it exists (post-0.80)
+  if ($message->can("signature")) {
+    if (!$message->signed) {
+      return "no signature";
+    }
+    return $message->signature->status;
+  } else {
+    return $message->header->value;
+  }
 }
 
 sub sanitize_header_for_dk {

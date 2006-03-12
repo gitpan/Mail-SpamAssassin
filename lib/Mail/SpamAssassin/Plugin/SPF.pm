@@ -34,6 +34,7 @@ package Mail::SpamAssassin::Plugin::SPF;
 
 use Mail::SpamAssassin::Plugin;
 use Mail::SpamAssassin::Logger;
+use Mail::SpamAssassin::Timeout;
 use strict;
 use warnings;
 use bytes;
@@ -78,6 +79,19 @@ sub set_config {
 =head1 USER SETTINGS
 
 =over 4
+
+=item spf_timeout n		(default: 5)
+
+How many seconds to wait for an SPF query to complete, before scanning
+continues without the SPF result.
+
+=cut
+
+  push (@cmds, {
+    setting => 'spf_timeout',
+    default => 5,
+    type => $Mail::SpamAssassin::Conf::CONF_TYPE_NUMERIC
+  });
 
 =item whitelist_from_spf add@ress.com
 
@@ -228,9 +242,9 @@ sub _check_spf {
     $scanner->{spf_failure_comment} = undef;
   }
 
-  my $lasthop = $scanner->{relays_untrusted}->[0];
+  my $lasthop = $self->_get_relay($scanner);
   if (!defined $lasthop) {
-    dbg("spf: message was delivered entirely via trusted relays, not required");
+    dbg("spf: no suitable relay for spf use found, skipping SPF". ($ishelo ? '-helo' : '') ." check");
     return;
   }
 
@@ -286,30 +300,18 @@ sub _check_spf {
   }
 
   my ($result, $comment);
-  my $timeout = 5;
-  my $oldalarm = 0;
+  my $timeout = $scanner->{conf}->{spf_timeout};
 
-  eval {
-    local $SIG{ALRM} = sub { die "__alarm__ignore__\n" };
-    $oldalarm = alarm($timeout);
+  my $timer = Mail::SpamAssassin::Timeout->new({ secs => $timeout });
+  my $err = $timer->run_and_catch(sub {
+
     ($result, $comment) = $query->result();
-    if (defined $oldalarm) {
-      alarm $oldalarm; $oldalarm = undef;
-    }
-  };
 
-  my $err = $@;
-  if (defined $oldalarm) {
-    alarm $oldalarm; $oldalarm = undef;
-  }
+  });
 
   if ($err) {
     chomp $err;
-    if ($err eq "__alarm__ignore__") {
-      dbg("spf: lookup timed out after $timeout seconds");
-    } else {
-      warn("spf: lookup failed: $err\n");
-    }
+    warn("spf: lookup failed: $err\n");
     return 0;
   }
 
@@ -340,6 +342,61 @@ sub _check_spf {
   dbg("spf: query for $scanner->{sender}/$ip/$helo: result: $result, comment: $comment");
 }
 
+sub _get_relay {
+  my ($self, $scanner) = @_;
+
+  # return relay if already determined
+  return $scanner->{spf_relay} if exists $scanner->{spf_relay};
+
+  # DOS: For SPF checks we want to use the relay that passed the message to
+  # the internal network.  This relay can be any of the trusted relays or the
+  # first untrusted relay.  No matter which it is, the next (newer) relay has
+  # to be an internal relay.  If there are no trusted relays, the first
+  # untrusted relay is the one we want.  If internal_networks aren't set we
+  # have to assume all trusted relays are internal.
+
+  my $relay = undef;
+  my $relays_trusted = $scanner->{relays_trusted};
+
+  # no trusted relays, use first untrusted
+  if (scalar @{$relays_trusted} == 0) {
+    $relay = $scanner->{relays_untrusted}->[0];
+    dbg("spf: no trusted relays found, using first (untrusted) relay (if present) for SPF checks");
+  }
+
+  # last trusted relay is internal (or internal_networks not set), use first untrusted
+  elsif ($relays_trusted->[-1]->{internal} || !($scanner->{conf}->{internal_networks}->get_num_nets() > 0)) {
+    $relay = $scanner->{relays_untrusted}->[0];
+    dbg("spf: last trusted relay is internal, using first untrusted relay (parsed relay #". (scalar @{$relays_trusted}+1) ." if present) for SPF checks");
+  }
+
+  # find external relay that passed the message to the last internal relay
+  else {
+
+    # found an internal relay?
+    my $found = 0;
+
+    # start at the end; don't check for an internal relay before the first one
+    for (my $i = scalar @{$relays_trusted} - 1; $i > 0 && !$found; $i--) {
+      # if the next relay is internal, we can use the current external one
+      if ($relays_trusted->[$i-1]->{internal}) {
+	$relay = $relays_trusted->[$i];
+	$found = 1;
+	dbg("spf: using first external trusted relay (parsed relay #". ($i+1) .") for SPF checks");
+      }
+    }
+
+    # if none of the trusted relays were internal, internal_networks isn't set
+    # correctly -- dbg about it
+    if (!$found) {
+      dbg("spf: none of the trusted relays are internal, please check your internal_networks configuration");
+    }	
+  }
+
+  $scanner->{spf_relay} = $relay;
+  return $relay;
+}
+
 sub _get_sender {
   my ($self, $scanner) = @_;
   my $sender;
@@ -347,12 +404,13 @@ sub _get_sender {
   $scanner->{sender_got} = 1;
   $scanner->{sender} = '';
 
-  if (exists($scanner->{relays_untrusted}->[0])) {
-    $sender = $scanner->{relays_untrusted}->[0]->{envfrom};
+  my $relay = $self->_get_relay($scanner);
+  if (defined $relay) {
+    $sender = $relay->{envfrom};
   }
 
   if ($sender) {
-    dbg("spf: found Envelope-From in last untrusted Received header");
+    dbg("spf: found Envelope-From in first external Received header");
   }
   else {
     # We cannot use the env-from data, since it went through 1 or more relays 

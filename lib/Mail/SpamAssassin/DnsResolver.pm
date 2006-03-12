@@ -63,7 +63,6 @@ sub new {
   bless ($self, $class);
 
   $self->load_resolver();
-  $self->connect_sock();
   $self;
 }
 
@@ -130,6 +129,7 @@ Wrapper for Net::DNS::Reslolver->nameservers to get or set list of nameservers
 sub nameservers {
   my $self = shift;
   my $res = $self->{res};
+  $self->connect_sock_if_reqd();
   return $res->nameservers(@_) if $res;
 }
 
@@ -199,14 +199,26 @@ sub connect_sock {
     } else {
       # did we fail due to the attempted use of an IPv6 nameserver?
       $self->_ipv6_ns_warning()  if (!$ipv6 && $errno==EINVAL);
-      die "Error creating a DNS resolver socket: $errno";
+      warn "Error creating a DNS resolver socket: $errno";
+      goto no_sock;
     }
   }
-  defined $sock or die "Can't create a DNS resolver socket: $errno";
+  if (!defined $sock) {
+    warn "Can't create a DNS resolver socket: $errno";
+    goto no_sock;
+  }
 
   $self->{sock} = $sock;
-
   $self->{sock_as_vec} = $self->fhs_to_vec($self->{sock});
+  return;
+
+no_sock:
+  $self->{no_resolver} = 1;
+}
+
+sub connect_sock_if_reqd {
+  my ($self) = @_;
+  $self->connect_sock() if !$self->{sock};
 }
 
 =item $res->get_sock()
@@ -218,6 +230,7 @@ the nameserver.
 
 sub get_sock {
   my ($self) = @_;
+  $self->connect_sock_if_reqd();
   return $self->{sock};
 }
 
@@ -225,7 +238,7 @@ sub get_sock {
 
 =item $packet = new_dns_packet ($host, $type, $class)
 
-A wrapper for C<Net::DNS::Packet::new()> which traps a die thrown by it
+A wrapper for C<Net::DNS::Packet::new()> which traps a die thrown by it.
 
 To use this, change calls to C<Net::DNS::Resolver::bgsend> from:
 
@@ -242,6 +255,13 @@ sub new_dns_packet {
 
   return if $self->{no_resolver};
 
+  # construct a PTR query if it looks like an IPv4 address
+  if ((!defined($type) || $type eq 'PTR') && $host =~ /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/) {
+    $host = "$4.$3.$2.$1.in-addr.arpa.";
+    $type = 'PTR';
+  }
+
+  $self->connect_sock_if_reqd();
   my $packet;
   eval {
     $packet = Net::DNS::Packet->new($host, $type, $class);
@@ -315,7 +335,7 @@ sub bgsend {
   my $pkt = $self->new_dns_packet($host, $type, $class);
 
   my $data = $pkt->data;
-  $self->connect_sock() if !$self->{sock};
+  $self->connect_sock_if_reqd();
   if (!$self->{sock}->send ($pkt->data, 0)) {
     warn "dns: sendto() failed: $@";
     return;
@@ -365,7 +385,7 @@ sub poll_responses {
     my $cb = delete $self->{id_to_callback}->{$id};
     if (!$cb) {
       dbg("dns: no callback for id: $id, ignored; packet: ".
-                                $packet->string);
+                    ($packet ? $packet->string : "undef"));
       return 0;
     }
 
@@ -373,7 +393,8 @@ sub poll_responses {
     return 1;
   }
   else {
-    dbg("dns: no packet! err=$err packet=".$packet->string);
+    dbg("dns: no packet! err=$err packet=".
+                    ($packet ? $packet->string : "undef"));
   }
 
   return 0;

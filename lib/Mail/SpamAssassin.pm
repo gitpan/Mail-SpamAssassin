@@ -25,7 +25,7 @@ Mail::SpamAssassin - Spam detector and markup engine
   my $status = $spamtest->check($mail);
 
   if ($status->is_spam()) {
-    $mail = $status->rewrite_mail();
+    $message = $status->rewrite_mail();
   }
   else {
     ...
@@ -94,20 +94,20 @@ use vars qw{
   @site_rules_path
 };
 
-$VERSION = "3.001000";      # update after release (same format as perl $])
-$IS_DEVEL_BUILD = 0;        # change for release versions
+$VERSION = "3.001001";      # update after release (same format as perl $])
+#$IS_DEVEL_BUILD = 1;        # change for release versions
 
 @ISA = qw();
 
 # SUB_VERSION is now just <yyyy>-<mm>-<dd>
-$SUB_VERSION = (split(/\s+/,'$LastChangedDate: 2005-09-13 19:05:10 -0700 (Tue, 13 Sep 2005) $ updated by SVN'))[1];
+$SUB_VERSION = (split(/\s+/,'$LastChangedDate: 2006-03-10 11:28:03 -0800 (Fri, 10 Mar 2006) $ updated by SVN'))[1];
 
 # If you hacked up your SA, you should add a version_tag to your .cf files.
 # This variable should not be modified directly.
 @EXTRA_VERSION = qw();
 if (defined $IS_DEVEL_BUILD && $IS_DEVEL_BUILD) {
   push(@EXTRA_VERSION,
-       ('r' . qw{$LastChangedRevision: 280740 $ updated by SVN}[1]));
+       ('r' . qw{$LastChangedRevision: 384902 $ updated by SVN}[1]));
 }
 
 sub Version {
@@ -124,6 +124,7 @@ $HOME_URL = "http://spamassassin.apache.org/";
 @default_rules_path = (
   './rules',              # REMOVEFORINST
   '../rules',             # REMOVEFORINST
+  '__local_state_dir__/spamassassin/__version__',
   '__def_rules_dir__',
   '__prefix__/share/spamassassin',
   '/usr/local/share/spamassassin',
@@ -1327,9 +1328,10 @@ sub init {
     $fname = $sysrules;
     if ($fname) {
       $self->{config_text} .= $self->read_cf ($fname, 'default rules dir');
-      if (-f "$fname/languages") {
-	$self->{languages_filename} = "$fname/languages";
-      }
+    }
+
+    if (!$self->{languages_filename}) {
+      $self->{languages_filename} = $self->find_rule_support_file("languages");
     }
 
     $fname = $siterules;
@@ -1471,6 +1473,27 @@ sub get_and_create_userstate_dir {
   $fname;
 }
 
+=item $fullpath = $f->find_rule_support_file ($filename)
+
+Find a rule-support file, such as C<languages> or C<triplets.txt>,
+in the system-wide rules directory, and return its full path if
+it exists.
+
+(This API was added in SpamAssassin 3.1.1.)
+
+=cut
+
+sub find_rule_support_file {
+  my ($self, $filename) = @_;
+
+  # take a copy to avoid modifying the real one (stupid map { } side-effect)
+  my @paths = @default_rules_path;
+  return $self->first_existing_path (map {
+      s/$/\/${filename}/;
+      $_;
+    } @paths);
+}
+
 =item $f->create_default_prefs ($filename, $username [ , $userdir ] )
 
 Copy default preferences file into home directory for later use and
@@ -1567,9 +1590,11 @@ sub sed_path {
   my $orig_path = $path;
 
   $path =~ s/__local_rules_dir__/$self->{LOCAL_RULES_DIR} || ''/ges;
+  $path =~ s/__local_state_dir__/$self->{LOCAL_STATE_DIR} || ''/ges;
   $path =~ s/__def_rules_dir__/$self->{DEF_RULES_DIR} || ''/ges;
   $path =~ s{__prefix__}{$self->{PREFIX} || $Config{prefix} || '/usr'}ges;
   $path =~ s{__userstate__}{$self->get_and_create_userstate_dir()}ges;
+  $path =~ s/__version__/${VERSION}/gs;
   $path =~ s/^\~([^\/]*)/$self->expand_name($1)/es;
 
   $path = Mail::SpamAssassin::Util::untaint_file_path ($path);
