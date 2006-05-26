@@ -129,14 +129,18 @@ sub new {
       @message = <$message>;
     }
   }
-  else {
+  elsif (defined $message) {
     @message = split ( /^/m, $message );
   }
 
-  return $self unless @message;
-
   # Pull off mbox and mbx separators
-  if ( $message[0] =~ /^From\s/ ) {
+  # also deal with null messages
+  if (!@message) {
+    # bug 4884:
+    # if we get here, it means that the input was null, so fake the message
+    # content as a single newline...
+    @message = ("\n");
+  } elsif ($message[0] =~ /^From\s/) {
     # mbox formated mailbox
     $self->{'mbox_sep'} = shift @message;
   } elsif ($message[0] =~ MBX_SEPARATOR) {

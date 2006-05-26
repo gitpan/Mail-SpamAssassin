@@ -43,6 +43,7 @@ use Mail::SpamAssassin::NetSet;
 use Mail::SpamAssassin::SubProcBackChannel;
 use Mail::SpamAssassin::SpamdForkScaling qw(:pfstates);
 use Mail::SpamAssassin::Logger qw(:DEFAULT log_message);
+use Mail::SpamAssassin::Timeout;
 
 use Getopt::Long;
 use Pod::Usage;
@@ -164,6 +165,7 @@ GetOptions(
   'daemonize!'               => \$opt{'daemonize'},
   'debug|D:s'                => \$opt{'debug'},
   'd'                        => \$opt{'daemonize'},
+  'groupname|g=s'            => \$opt{'groupname'},
   'helper-home-dir|H:s'      => \$opt{'home_dir_for_helpers'},
   'help|h'                   => \$opt{'help'},
   'ident-timeout=f'          => \$opt{'ident-timeout'},
@@ -854,6 +856,10 @@ sub spawn {
         die "spamd: cannot run as nonexistent user or root with -u option\n";
       }
 
+      if ( $opt{'groupname'} ) {
+        $ugid = getgrnam( $opt{'groupname'} ) || $ugid;
+      }
+
       $uuid =~ /^(\d+)$/ and $uuid = $1;    # de-taint
       $ugid =~ /^(\d+)$/ and $ugid = $1;    # de-taint
 
@@ -935,16 +941,15 @@ sub spawn {
         }
       }
 
-      if ($copy_config_p)
-      {
+      if ($copy_config_p) {
         # use a timeout!  There are bugs in Storable on certain platforms
         # that can cause spamd to hang -- see bug 3828 comment 154.
         # we don't use Storable any more, but leave this in -- just
         # in case.
-        my $oldalarm = 0;
-        eval {
-          local $SIG{ALRM} = sub { die "__alarm__\n" };
-          $oldalarm = alarm 10;
+	# bug 4699: this is the alarm that often ends up with an empty $@
+
+	my $timer = Mail::SpamAssassin::Timeout->new({ secs => 20 });
+	my $err = $timer->run(sub {
 
           while(my($k,$v) = each %msa_backup) {
             $spamtest->{$k} = $v;
@@ -954,23 +959,14 @@ sub spawn {
           # (potentially), so let's restore back the saved version we
           # had before.
           $spamtest->copy_config(\%conf_backup, undef) ||
-            die "error returned from copy_config\n";
-          alarm $oldalarm;
-        };
+            die "spamd: error returned from copy_config\n";
+        });
 
-        alarm $oldalarm;
-        my $err = $@;
-
-        if ($err) {
-          if ($err =~ /__alarm__/) {
-            warn("spamd: copy_config timeout, respawning child process after ".
-                            ($i+1)." messages");
-            exit;         # so that the master spamd can respawn
-
-          } else {
-            die $err;     # propagate failures
-          }
-        }
+	if ($timer->timed_out()) {
+	  warn("spamd: copy_config timeout, respawning child process after ".
+		($i+1)." messages");
+	  exit;		# so that the master spamd can respawn
+	}
       }
       undef $current_user;
 
@@ -2208,6 +2204,7 @@ Options:
  -s facility, --syslog=facility     Specify the syslog facility
  --syslog-socket=type               How to connect to syslogd
  -u username, --username=username   Run as username
+ -g groupname, --groupname=groupname Run as groupname
  -v, --vpopmail                     Enable vpopmail config
  -x, --nouser-config                Disable user config files
  --auth-ident                       Use ident to authenticate spamc user
@@ -2444,6 +2441,12 @@ as root.
 Note: "--username=root" is not a valid option.  If specified, C<spamd> will
 exit with a fatal error on startup.
 
+=item B<-g> I<groupname>, B<--groupname>=I<groupname>
+
+Run as the named group if --username is being used. If this option is
+not set when --username is used then the primary group for the user
+given to --username is used.
+
 =item B<-x>, B<--nouser-config>, B<--user-config>
 
 Turn off(on) reading of per-user configuration files (user_prefs) from the
@@ -2503,6 +2506,11 @@ diagnostic output on bayes, learn, and dns, use:
 
 Higher priority informational messages that are suitable for logging in normal
 circumstances are available with an area of "info".
+
+For more information about which areas (also known as channels) are available,
+please see the documentation at:
+
+	C<http://wiki.apache.org/spamassassin/DebugChannels>
 
 =item B<-L>, B<--local>
 

@@ -17,7 +17,7 @@
 # </@LICENSE>
 
 my $VERSION = 'svn' . (split(/\s+/,
-	'$Id: sa-update.raw 384884 2006-03-10 18:24:18Z felicity $'))[2];
+	'$Id: sa-update.raw 408695 2006-05-22 15:34:10Z felicity $'))[2];
 
 my $PREFIX          = '@@PREFIX@@';             # substituted at 'make' time
 my $DEF_RULES_DIR   = '@@DEF_RULES_DIR@@';      # substituted at 'make' time
@@ -120,7 +120,7 @@ my %opt = ();
 @{$opt{'channel'}} = ();
 my $GPG_ENABLED = 1;
 
-$opt{'gpghomedir'} = File::Spec->catfile($LOCAL_RULES_DIR, '/sa-update-keys');
+$opt{'gpghomedir'} = File::Spec->catfile($LOCAL_RULES_DIR, 'sa-update-keys');
 
 Getopt::Long::Configure(
   qw(bundling no_getopt_compat no_auto_abbrev no_ignore_case));
@@ -189,7 +189,6 @@ my $SA = new Mail::SpamAssassin({
   LOCAL_STATE_DIR => $LOCAL_STATE_DIR,
 });
 
-# $opt{'updatedir'} ||= $SA->first_existing_path(@Mail::SpamAssassin::site_rules_path);
 if (defined $opt{'updatedir'}) {
   $opt{'updatedir'} = Mail::SpamAssassin::Util::untaint_file_path($opt{'updatedir'});
 }
@@ -1021,8 +1020,10 @@ sub import_default_keyring {
   return unless (-f $defkey);
 
   print "sa-update: importing default keyring to '".$opt{gpghomedir}."'...\n";
-  # use 0700 to avoid "unsafe permissions" warning
-  mkdir ($opt{gpghomedir}, 0700) or die "cannot mkdir $opt{gpghomedir}";
+  unless (-d $opt{gpghomedir}) {
+    # use 0700 to avoid "unsafe permissions" warning
+    mkdir ($opt{gpghomedir}, 0700) or die "cannot mkdir $opt{gpghomedir}: $!";
+  } 
   import_gpg_key($defkey);
 }
 
@@ -1228,6 +1229,11 @@ I<area> is the area of the code to instrument. For example, to produce
 diagnostic output on channel, gpg, and http, use:
 
         sa-update -D channel,gpg,http
+
+For more information about which areas (also known as channels) are available,
+please see the documentation at:
+
+	C<http://wiki.apache.org/spamassassin/DebugChannels>
 
 =item B<-h>, B<--help>
 

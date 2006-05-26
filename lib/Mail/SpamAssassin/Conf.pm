@@ -2137,7 +2137,9 @@ learning systems.
 =item priority SYMBOLIC_TEST_NAME n
 
 Assign a specific priority to a test.  All tests, except for DNS and Meta
-tests, are run in priority order. The default test priority is 0 (zero).
+tests, are run in increasing priority value order (negative priority values
+are run before positive priority values). The default test priority is 0
+(zero).
 
 =cut
 
@@ -2613,9 +2615,7 @@ version.  So 3.0.0 is C<3.000000>, and 3.4.80 is C<3.004080>.
 =head1 TEMPLATE TAGS
 
 The following C<tags> can be used as placeholders in certain options.
-They will be replaced by the corresponding value when they are used.  Keep in
-mind that anything that looks like a tag will be replaced (C<_STRING_>), even
-in the middle of other characters (C<FOR_STRING_EXAMPLE>).
+They will be replaced by the corresponding value when they are used.
 
 Some tags can take an argument (in parentheses). The argument is
 optional, and the default is shown below.
@@ -2648,6 +2648,8 @@ optional, and the default is shown below.
                    (note: limited to 50 'stars')
  _RELAYSTRUSTED_   relays used and deemed to be trusted
  _RELAYSUNTRUSTED_ relays used that can not be trusted
+ _RELAYSINTERNAL_  relays used and deemed to be internal
+ _RELAYSEXTERNAL_  relays used and deemed to be external
  _AUTOLEARN_       autolearn status ("ham", "no", "spam", "disabled",
                    "failed", "unavailable")
  _TESTS(,)_        tests hit separated by "," (or other separator)
@@ -2661,6 +2663,10 @@ optional, and the default is shown below.
  _REPORT_          terse report of tests hit (for header reports)
  _SUMMARY_         summary of tests hit for standard report (for body reports)
  _CONTACTADDRESS_  contents of the 'report_contact' setting
+
+If a tag reference uses the name of a tag which is not in this list or defined
+by a loaded plugin, the reference will be left intact and not replaced by any
+value.
 
 The C<HAMMYTOKENS> and C<SPAMMYTOKENS> tags have an optional second argument
 which specifies a format.  See the B<HAMMYTOKENS/SPAMMYTOKENS TAG FORMAT>

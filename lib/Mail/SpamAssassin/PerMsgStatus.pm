@@ -1008,7 +1008,15 @@ sub _replace_tags {
   my $self = shift;
   my $text = shift;
 
-  $text =~ s/_(\w+?)(?:\((.*?)\))?_/${\($self->_get_tag($1,$2))}/g;
+  # default to leaving the original string in place, if we cannot find
+  # a tag for it (bug 4793)
+  $text =~ s{(_(\w+?)(?:\((.*?)\))?_)}{
+	my $full = $1;
+        my $tag = $2;
+        my $result = $self->_get_tag($tag,$3);
+        (defined $result) ? $result : $full;
+      }ge;
+
   return $text;
 }
 
@@ -1100,6 +1108,8 @@ templates, etc. This API is intended for use by plugins.  Tag names will be
 converted to an all-uppercase representation internally.  See
 C<Mail::SpamAssassin::Conf>'s C<TEMPLATE TAGS> section for more details on
 tags.
+
+C<undef> will be returned if a tag by that name has not been defined.
 
 =cut
 
@@ -1246,20 +1256,21 @@ sub _get_tag {
 
           );
 
+  my $data;
   if (exists $tags{$tag}) {
-    return $tags{$tag}->(@_);
+    $data = $tags{$tag}->(@_);
   }
-  elsif ($self->{tag_data}->{$tag}) {
-    my $data = $self->{tag_data}->{$tag};
+  elsif (exists($self->{tag_data}->{$tag})) {
+    $data = $self->{tag_data}->{$tag};
     if (ref $data eq 'CODE') {
-      return $data->(@_);
-    } else {
-      return $data;
+      $data = $data->(@_);
     }
   }
   else {
-    return "";
+    return;
   }
+  $data = "" unless defined $data;
+  return $data;
 }
 
 ###########################################################################
@@ -1340,6 +1351,8 @@ sub extract_message_metadata {
   foreach my $item (qw(
 	relays_trusted relays_trusted_str num_relays_trusted
 	relays_untrusted relays_untrusted_str num_relays_untrusted
+	relays_internal relays_internal_str num_relays_internal
+	relays_external relays_external_str num_relays_external
         num_relays_unparseable
 	))
   {
@@ -1348,6 +1361,8 @@ sub extract_message_metadata {
 
   $self->{tag_data}->{RELAYSTRUSTED} = $self->{relays_trusted_str};
   $self->{tag_data}->{RELAYSUNTRUSTED} = $self->{relays_untrusted_str};
+  $self->{tag_data}->{RELAYSINTERNAL} = $self->{relays_internal_str};
+  $self->{tag_data}->{RELAYSEXTERNAL} = $self->{relays_external_str};
   $self->{tag_data}->{LANGUAGES} = $self->{msg}->get_metadata("X-Languages");
 
   # This should happen before we get called, but just in case.
@@ -1483,6 +1498,14 @@ sub _get {
   # trusted relays list, as string
   elsif ($request eq 'X-Spam-Relays-Trusted') {
     $result = $self->{relays_trusted_str};
+  }
+  # external relays list, as string
+  elsif ($request eq 'X-Spam-Relays-External') {
+    $result = $self->{relays_external_str};
+  }
+  # internal relays list, as string
+  elsif ($request eq 'X-Spam-Relays-Internal') {
+    $result = $self->{relays_internal_str};
   }
   # ToCc: the combined recipients list
   elsif ($request eq 'ToCc') {
