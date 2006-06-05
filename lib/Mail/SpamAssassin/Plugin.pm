@@ -93,9 +93,12 @@ that SpamAssassin will call back to:
 =cut
 
 package Mail::SpamAssassin::Plugin;
+
 use Mail::SpamAssassin;
+use Mail::SpamAssassin::Logger;
 
 use strict;
+use warnings;
 use bytes;
 
 use vars qw{
@@ -194,6 +197,28 @@ That can be found as C<$plugin-E<gt>{main}-E<gt>{conf}>.   This allows per-user 
 system-wide configuration to be dealt with correctly, with per-user overriding
 system-wide.
 
+=item $plugin->finish_parsing_end ( { options ... } )
+
+Signals that the configuration parsing has just finished, and SpamAssassin
+is nearly ready to check messages.
+
+C<options> is a reference to a hash containing these options:
+
+=over 4
+
+=item conf
+
+The C<Mail::SpamAssassin::Conf> object on which the configuration
+data should be stored.
+
+=back
+
+Note: there are no guarantees that the internal data structures of
+SpamAssassin will not change from release to release.  In particular to
+this plugin hook, if you modify the rules data structures in a
+third-party plugin, all bets are off until such time that an API is
+present for modifying that configuration data.
+
 =item $plugin->signal_user_changed ( { options ... } )
 
 Signals that the current user has changed for a new one.
@@ -211,6 +236,39 @@ The new user's home directory. (equivalent to C<~>.)
 =item userstate_dir
 
 The new user's storage directory. (equivalent to C<~/.spamassassin>.)
+
+=back
+
+=item $plugin->services_authorized_for_username ( { options ... } )
+
+Validates that a given username is authorized to use certain services.
+
+In order to authorize a user, the plugin should first check that it can
+handle any of the services passed into the method and then set the value
+for each allowed service to true (or any non-negative value).
+
+The current supported services are: bayessql
+
+=over 4
+
+=item username
+
+A username
+
+=item services
+
+Reference to a hash containing the services you want to check.
+
+{
+
+  'bayessql' => 0
+
+}
+
+=item conf
+
+The C<Mail::SpamAssassin::Conf> object on which the configuration
+data should be stored.
 
 =back
 
@@ -316,6 +374,21 @@ using the public APIs on this object.
 
 =back
 
+=item $plugin->autolearn_discriminator ( { options ... } )
+
+Control whether a just-scanned message should be learned as either
+spam or ham.   This method should return one of C<1> to learn
+the message as spam, C<0> to learn as ham, or C<undef> to not
+learn from the message at all.
+
+=over 4
+
+=item permsgstatus
+
+The C<Mail::SpamAssassin::PerMsgStatus> context object for this scan.
+
+=back
+
 =item $plugin->autolearn ( { options ... } )
 
 Signals that a message is about to be auto-learned as either ham or spam.
@@ -337,6 +410,11 @@ C<1> if the message is spam, C<0> if ham.
 Signals that a C<Mail::SpamAssassin::PerMsgStatus> object is being
 destroyed, and any per-scan context held on that object by this
 plugin should be destroyed as well.
+
+Normally, any member variables on the C<PerMsgStatus> object will be cleaned up
+automatically -- but if your plugin has made a circular reference on that
+object, this is the place to break them so that garbage collection can operate
+correctly.
 
 =over 4
 
@@ -467,11 +545,117 @@ this message.
 
 =back
 
+=item $plugin->plugin_report ( { options ... } )
+
+Called if the message is to be reported as spam.  If the reporting system is
+available, the variable C<$options-<gt>{report}-><gt>report_available}> should
+be set to C<1>; if the reporting system successfully reported the message, the
+variable C<$options-<gt>{report}-><gt>report_return}> should be set to C<1>.
+
+=over 4
+
+=item report
+
+Reference to the Reporter object (C<$options-<gt>{report}> in the
+paragraph above.)
+
+=item text
+
+Reference to a markup removed copy of the message in scalar string format.
+
+=item msg
+
+Reference to the original message object.
+
+=back
+
+=item $plugin->plugin_revoke ( { options ... } )
+
+Called if the message is to be reported as ham (revokes a spam report). If the
+reporting system is available, the variable
+C<$options-<gt>{revoke}-><gt>revoke_available}> should be set to C<1>; if the
+reporting system successfully revoked the message, the variable
+C<$options-<gt>{revoke}-><gt>revoke_return}> should be set to C<1>.
+
+=over 4
+
+=item revoke
+
+Reference to the Reporter object (C<$options-<gt>{revoke}> in the
+paragraph above.)
+
+=item text
+
+Reference to a markup removed copy of the message in scalar string format.
+
+=item msg
+
+Reference to the original message object.
+
+=back
+
+=item $plugin->whitelist_address( { options ... } )
+
+Called when a request is made to add an address to a
+persistent address list.
+
+=over 4
+
+=item address
+
+Address you wish to add.
+
+=back
+
+=item $plugin->blacklist_address( { options ... } )
+
+Called when a request is made to add an address to a
+persistent address list.
+
+=over 4
+
+=item address
+
+Address you wish to add.
+
+=back
+
+=item $plugin->remove_address( { options ... } )
+
+Called when a request is made to remove an address to a
+persistent address list.
+
+=over 4
+
+=item address
+
+Address you wish to remove.
+
+=back
+
+=item $plugin->spamd_child_init ()
+
+Called when a new child starts up under spamd.
+
+=item $plugin->spamd_child_post_connection_close ()
+
+Called when child returns from handling a connection.
+
+If there was an accept failure, the child will die and this code will
+not be called.
+
 =item $plugin->finish ()
 
 Called when the C<Mail::SpamAssassin> object is destroyed.
 
 =back
+
+=cut
+
+sub finish {
+  my ($self) = @_;
+  delete $self->{main};
+}
 
 =head1 HELPER APIS
 
@@ -506,7 +690,7 @@ sub inhibit_further_callbacks {
   $self->{_inhibit_further_callbacks} = 1;
 }
 
-=item dbg ($message)
+=item dbg($message)
 
 Output a debugging message C<$message>, if the SpamAssassin object is running
 with debugging turned on.
@@ -516,9 +700,17 @@ of general plugins and can't be called via $self->dbg().  If a
 plugin wishes to output debug information, it should call
 C<Mail::SpamAssassin::Plugin::dbg($msg)>.
 
-=cut
+=item info($message)
 
-sub dbg { Mail::SpamAssassin::dbg (@_); }
+Output an informational message C<$message>, if the SpamAssassin object
+is running with informational messages turned on.
+
+I<NOTE:> This function is not available in the package namespace
+of general plugins and can't be called via $self->dbg().  If a
+plugin wishes to output debug information, it should call
+C<Mail::SpamAssassin::Plugin::dbg($msg)>.
+
+=cut
 
 1;
 

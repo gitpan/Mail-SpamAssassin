@@ -1,5 +1,3 @@
-# $Id: Received.pm,v 1.40 2003/12/17 07:08:44 jmason Exp $
-
 # <@LICENSE>
 # Copyright 2004 Apache Software Foundation
 # 
@@ -43,19 +41,13 @@ package Mail::SpamAssassin::Message::Metadata::Received;
 
 package Mail::SpamAssassin::Message::Metadata;
 use strict;
+use warnings;
 use bytes;
 
 use Mail::SpamAssassin::Dns;
 use Mail::SpamAssassin::PerMsgStatus;
 use Mail::SpamAssassin::Util::RegistrarBoundaries;
 use Mail::SpamAssassin::Constants qw(:ip);
-
-use vars qw{
-};
-
-# Should trust be computed based on the MX records of hostnames used in
-# HELO?  Disabled; too slow.
-use constant SLOW_TRUST_BASED_ON_HELO_MXES => 0;
 
 # ---------------------------------------------------------------------------
 
@@ -65,15 +57,8 @@ sub parse_received_headers {
   # argh.  this is only used to perform DNS lookups.
   # TODO! we need to get Dns.pm code into a class that is NOT
   # part of Mail::SpamAssassin::PerMsgStatus to avoid this crap!
-  $self->{dns_pms} = Mail::SpamAssassin::PerMsgStatus->new($main, $msg);
-
-  $self->{relays} = [ ];
-
-  my @hdrs = $msg->get_header('Received');
-  foreach my $line (@hdrs) {
-    $line =~ s/\n[ \t]+/ /gs;
-    $self->parse_received_line ($line);
-  }
+  $self->{dns_pms} = $main->{parser_dns_pms};
+  $self->{is_dns_available} = $self->{dns_pms}->is_dns_available();
 
   $self->{relays_trusted} = [ ];
   $self->{num_relays_trusted} = 0;
@@ -83,12 +68,19 @@ sub parse_received_headers {
   $self->{num_relays_untrusted} = 0;
   $self->{relays_untrusted_str} = '';
 
+  $self->{relays_internal} = [ ];
+  $self->{num_relays_internal} = 0;
+  $self->{relays_internal_str} = '';
+
+  $self->{relays_external} = [ ];
+  $self->{num_relays_external} = 0;
+  $self->{relays_external_str} = '';
+
   $self->{num_relays_unparseable} = 0;
 
   # now figure out what relays are trusted...
   my $trusted = $main->{conf}->{trusted_networks};
   my $internal = $main->{conf}->{internal_networks};
-  my $relay;
   my $first_by;
   my $in_trusted = 1;
   my $in_internal = 1;
@@ -107,11 +99,33 @@ sub parse_received_headers {
   my $did_user_specify_trust = ($trusted->get_num_nets() > 0);
   my $did_user_specify_internal = ($internal->get_num_nets() > 0);
 
-  my $IP_IN_RESERVED_RANGE = IP_IN_RESERVED_RANGE;
+  my $IP_PRIVATE = IP_PRIVATE;
   my $LOCALHOST = LOCALHOST;
 
-  while (defined ($relay = shift @{$self->{relays}}))
-  {
+  foreach my $line ( $msg->get_header('Received') ) {
+
+    # qmail-scanner support hack: we may have had one of these set from the
+    # previous (read: more recent) Received header.   if so, add it on to this
+    # header's set, since that's the handover it was describing.
+
+    my $qms_env_from;
+    if ($self->{qmail_scanner_env_from}) {
+      $qms_env_from = $self->{qmail_scanner_env_from};
+      delete $self->{qmail_scanner_env_from};
+    }
+
+    $line =~ s/\n[ \t]+/ /gs;
+    my $relay = $self->parse_received_line ($line);
+
+    next unless $relay;
+
+    # hack for qmail-scanner, as described above; add in the saved
+    # metadata
+    if ($qms_env_from) {
+      $relay->{envfrom} = $qms_env_from;
+      $self->make_relay_as_string($relay);
+    }
+
     # trusted_networks matches?
     if ($in_trusted && $did_user_specify_trust && !$relay->{auth} && !$trusted->contains_ip ($relay->{ip}))
     {
@@ -127,6 +141,12 @@ sub parse_received_headers {
       # if the user didn't specify it, assume we immediately transition
       # to the external network (the internet) once we leave this host.
       $in_internal = 0;
+    }
+
+    # note: you can't be in internal networks, but not be in a trusted 
+    # net. (bug 4760)
+    if ($in_internal && !$in_trusted) {
+      $in_trusted = 1;
     }
 
 # OK, infer the trusted/untrusted handover, if we don't have real info.
@@ -163,22 +183,29 @@ sub parse_received_headers {
       # do we know what the IP addresses of the "by" host in the first
       # header is?  If not, set them from this header, since it's the
       # first one.  NOTE: this is a ref to an array, NOT a string.
-      if (!defined $first_by && $self->{dns_pms}->is_dns_available()) {
+      if (!defined $first_by && $self->{is_dns_available}) {
 	$first_by = [ $self->lookup_all_ips ($relay->{by}) ];
       }
 
       # if the 'from' IP addr is in a reserved net range, it's not on
       # the public internet.
-      if ($relay->{ip_is_reserved}) {
-	dbg ("received-header: 'from' ".$relay->{ip}." has reserved IP");
+      if ($relay->{ip_private}) {
+	dbg("received-header: 'from' ".$relay->{ip}." has private IP");
+	$inferred_as_trusted = 1;
+      }
+
+      # if we find authentication tokens in the received header we can extend
+      # the trust boundary to that host
+      if ($relay->{auth}) {
+	dbg("received-header: authentication method ".$relay->{auth});
 	$inferred_as_trusted = 1;
       }
 
       # can we use DNS?  If not, we cannot use this algorithm, as we
       # cannot lookup hostnames. :(
       # Consider the first relay trusted, and all others untrusted.
-      if (!$self->{dns_pms}->is_dns_available()) {
-	dbg ("received-header: cannot use DNS, do not trust any hosts from here on");
+      if (!$self->{is_dns_available}) {
+	dbg("received-header: cannot use DNS, do not trust any hosts from here on");
       }
 
       # if the 'from' IP addr shares the same class B mask (/16) as
@@ -187,7 +214,7 @@ sub parse_received_headers {
       elsif (Mail::SpamAssassin::Util::ips_match_in_16_mask
 					([ $relay->{ip} ], $first_by))
       {
-	dbg ("received-header: 'from' ".$relay->{ip}." is near to first 'by'");
+	dbg("received-header: 'from' ".$relay->{ip}." is near to first 'by'");
 	$inferred_as_trusted = 1;
       }
 
@@ -211,39 +238,25 @@ sub parse_received_headers {
 	foreach my $ip (@ips) {
 	  next if ($ip =~ /^${LOCALHOST}$/o);
 
-	  if ($ip !~ /${IP_IN_RESERVED_RANGE}/o) {
-	    dbg ("received-header: 'by' ".$relay->{by}." has public IP $ip");
+	  if ($ip !~ /${IP_PRIVATE}/o) {
+	    dbg("received-header: 'by' ".$relay->{by}." has public IP $ip");
 	    $found_non_rsvd = 1;
 	  } else {
-	    dbg ("received-header: 'by' ".$relay->{by}." has reserved IP $ip");
+	    dbg("received-header: 'by' ".$relay->{by}." has private IP $ip");
 	    $found_rsvd = 1;
 	  }
 	}
 
 	if ($found_rsvd && !$found_non_rsvd) {
-	  dbg ("received-header: 'by' ".$relay->{by}." has no public IPs");
+	  dbg("received-header: 'by' ".$relay->{by}." has no public IPs");
 	  $inferred_as_trusted = 1;
-	}
-      }
-
-      # if the IP address used is close to an MX for the hostname used in
-      # the HELO, then it's likely to be incoming traffic.  Trust it.
-      # (TODO: not 100% sure about this yet)
-      # Disabled: way too slow.  Seems to be 3 times slower with this on!
-
-      if (!$inferred_as_trusted) {
-	if (SLOW_TRUST_BASED_ON_HELO_MXES) {
-	  if ($self->mx_of_helo_near_ip ($relay->{helo}, $relay->{ip})) {
-	    dbg ("received-header: helo $relay->{helo} is near $relay->{ip}");
-	    $inferred_as_trusted = 1;
-	  }
 	}
       }
 
       if (!$inferred_as_trusted) { $in_trusted = 0; }
     }
 
-    dbg ("received-header: relay ".$relay->{ip}.
+    dbg("received-header: relay ".$relay->{ip}.
 	" trusted? ".($in_trusted ? "yes" : "no").
 	" internal? ".($in_internal ? "yes" : "no"));
 
@@ -258,20 +271,30 @@ sub parse_received_headers {
 
     if ($in_trusted) {
       push (@{$self->{relays_trusted}}, $relay);
-      $self->{relays_trusted_str} .= $relay->{as_string}." ";
+      $self->{allow_fetchmail_markers} = 1;
     } else {
       push (@{$self->{relays_untrusted}}, $relay);
-      $self->{relays_untrusted_str} .= $relay->{as_string}." ";
+      $self->{allow_fetchmail_markers} = 0;
+    }
+
+    if ($in_internal) {
+      push (@{$self->{relays_internal}}, $relay);
+    } else {
+      push (@{$self->{relays_external}}, $relay);
     }
   }
-  delete $self->{relays};		# tmp, no longer needed
+
+  $self->{relays_trusted_str} = join(' ', map { $_->{as_string} }
+                    @{$self->{relays_trusted}});
+  $self->{relays_untrusted_str} = join(' ', map { $_->{as_string} }
+                    @{$self->{relays_untrusted}});
+  $self->{relays_internal_str} = join(' ', map { $_->{as_string} }
+                    @{$self->{relays_internal}});
+  $self->{relays_external_str} = join(' ', map { $_->{as_string} }
+                    @{$self->{relays_external}});
 
   # drop the temp PerMsgStatus object
-  $self->{dns_pms}->finish();
   delete $self->{dns_pms};
-
-  chop ($self->{relays_trusted_str});	# remove trailing ws
-  chop ($self->{relays_untrusted_str});	# remove trailing ws
 
   # OK, we've now split the relay list into trusted and untrusted.
 
@@ -283,28 +306,38 @@ sub parse_received_headers {
   if ($self->{msg}->can ("delete_header")) {
     $self->{msg}->delete_header ("X-Spam-Relays-Trusted");
     $self->{msg}->delete_header ("X-Spam-Relays-Untrusted");
+    $self->{msg}->delete_header ("X-Spam-Relays-Internal");
+    $self->{msg}->delete_header ("X-Spam-Relays-External");
  
     if ($self->{msg}->can ("put_metadata")) {
       $self->{msg}->put_metadata ("X-Spam-Relays-Trusted",
 			$self->{relays_trusted_str});
       $self->{msg}->put_metadata ("X-Spam-Relays-Untrusted",
 			$self->{relays_untrusted_str});
+      $self->{msg}->put_metadata ("X-Spam-Relays-Internal",
+			$self->{relays_internal_str});
+      $self->{msg}->put_metadata ("X-Spam-Relays-External",
+			$self->{relays_external_str});
     }
   }
 
   # be helpful; save some cumbersome typing
   $self->{num_relays_trusted} = scalar (@{$self->{relays_trusted}});
   $self->{num_relays_untrusted} = scalar (@{$self->{relays_untrusted}});
+  $self->{num_relays_internal} = scalar (@{$self->{relays_internal}});
+  $self->{num_relays_external} = scalar (@{$self->{relays_external}});
 
-  dbg ("metadata: X-Spam-Relays-Trusted: ".$self->{relays_trusted_str});
-  dbg ("metadata: X-Spam-Relays-Untrusted: ".$self->{relays_untrusted_str});
+  dbg("metadata: X-Spam-Relays-Trusted: ".$self->{relays_trusted_str});
+  dbg("metadata: X-Spam-Relays-Untrusted: ".$self->{relays_untrusted_str});
+  dbg("metadata: X-Spam-Relays-Internal: ".$self->{relays_internal_str});
+  dbg("metadata: X-Spam-Relays-External: ".$self->{relays_external_str});
 }
 
 sub lookup_all_ips {
   my ($self, $hostname) = @_;
 
   # cannot use gethostbyname without DNS :(
-  if (!$self->{dns_pms}->is_dns_available()) {
+  if (!$self->{is_dns_available}) {
     return ();
   }
   
@@ -327,33 +360,6 @@ sub lookup_all_ips {
   return @ips;
 }
 
-sub mx_of_helo_near_ip {
-  my ($self, $helo, $ip) = @_;
-
-  my $helodom = $helo;
-
-  # TODO: should we just traverse down the chain instead of this;
-  # e.g. "foo.bar.baz.co.uk" would be "bar.baz.co.uk", "baz.co.uk",
-  # instead of just "baz.co.uk" straight away?
-  
-  if ($helo !~ /^\d+\.\d+\.\d+\.\d+$/) {
-    $helodom = Mail::SpamAssassin::Util::RegistrarBoundaries::trim_domain ($helo);
-  }
-
-  my $mxes = $self->lookup_mx ($helodom);
-  my @mxips = ();
-  foreach my $mx (@$mxes) {
-    push (@mxips, $self->lookup_all_ips ($mx));
-  }
-  if ($mxes && Mail::SpamAssassin::Util::ips_match_in_24_mask ([ $ip ], [ @mxips ]))
-  {
-    dbg ("IP address $ip is near to an MX (".join (', ', @mxips).
-					") for ".$helodom);
-    return 1;
-  }
-  return 0;
-}
-
 # ---------------------------------------------------------------------------
 
 sub parse_received_line {
@@ -370,7 +376,7 @@ sub parse_received_line {
   my $envfrom = '';
   my $mta_looked_up_dns = 0;
   my $IP_ADDRESS = IP_ADDRESS;
-  my $IP_IN_RESERVED_RANGE = IP_IN_RESERVED_RANGE;
+  my $IP_PRIVATE = IP_PRIVATE;
   my $LOCALHOST = LOCALHOST;
   my $auth = '';
 
@@ -391,19 +397,25 @@ sub parse_received_line {
   }
 
   # try to catch authenticated message identifier
-  # the first one works for Sendmail, MDaemon, some webmail servers, and others
-  # the second one works for Critical Path Messaging Server
+  #
   # with ESMTPA, ESMTPSA, LMTPA, LMTPSA should cover RFC 3848 compliant MTAs
   # with ASMTP (Authenticated SMTP) is used by Earthlink, Exim 4.34, and others
   # with HTTP should only be authenticated webmail sessions
-  if (/^from .*?(?:\]\)|\)\]) .*?\(.*?authenticated.*?\).*? by/) {
-    $auth = 'Sendmail';
-  } elsif (/\) by .+ \(\d{1,2}\.\d\.\d{3}(?:\.\d{1,3})?\) \(authenticated as .+\) id /) {
-    $auth = 'CriticalPath';
-  } elsif (/ by .*? with (ESMTPA|ESMTPSA|LMTPA|LMTPSA|ASMTP|HTTP)\;? /i) {
+  if (/ by .*? with (ESMTPA|ESMTPSA|LMTPA|LMTPSA|ASMTP|HTTP)\;? /i) {
     $auth = $1;
   }
-
+  # Courier v0.47 and possibly others
+  elsif (/^from .*?(?:\]\)|\)\])\s+\(AUTH: (LOGIN|PLAIN|DIGEST-MD5|CRAM-MD5) \S+(?:, .*?)?\)\s+by\s+/) {
+    $auth = $1;
+  }
+  # Sendmail, MDaemon, some webmail servers, and others
+  elsif (/^from .*?(?:\]\)|\)\]) .*?\(.*?authenticated.*?\).*? by/) {
+    $auth = 'Sendmail';
+  }
+  # Critical Path Messaging Server
+  elsif (/\) by .+ \(\d{1,2}\.\d\.\d{3}(?:\.\d{1,3})?\) \(authenticated as .+\) id /) {
+    $auth = 'CriticalPath';
+  }
 
   if (/^from /) {
     # try to catch enveloper senders
@@ -415,20 +427,8 @@ sub parse_received_line {
     # from 142.169.110.122 (SquirrelMail authenticated user synapse) by
     # mail.nomis80.org with HTTP; Sat, 3 Apr 2004 10:33:43 -0500 (EST)
     if (/ \(SquirrelMail authenticated user /) {
-      dbg ("received-header: ignored SquirrelMail injection: $_");
+      dbg("received-header: ignored SquirrelMail injection: $_");
       return;
-    }
-
-    if (/\[XMail /) { # bug 3791
-      # Received: from list.brainbuzz.com (63.146.189.86:23198) by mx1.yourtech.net with [XMail 1.20 ESMTP Server] id <S72E> for <jason@ellingson.org> from <bounce-cscommunity-11965901@list.cramsession.com>; Sat, 18 Sep 2004 23:17:54 -0500
-      # Received: from list.brainbuzz.com (63.146.189.86:23198) by mx1.yourtech.net (209.32.147.34:25) with [XMail 1.20 ESMTP Server] id <S72E> for <jason@ellingson.org> from <bounce-cscommunity-11965901@list.cramsession.com>; Sat, 18 Sep 2004 23:17:54 -0500
-      if (/^from (\S+) \((\[?${IP_ADDRESS}\]?)(?::\d+)?\) by (\S+)(?: \(\S+\)|) with \[XMail/)
-      {
-	$helo = $1; $ip = $2; $by = $3;
-        / id <(\S+)> / and $id = $1;
-        / from <(\S+)>; / and $envfrom = $1;
-        goto enough;
-      }
     }
 
     # catch MS-ish headers here
@@ -455,9 +455,22 @@ sub parse_received_line {
       }
     }
 
+    if (/\[XMail /) { # bug 3791, bug 4053
+      # Received: from list.brainbuzz.com (63.146.189.86:23198) by mx1.yourtech.net with [XMail 1.20 ESMTP Server] id <S72E> for <jason@ellingson.org.spamassassin.org> from <bounce-cscommunity-11965901@list.cramsession.com.spamassassin.org>; Sat, 18 Sep 2004 23:17:54 -0500
+      # Received: from list.brainbuzz.com (63.146.189.86:23198) by mx1.yourtech.net (209.32.147.34:25) with [XMail 1.20 ESMTP Server] id <S72E> for <jason@ellingson.org.spamassassin.org> from <bounce-cscommunity-11965901@list.cramsession.com.spamassassin.org>; Sat, 18 Sep 2004 23:17:54 -0500
+      if (/^from (\S+) \((\[?${IP_ADDRESS}\]?)(?::\d+|)\) by (\S+)(?: \(\S+\)|) with \[XMail/)
+      {
+	$helo = $1; $ip = $2; $by = $3;
+        / id <(\S+)> / and $id = $1;
+        / from <(\S+)>; / and $envfrom = $1;
+        goto enough;
+      }
+    }
+
     if (/Exim/) {
       # one of the HUGE number of Exim formats :(
       # This must be scriptable.  (update: it is. cf bug 3950, 3582)
+      # mss 2004-09-27: See <http://www.exim.org/exim-html-4.40/doc/html/spec_14.html#IX1315>
 
       # Received: from [61.174.163.26] (helo=host) by sc8-sf-list1.sourceforge.net with smtp (Exim 3.31-VA-mm2 #1 (Debian)) id 18t2z0-0001NX-00 for <razor-users@lists.sourceforge.net>; Wed, 12 Mar 2003 01:57:10 -0800
       # Received: from [218.19.142.229] (helo=hotmail.com ident=yiuhyotp) by yzordderrex with smtp (Exim 3.35 #1 (Debian)) id 194BE5-0005Zh-00; Sat, 12 Apr 2003 03:58:53 +0100
@@ -471,23 +484,14 @@ sub parse_received_line {
       # Received: from sc8-sf-list1-b.sourceforge.net ([10.3.1.13] helo=sc8-sf-list1.sourceforge.net) by sc8-sf-list2.sourceforge.net with esmtp (Exim 3.31-VA-mm2 #1 (Debian)) id 18t301-0007Bh-00; Wed, 12 Mar 2003 01:58:13 -0800
       # Received: from dsl092-072-213.bos1.dsl.speakeasy.net ([66.92.72.213] helo=blazing.arsecandle.org) by sc8-sf-list1.sourceforge.net with esmtp (Cipher TLSv1:DES-CBC3-SHA:168) (Exim 3.31-VA-mm2 #1 (Debian)) id 18lyuU-0007TI-00 for <SpamAssassin-talk@lists.sourceforge.net>; Thu, 20 Feb 2003 14:11:18 -0800
       # Received: from eclectic.kluge.net ([66.92.69.221] ident=[W9VcNxE2vKxgWHD05PJbLzIHSxcmZQ/O]) by sc8-sf-list1.sourceforge.net with esmtp (Cipher TLSv1:DES-CBC3-SHA:168) (Exim 3.31-VA-mm2 #1 (Debian)) id 18m0hT-00031I-00 for <spamassassin-talk@lists.sourceforge.net>; Thu, 20 Feb 2003 16:06:00 -0800
-      if (/^from (\S+) \(\[(${IP_ADDRESS})\](:\d+)? helo=(\S+) ident=(\S*)\) by (\S+) /) {
-	$rdns=$1; $ip = $2; $helo = $4; $ident = $5; $by = $6; goto enough;
-      }
-      # (and without ident)
-      if (/^from (\S+) \(\[(${IP_ADDRESS})\](:\d+)? helo=(\S+)\) by (\S+) /) {
-	$rdns=$1; $ip = $2; $helo = $4; $by = $5; goto enough;
-      }
-
       # Received: from mail.ssccbelen.edu.pe ([216.244.149.154]) by yzordderrex
       # with esmtp (Exim 3.35 #1 (Debian)) id 18tqiz-000702-00 for
       # <jm@example.com>; Fri, 14 Mar 2003 15:03:57 +0000
-      if (/^from (\S+) \(\[(${IP_ADDRESS})\](:\d+)?\) by (\S+) /) {
-	# speculation: Exim uses this format when rdns==helo. TODO: verify fully
-	$rdns= $1; $ip = $2; $helo = $1; $by = $4; goto enough;
-      }
-      if (/^from (\S+) \(\[(${IP_ADDRESS})\](:\d+)? ident=(\S+)\) by (\S+) /) {
-	$rdns= $1; $ip = $2; $helo = $1; $ident = $4; $by = $5; goto enough;
+      if (/^from (\S+) \(\[(${IP_ADDRESS})\](.*?)\) by (\S+) /) {
+        $rdns=$1; $ip = $2; my $sub = $3; $by = $4;
+        $sub =~ s/helo=(\S+)// and $helo = $1;
+        $sub =~ s/ident=(\S*)// and $ident = $1;
+        goto enough;
       }
 
       # Received: from boggle.ihug.co.nz [203.109.252.209] by grunt6.ihug.co.nz
@@ -663,8 +667,10 @@ sub parse_received_line {
     # Some others of the numerous qmail patches out there can also add variants of their own
     #
     # Received: from 211.245.85.228  (EHLO ) (211.245.85.228) by mta232.mail.scd.yahoo.com with SMTP; Sun, 25 Jan 2004 00:24:37 -0800
-    if (/^from \S+( \((?:HELO|EHLO) \S*\))? \((\S+\@)?\[?${IP_ADDRESS}\]?\)( \(envelope-sender <\S+>\))? by \S+( \(.+\))* with (.* )?(SMTP|QMQP)/) {
-
+    #
+    # bug 4813: make sure that the line doesn't have " id " after the
+    # protocol since that's a sendmail line and not qmail ...
+    if (/^from \S+( \((?:HELO|EHLO) \S*\))? \((\S+\@)?\[?${IP_ADDRESS}\]?\)( \(envelope-sender <\S+>\))? by \S+( \(.+\))* with (.* )?(SMTP|QMQP)(?! id )/ ) {
        if (/^from (\S+) \((?:HELO|EHLO) ([^ \(\)]*)\) \((\S*)\@\[?(${IP_ADDRESS})\]?\)( \(envelope-sender <\S+>\))? by (\S+)/) {
          $rdns = $1; $helo = $2; $ident = $3; $ip = $4; $by = $6;
        }
@@ -762,7 +768,7 @@ sub parse_received_line {
     # Received: from cabbage.jmason.org [127.0.0.1]
     # by localhost with IMAP (fetchmail-5.9.0)
     # for jm@localhost (single-drop); Thu, 13 Mar 2003 20:39:56 -0800 (PST)
-    if (/^from (\S+) \[(${IP_ADDRESS})\] by (\S+) with \S+ \(fetchmail/) {
+    if (/^from (\S+) (?:\[(${IP_ADDRESS})\] )?by (\S+) with \S+ \(fetchmail/) {
       $self->found_pop_fetcher_sig();
       return;		# skip fetchmail handovers
     }
@@ -883,13 +889,13 @@ sub parse_received_line {
 
     # Received: from ironport.com (10.1.1.5) by a50.ironport.com with ESMTP; 01 Apr 2003 12:00:51 -0800
     # Received: from dyn-81-166-39-132.ppp.tiscali.fr (81.166.39.132) by cpmail.dk.tiscali.com (6.7.018)
-    # note: must be before 'Content Technologies SMTPRS' rule, cf. bug 2787
     if (/^from ([^\d]\S+) \((${IP_ADDRESS})\) by (\S+) /) {
       $helo = $1; $ip = $2; $by = $3; goto enough;
     }
 
     # Received: from scv3.apple.com (scv3.apple.com) by mailgate2.apple.com (Content Technologies SMTPRS 4.2.1) with ESMTP id <T61095998e1118164e13f8@mailgate2.apple.com>; Mon, 17 Mar 2003 17:04:54 -0800
-    if (/^from (\S+) \((\S+)\) by (\S+) \(/) {
+    # bug 4704: Only let this match Content Technologies so it stops breaking things that come after it by matching first
+    if (/^from (\S+) \((\S+)\) by (\S+) \(Content Technologies /) {
       return;		# useless without the $ip anyway!
       #$helo = $1; $rdns = $2; $by = $3; goto enough;
     }
@@ -957,14 +963,50 @@ sub parse_received_line {
     }
 
     # Received: from [212.87.144.30] (account seiz [212.87.144.30] verified) by x.imd.net (CommuniGate Pro SMTP 4.0.3) with ESMTP-TLS id 5026665 for spamassassin-talk@lists.sourceforge.net; Wed, 15 Jan 2003 16:27:05 +0100
-    if (/^from \[(${IP_ADDRESS})\] \([^\)]+\) by (\S+) /) {
-      $ip = $1; $by = $2; goto enough;
+    # bug 4704 This pattern was checked as just an Exim format, but it does exist elsewhere
+    # Received: from [206.51.230.145] (helo=t-online.de)
+    #   by mxeu2.kundenserver.de with ESMTP (Nemesis),
+    #  id 0MKpdM-1CkRpr14PF-000608; Fri, 31 Dec 2004 19:49:15 +0100
+    # Received: from [218.19.142.229] (helo=hotmail.com ident=yiuhyotp)
+    #   by yzordderrex with smtp (Exim 3.35 #1 (Debian)) id 194BE5-0005Zh-00; Sat, 12 Apr 2003 03:58:53 +0100
+    if (/^from \[(${IP_ADDRESS})\] \(([^\)]+)\) by (\S+) /) {
+      $ip = $1; my $sub = $2; $by = $3;
+      $sub =~ s/helo=(\S+)// and $helo = $1;
+      $sub =~ s/ident=(\S*)// and $ident = $1;
+      goto enough;
     }
 
     # Received: from mtsbp606.email-info.net (?dXqpg3b0hiH9faI2OxLT94P/YKDD3rQ1?@64.253.199.166) by kde.informatik.uni-kl.de with SMTP; 30 Apr 2003 15:06:29
     if (/^from (\S+) \((?:\S+\@)?(${IP_ADDRESS})\) by (\S+) with /) {
       $rdns = $1; $ip = $2; $by = $3; goto enough;
     }
+
+    # Obtuse smtpd: http://www.obtuse.com/
+    # Received: from TCE-E-7-182-54.bta.net.cn(202.106.182.54) via SMTP
+    #  by st.tahina.priv.at, id smtpdEDUB8h; Sun Nov 13 14:50:12 2005
+    # Received: from pl027.nas934.d-osaka.nttpc.ne.jp(61.197.82.27), claiming to be "foo.woas.net" via SMTP
+    #  by st.tahina.priv.at, id smtpd1PBsZT; Sun Nov 13 15:38:52 2005
+    if (/^from (\S+)\((${IP_ADDRESS})\)(?:, claiming to be "(\S+)")? via \S+ by (\S+),/) {
+      $rdns = $1; $ip = $2; $helo = (defined $3) ? $3 : ''; $by = $4;
+      if ($1 ne 'UNKNOWN') {
+	$mta_looked_up_dns = 1;
+	$rdns = $1;
+      }
+      goto enough;
+    }
+  }
+
+  # simta: http://rsug.itd.umich.edu/software/simta/
+  # Note the ugly uppercase FROM/BY/ID
+  # Received: FROM hackers.mr.itd.umich.edu (smtp.mail.umich.edu [141.211.14.81])
+  #  BY madman.mr.itd.umich.edu ID 434B508E.174A6.13932 ; 11 Oct 2005 01:41:34 -0400
+  # Received: FROM [192.168.1.24] (s233-64-90-216.try.wideopenwest.com [64.233.216.90])
+  #  BY hackers.mr.itd.umich.edu ID 434B5051.8CDE5.15436 ; 11 Oct 2005 01:40:33 -0400
+  if (/^FROM (\S+) \((\S+) \[(${IP_ADDRESS})\]\) BY (\S+) (?:ID (\S+) )?/ ) {
+      $mta_looked_up_dns = 1;
+      $helo = $1; $rdns = $2; $ip = $3; $by = $4;
+      $id = $5 if (defined $5);
+      goto enough;
   }
 
   # ------------------------------------------------------------------------
@@ -980,10 +1022,19 @@ sub parse_received_line {
   if (/^by /) { return; }
 
   # Received: from raptor.research.att.com (bala@localhost) by
-  # raptor.research.att.com (SGI-8.9.3/8.8.7) with ESMTP id KAA14788
+  # raptor.research.att.com (SGI-8.9.3/8.8.7) with ESMTP id KAA14788 
   # for <asrg@example.com>; Fri, 7 Mar 2003 10:37:56 -0500 (EST)
   # make this localhost-specific, so we know it's safe to ignore
   if (/^from \S+ \(\S+\@${LOCALHOST}\) by \S+ \(/) { return; }
+
+  # from paul (helo=felix) by felix.peema.org with local-esmtp (Exim 4.43)
+  # id 1Ccq0j-0002k2-Lk; Fri, 10 Dec 2004 19:01:01 +0000
+  # Exim doco says this is local submission, cf switch -oMr
+  if (/^from \S+ \S+ by \S+ with local-e?smtp /) { return; }
+
+  # from 127.0.0.1 (AVG SMTP 7.0.299 [265.6.8]); Wed, 05 Jan 2005 15:06:48
+  # -0800
+  if (/^from 127\.0\.0\.1 \(AVG SMTP \S+ \[\S+\]\); /) { return; }
 
   # from qmail-scanner-general-admin@lists.sourceforge.net by alpha by uid 7791 with qmail-scanner-1.14 (spamassassin: 2.41. Clear:SA:0(-4.1/5.0):. Processed in 0.209512 secs)
   if (/^from \S+\@\S+ by \S+ by uid \S+ /) { return; }
@@ -1010,14 +1061,44 @@ sub parse_received_line {
   # Received: from (AUTH: e40a9cea) by vqx.net with esmtp (courier-0.40) for <asrg@ietf.org>; Mon, 03 Mar 2003 14:49:28 +0000
   if (/^from \(AUTH: (\S+)\) by (\S+) with /) { return; }
 
+  # from localhost (localhost [[UNIX: localhost]]) by home.barryodonovan.com
+  # (8.12.11/8.12.11/Submit) id iBADHRP6011034; Fri, 10 Dec 2004 13:17:27 GMT
+  if (/^from localhost \(localhost \[\[UNIX: localhost\]\]\) by /) { return; }
+
   # Received: Message by Barricade wilhelm.eyp.ee with ESMTP id h1I7hGU06122 for <spamassassin-talk@lists.sourceforge.net>; Tue, 18 Feb 2003 09:43:16 +0200
   if (/^Message by /) {
-    return;    # whatever
+    return;	# whatever
   }
 
   # Received: FROM ca-ex-bridge1.nai.com BY scwsout1.nai.com ;
   # Fri Feb 07 10:18:12 2003 -0800
   if (/^FROM \S+ BY \S+ \; /) { return; }
+
+  # Internal Amazon traffic
+  # Received: from dc-mail-3102.iad3.amazon.com by mail-store-2001.amazon.com with ESMTP (peer crosscheck: dc-mail-3102.iad3.amazon.com)
+  if (/^from \S+\.amazon\.com by \S+\.amazon\.com with ESMTP \(peer crosscheck: /) { return; }
+
+  # Received: from GWGC6-MTA by gc6.jefferson.co.us with Novell_GroupWise; Tue, 30 Nov 2004 10:09:15 -0700
+  if (/^from [^\.]+ by \S+ with Novell_GroupWise; /) { return; }
+
+  # Received: from no.name.available by [165.224.43.143] via smtpd (for [165.224.216.89]) with ESMTP; Fri, 28 Jan 2005 13:06:39 -0500
+  # Received: from no.name.available by [165.224.216.88] via smtpd (for lists.sourceforge.net [66.35.250.206]) with ESMTP; Fri, 28 Jan 2005 15:42:30 -0500
+  # These are from an internal host protected by a Raptor firewall, to hosts
+  # outside the firewall.  We can only ignore the handover since we don't have
+  # enough info in those headers; however, from googling, it appears that
+  # all samples are cases where the handover is safely ignored.
+  if (/^from no\.name\.available by \S+ via smtpd \(for /) { return; }
+
+  # from 156.56.111.196 by blazing.arsecandle.org (envelope-from <gentoo-announce-return-530-rod=arsecandle.org@lists.gentoo.org>, uid 502) with qmail-scanner-1.24 (clamdscan: 0.80/594. f-prot: 4.4.2/3.14.11. Clear:RC:0(156.56.111.196):. Processed in 0.288806 secs); 06 Feb 2005 21:11:38 -0000
+  # these are safe to ignore.  the previous handover line has the full
+  # details of the handover described here, it's just qmail-scanner
+  # logging a little more.
+  if (/^from \S+ by \S+ \(.{0,100}\) with qmail-scanner/) {
+    $envfrom =~ s/^\s*<*//gs; $envfrom =~ s/>*\s*$//gs;
+    $envfrom =~ s/[\s\0\#\[\]\(\)\<\>\|]/!/gs;
+    $self->{qmail_scanner_env_from} = $envfrom; # hack!
+    return;
+  }
 
   # ------------------------------------------------------------------------
   # HANDOVERS WE KNOW WE CAN'T DEAL WITH: TCP transmission, but to MTAs that
@@ -1030,10 +1111,10 @@ sub parse_received_line {
   # Received: from MATT_LINUX by hippo.star.co.uk via smtpd (for mail.webnote.net [193.120.211.219]) with SMTP; 3 Jul 2002 15:43:50 UT
   # Received: from cp-its-ieg01.mail.saic.com by cpmx.mail.saic.com for me@jmason.org; Tue, 23 Jul 2002 14:09:10 -0700
   if (/^from \S+ by \S+ (?:with|via|for|\()/) { goto unparseable; }
-
+  
   # Received: from virtual-access.org by bolero.conactive.com ; Thu, 20 Feb 2003 23:32:58 +0100
   if (/^from (\S+) by (\S+) *\;/) {
-    goto unparseable;  # can't trust this
+    goto unparseable;	# can't trust this
   }
 
   # ------------------------------------------------------------------------
@@ -1049,11 +1130,12 @@ sub parse_received_line {
   # returned due to it being a known-crap format, let's warn so the user can
   # file a bug report or something.
 
-  dbg ("received-header: unknown format: $_");
+  dbg("received-header: unknown format: $_");
   # and skip the line entirely!  We can't parse it...
 
 unparseable:
 
+  dbg("received-header: unparseable: $_");
   $self->{num_relays_unparseable}++;
   return;
 
@@ -1064,12 +1146,12 @@ enough:
 
   # flag handovers we couldn't get an IP address from at all
   if ($ip eq '') {
-    dbg ("received-header: could not parse IP address from: $_");
+    dbg("received-header: could not parse IP address from: $_");
   }
 
   $ip = Mail::SpamAssassin::Util::extract_ipv4_addr_from_string ($ip);
   if (!$ip) {
-    dbg ("received-header: could not parse IPv4 address, assuming IPv6");
+    dbg("received-header: could not parse IPv4 address, assuming IPv6");
     return;   # ignore IPv6 handovers
   }
 
@@ -1080,7 +1162,7 @@ enough:
   # for the addr.
   if (0) {
     if ($ip eq '127.0.0.1') {
-      dbg ("received-header: ignoring localhost handover");
+      dbg("received-header: ignoring localhost handover");
       return;   # ignore localhost handovers
     }
   }
@@ -1123,7 +1205,7 @@ enough:
   # here may be movable too; no need to lookup trusted IPs all the time.
   #
   if ($rdns eq '') {
-    if (!$self->{dns_pms}->is_dns_available()) {
+    if (!$self->{is_dns_available}) {
       if ($mta_looked_up_dns) {
 	# we know the MTA always does lookups, so this means the host
 	# really has no rDNS (rather than that the MTA didn't bother
@@ -1146,32 +1228,42 @@ enough:
   $relay->{rdns} = $rdns;
   $relay->{lc_rdns} = lc $rdns;
 
+  $self->make_relay_as_string($relay);
+
+  my $is_private = ($ip =~ /${IP_PRIVATE}/o);
+  $relay->{ip_private} = $is_private;
+
+  # add it to an internal array so Eval tests can use it
+  return $relay;
+}
+
+sub make_relay_as_string {
+  my ($self, $relay) = @_;
+
   # as-string rep. use spaces so things like Bayes can tokenize them easily.
   # NOTE: when tokenizing or matching, be sure to note that new
   # entries may be added to this string later.   However, the *order*
   # of entries must be preserved, so that regexps that assume that
   # e.g. "ip" comes before "helo" will still work.
   #
-  my $asstr = "[ ip=$ip rdns=$rdns helo=$helo by=$by ident=$ident envfrom=$envfrom intl=0 id=$id auth=$auth ]";
-  dbg ("received-header: parsed as $asstr");
+  my $asstr = "[ ip=$relay->{ip} rdns=$relay->{rdns} helo=$relay->{helo} by=$relay->{by} ident=$relay->{ident} envfrom=$relay->{envfrom} intl=0 id=$relay->{id} auth=$relay->{auth} ]";
+  dbg("received-header: parsed as $asstr");
   $relay->{as_string} = $asstr;
-
-  my $isrsvd = ($ip =~ /${IP_IN_RESERVED_RANGE}/o);
-  $relay->{ip_is_reserved} = $isrsvd;
-
-  # add it to an internal array so Eval tests can use it
-  push (@{$self->{relays}}, $relay);
 }
 
 # restart the parse if we find a fetchmail marker or similar.
 # spamcop does this, and it's a great idea ;)
 sub found_pop_fetcher_sig {
   my ($self) = @_;
-  dbg ("found fetchmail marker, restarting parse");
-  $self->{relays} = [ ];
+  if ($self->{allow_fetchmail_markers}) {
+    dbg("received-header: found fetchmail marker, restarting parse");
+    $self->{relays_trusted} = [ ];
+    $self->{relays_internal} = [ ];
+    $self->{relays_external} = [ ];
+  } else {
+    dbg("received-header: found fetchmail marker outside trusted area, ignored");
+  }
 }
-
-sub dbg { Mail::SpamAssassin::dbg(@_); }
 
 # ---------------------------------------------------------------------------
 

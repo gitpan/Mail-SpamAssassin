@@ -38,7 +38,7 @@ $diag .= "Default options:\n" . join('', map { "opt{$_} => " . ($opt{$_} || '<un
 ############# Nothing to edit below here #################
 ##########################################################
 
-my $VERSION = '$Id: sa-stats.pl 7043 2004-03-07 22:28:21Z duncf $';
+my $VERSION = '$Id: sa-stats.pl 178306 2005-05-24 22:45:55Z felicity $';
 my ($VER_NUM) = '$Revision: 6256 $' =~ m#\$Revision:\s+(\S+)#o;
 
 # internal modules (part of core perl distribution)

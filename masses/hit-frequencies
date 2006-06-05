@@ -16,18 +16,19 @@
 # limitations under the License.
 # </@LICENSE>
 
+use strict;
 use FindBin;
 use Getopt::Std;
-getopts("fm:M:X:l:L:pxhc:at:s:i");
+getopts("fm:M:X:l:L:pxhc:at:s:io");
 
 use vars qw {
   $opt_f $opt_m $opt_M $opt_X $opt_p $opt_x $opt_h $opt_l $opt_L $opt_c
-  $opt_a $opt_t $opt_s $opt_i $sorting
+  $opt_a $opt_t $opt_s $opt_i $sorting $opt_o 
 };
 
 sub usage {
   die "hit-frequencies [-c rules dir] [-f] [-m RE] [-M RE] [-X RE] [-l LC]
-                [-s SC] [-a] [-p] [-x] [-i] [spam log] [ham log]
+                [-s SC] [-a] [-p] [-x] [-i] [-o] [spam log] [ham log]
 
     -c p   use p as the rules directory
     -f     falses. count only false-negative or false-positive matches
@@ -42,6 +43,7 @@ sub usage {
     -x     extended output, with S/O ratio and scores
     -s SC  which scoreset to use
     -i     use IG (information gain) for ranking
+    -o     display hit overlaps against all other rules
 
     options -l and -L are mutually exclusive.
 
@@ -63,8 +65,15 @@ $opt_s = 0 if ( !defined $opt_s );
 
 my $cffile = $opt_c || "$FindBin::Bin/../rules";
 
+# "our" so that the require'd file can overwrite them
+our %rules = ();
+our %scores = ();
+
+my %soratio = ();
 my %freq_spam = ();
 my %freq_ham = ();
+my %hmap_spam = ();
+my %hmap_ham = ();
 my %freq = ();
 my $num_spam = 0;
 my $num_ham = 0;
@@ -80,13 +89,17 @@ foreach my $key (keys %rules) {
 
   if ( ($opt_L && !$rules{$key}->{lang}) ||
        ($rules{$key}->{lang} &&
-         (!$ok_lang || $rules{$key}->{lang} !~ /^$ok_lang/i)
+         (!$ok_lang || $rules{$key}->{lang} !~ /^$ok_lang/io)
      ) ) {
     delete $rules{$key} ; next;
   }
 
   $freq_spam{$key} = 0;
   $freq_ham{$key} = 0;
+  if ($opt_o) {
+    $hmap_spam{$key} = '';
+    $hmap_ham{$key} = '';
+  }
 }
 
 readlogs();
@@ -145,7 +158,8 @@ my %uranks;
 $freq{$_}++ for keys %freq_ham;
 $freq{$_}++ for keys %freq_spam;
 
-foreach my $test (keys %freq) {
+my $test;
+foreach $test (keys %freq) {
   next unless (exists $rules{$test});           # only valid tests
   next if (!$opt_a && $rules{$test}->{issubrule});
 
@@ -173,7 +187,7 @@ foreach my $test (keys %freq) {
     # come up with a ranking
     my $rank;
 
-    # New new system: from "Learning to Filter Unsolicited Commercial E-Mail",
+    # IG system: from "Learning to Filter Unsolicited Commercial E-Mail",
     # Ion Androutsopoulos et al: determine the information gain IG(X, C) of the
     # Boolean attributes (ie. the rules). Measures "the average reduction in
     # the entropy of C (classification) given the value of X (the rule)". Makes
@@ -221,7 +235,17 @@ foreach my $test (keys %freq) {
     $rank_lo = $rank if ($rank < $rank_lo);
   }
   else {
-    # basic wanted/unwanted ranking
+    # RANK: basic wanted/unwanted ranking
+    #
+    # The rank of each test based on two ranks: (1) the number of wanted
+    # hits and (2) the number of unwanted hits.  Each test is ranked
+    # positionally for both its wanted and unwanted hits (ties are
+    # allowed) and the two ranks are normalized to have the same range.
+    # Those two ranks are added together, producing a single RANK number
+    # that is then normalized to [0, 1].  The result is equivalent to:
+    #
+    # RANK(rule) = (percentile(wanted) + percentile(unwanted))/2
+    #
     $wanted{$test} = $isnice ? $fn : $fs;
     $unwanted{$test} = $isnice ? $fs : $fn;
     # count number of ranks of each type
@@ -245,7 +269,7 @@ if (! $opt_i) {
   }
 
   # second half of ranking is the unwanted rank
-  my $normalize = (scalar keys %wranks) / (scalar keys %uranks);
+  my $normalize = (scalar keys %wranks) / (scalar keys %uranks || 0.001);
   $position = 0;
   $last = undef;
   for my $test (@unwanted) {
@@ -260,7 +284,7 @@ if (! $opt_i) {
 {
   # now normalise the rankings to [0, 1]
   $rank_hi -= $rank_lo;
-  foreach $test (@tests) {
+  foreach my $test (@tests) {
     $ranking{$test} = $rank_hi == 0 ? 0.001 : ($ranking{$test} - $rank_lo) / ($rank_hi);
   }
 }
@@ -282,8 +306,11 @@ foreach $test (sort { $ranking{$b} <=> $ranking{$a} } @tests) {
   if (!$opt_a && !$opt_t && $rules{$test}->{tflags}) {
     # not net tests
     next if ($rules{$test}->{tflags} =~ /\bnet\b/ && ($opt_s % 2 == 0));
+
     # not userconf
-    next if ($rules{$test}->{tflags} =~ /\buserconf\b/);
+    # Jul 13 2005 jm: removed.  this blocks SPF_PASS from showing up!
+    # why should userconf rules not be visible in freqs output?
+    # next if ($rules{$test}->{tflags} =~ /\buserconf\b/);
   }
 
   # adjust based on corpora sizes (and cvt to % while we're at it)
@@ -305,14 +332,18 @@ foreach $test (sort { $ranking{$b} <=> $ranking{$a} } @tests) {
 
   if ($opt_p) {
     printf "%7.3f  %7.4f  %7.4f  %7.3f %6.2f  %6.2f  %s\n",
-  	$fa, $fs, $fn, $soratio, $ranking{$test}, $scores{$test}, $test;
+  	$fa, $fs, $fn, $soratio, $ranking{$test}, $scores{$test}||0, $test;
 
   } elsif ($opt_x) {
     printf "%7d  %7d  %7d  %7.3f %6.2f %6.2f  %s\n",
-  	$fa, $fs, $fn, $soratio, $ranking{$test}, $scores{$test}, $test;
+  	$fa, $fs, $fn, $soratio, $ranking{$test}, $scores{$test}||0, $test;
 
   } else {
     printf "%10d  %10d  %10d  %s\n", $fa, $fs, $fn, $test;
+  }
+
+  if ($opt_o) {
+    compute_overlaps_for_rule($test);
   }
 }
 exit;
@@ -321,7 +352,7 @@ exit;
 
 sub readlogs {
   my $spam = $ARGV[0] || "spam.log";
-  my $ham = $ARGV[1] || (-f "good.log" ? "good.log" : "ham.log");
+  my $ham = $ARGV[1] || "ham.log";
 
   foreach my $file ($spam, $ham) {
     open (IN, "<$file") || die "Could not open file '$file': $!";
@@ -330,36 +361,199 @@ sub readlogs {
     my $caught;
     my $rules;
 
-    while (<IN>) {
-      next unless (!$opt_M || /$opt_M/o);
-      next if ($opt_X && /$opt_X/o);
+    # this is very speed-sensitive code.  remove all possible
+    # conditionals using an eval('..').
+    my $evalstr = '
+      while (<IN>) {
+    ';
 
-      ($caught, undef, undef, $rules) = split;
-
-      next unless ($caught eq 'Y' || $caught eq '.') && $rules;
-      next if ($opt_f && !(($caught eq 'Y') xor $isspam));
-
-      if ($isspam) {
-	$num_spam++;
-	$freq_spam{$_}++ for split(/,/, $rules);
-      }
-      else {
-	$num_ham++;
-	$freq_ham{$_}++ for split(/,/, $rules);
-      }
+    if ($opt_M) {
+      $evalstr .= '
+        next unless /$opt_M/o;
+      ';
     }
+    if ($opt_X) {
+      $evalstr .= '
+        next if /$opt_X/o;
+      ';
+    }
+
+    # note: doing the match with a regexp shaves off no less than
+    # 7 opcodes. nice!
+    $evalstr .= '
+        ($caught, undef, undef, $rules) = split(\' \', $_, 5);
+        next unless ($caught =~ /^[Y\.]$/ && $rules);
+    ';
+
+    if ($opt_f) {
+      $evalstr .= '
+        next if (!(($caught eq "Y") xor $isspam));
+      ';
+    }
+
+    my $hmapstr = '';
+    if ($isspam) {
+      if ($opt_o) {
+        $hmapstr = '
+          if (!exists $hmap_spam{$r}) {
+            $hmap_spam{$r} = "";
+          }
+          vec ($hmap_spam{$r}, $num_spam, 1) = 1;
+        ';
+      }
+
+      $evalstr .= '
+        $num_spam++;
+        foreach my $r (split(/,/, $rules)) {
+          $freq_spam{$r}++;
+          '.$hmapstr.'
+        }
+      ';
+    } else {
+      if ($opt_o) {
+        $hmapstr = '
+          if (!exists $hmap_ham{$r}) {
+            $hmap_ham{$r} = "";
+          }
+          vec ($hmap_ham{$r}, $num_ham, 1) = 1;
+        ';
+      }
+
+      $evalstr .= '
+        $num_ham++;
+        foreach my $r (split(/,/, $rules)) {
+          $freq_ham{$r}++;
+          '.$hmapstr.'
+        }
+      ';
+    }
+    $evalstr .= '
+      }
+    ';
+
+    eval $evalstr;
+
+    if ($@) {
+      die $@;
+    }
+
     close IN;
   }
   # paranoia: remove zero length rules
-  undef $freq_spam{''};
-  undef $freq_ham{''};
+  delete $freq_spam{''};
+  delete $hmap_spam{''};
+  delete $freq_ham{''};
+  delete $hmap_ham{''};
+}
+
+sub compute_overlaps_for_rule {
+  my ($r1) = @_;
+
+  my %overlaps_spam = ();
+  foreach my $r2 (keys %hmap_spam) {
+    next if $r1 eq $r2;
+
+    my $ratio = _hmap_to_overlap_ratio ($r1, $r2,
+            $hmap_spam{$r1}, $hmap_spam{$r2}, $freq_spam{$r1}, $freq_spam{$r2});
+    
+    if (exists $overlaps_spam{$ratio}) {
+      $overlaps_spam{$ratio} .= " ".$r2;
+    } else {
+      $overlaps_spam{$ratio} = $r2;
+    }
+  }
+  my %overlaps_ham = ();
+  foreach my $r2 (keys %hmap_ham) {
+    next if $r1 eq $r2;
+
+    my $ratio = _hmap_to_overlap_ratio ($r1, $r2,
+            $hmap_ham{$r1}, $hmap_ham{$r2}, $freq_ham{$r1}, $freq_ham{$r2});
+    
+    if (exists $overlaps_ham{$ratio}) {
+      $overlaps_ham{$ratio} .= " ".$r2;
+    } else {
+      $overlaps_ham{$ratio} = $r2;
+    }
+  }
+
+  _print_overlap_ratios($r1, \%overlaps_spam, "spam");
+  _print_overlap_ratios($r1, \%overlaps_ham, " ham");
+}
+
+sub _print_overlap_ratios {
+  my ($r1, $hash, $type) = @_;
+
+  foreach my $full (sort { $b <=> $a } keys %$hash) {
+    my $ratio = $full * 100;
+
+    last if ($ratio < 30);     # 30% cutoff
+    my $rules = _prettify_overlap_rules($r1, $hash->{$full});
+    next if ($rules eq '');
+    printf "  overlap %s: %3d%% %s\n", $type, $ratio, $rules;
+  }
+}
+
+sub _prettify_overlap_rules {
+  my $rule = shift;
+  my $str = shift;
+
+  my @rules = sort split(' ', $str);
+  if ($rules{$rule}->{type} eq 'meta') {
+    # ignore meta-subrules that match the rule they make up.
+    # TODO: this is simplistic; it doesn't look to see if those subrules
+    # are in turn meta rules with further subrules that should be ignored.
+    # but it works well enough...
+
+    my $code = $rules{$rule}->{code};
+    @rules = grep {
+      $code !~ /\b\Q$_\E\b/;
+    } @rules;
+  }
+  return join (' ', @rules);
+}
+
+sub _hmap_to_overlap_ratio {
+  my ($r1, $r2, $hmap1, $hmap2, $freq1, $freq2) = @_;
+
+  $hmap1 ||= '';
+  $hmap2 ||= '';
+  if ($hmap1 !~ /[^\000]/ && $hmap2 !~ /[^\000]/) {
+    # no hits on either!  this would normally give a 100% hitrate match,
+    # but that's misleading -- so hide it by giving it a 0% overlap
+    return 0;
+  }
+
+  #my $i; for ($i = 0; $i < length($hmap1)*8; $i++) { print vec($hmap1,$i,1); } print "\n"; for ($i = 0; $i < length($hmap2)*8; $i++) { print vec($hmap2,$i,1); } print "\n";
+  # ah, nifty.  this could have been very slow, but with perl's support
+  # for bitstring ops, we get C speed.  yay!
+  my $both_bits = $hmap1 | $hmap2;
+  my $diff_bits = $hmap1 ^ $hmap2;
+
+  # now, count the set bits in both bitstrings. thank you unpack()!
+  my $both_count = unpack("%32b*", $both_bits);
+  my $diff_count = unpack("%32b*", $diff_bits);
+
+  if ($both_count == 0) {
+    warn "oops! no hits on either but didn't get caught in RE";
+    return 0;
+  }
+
+  return ($both_count - $diff_count) / $both_count;
 }
 
 
 sub readscores {
   my($cffile) = @_;
-  system ("$FindBin::Bin/parse-rules-for-masses -d \"$cffile\" -s $opt_s") and die;
-  require "./tmp/rules.pl";
+  if (system ("$FindBin::Bin/parse-rules-for-masses -d \"$cffile\" -s $opt_s")) {
+    warn "parse-rules-for-masses failed!";
+  }
+  eval {
+    require "./tmp/rules.pl";
+  };
+  if ($@) {
+    warn "tmp/rules.pl is unparseable: $@";
+    # but carry on
+  }
 }
 
 sub soratio {
@@ -375,20 +569,3 @@ sub soratio {
   }
 }
 
-sub tcr {
-  my ($nspam, $nlegit, $nspamspam, $nlegitspam) = @_;
-  my $nspamlegit = $nspam - $nspamspam;
-  my $nlegitlegit = $nlegit - $nlegitspam;
-
-  my $lambda = 50;
-
-  my $werr = ($lambda * $nlegitspam + $nspamlegit)
-                  / ($lambda * $nlegit + $nspam);
-
-  my $werr_base = $nspam
-                  / ($lambda * $nlegit + $nspam);
-
-  $werr ||= 0.000001;     # avoid / by 0
-  my $tcr = $werr_base / $werr;
-  return $tcr;
-}

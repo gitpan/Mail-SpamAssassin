@@ -20,6 +20,7 @@ package Mail::SpamAssassin::EvalTests;
 package Mail::SpamAssassin::PerMsgStatus;
 
 use strict;
+use warnings;
 use bytes;
 
 use Mail::SpamAssassin::Conf;
@@ -27,7 +28,6 @@ use Mail::SpamAssassin::Dns;
 use Mail::SpamAssassin::Locales;
 use Mail::SpamAssassin::MailingList;
 use Mail::SpamAssassin::PerMsgStatus;
-use Mail::SpamAssassin::TextCat;
 use Mail::SpamAssassin::Constants qw(:ip);
 
 use Digest::SHA1 qw(sha1_hex);
@@ -97,6 +97,12 @@ sub check_for_from_to_same {
   if ($hdr_from =~ /^\s*\S+\s*$/ && $hdr_to =~ /^\s*\S+\s*$/) {
     return 1;
   }
+}
+
+sub check_for_matching_env_and_hdr_from {
+  my ($self) =@_;
+  # two blank headers match so don't bother checking
+  return (lc $self->get('EnvelopeFrom:addr') eq lc $self->get('From:addr'));
 }
 
 sub sorted_recipients {
@@ -217,7 +223,7 @@ sub _check_for_forged_received {
   $self->{mismatch_helo} = 0;
   $self->{mismatch_ip_helo} = 0;
 
-  my $IP_IN_RESERVED_RANGE = IP_IN_RESERVED_RANGE;
+  my $IP_PRIVATE = IP_PRIVATE;
 
   my @fromip = map { $_->{ip} } @{$self->{relays_untrusted}};
   # just pick up domains for these
@@ -249,7 +255,7 @@ sub _check_for_forged_received {
     my $hlo = $helo[$i];
     my $by = $by[$i];
 
-    dbg ("forged-HELO: from=".(defined $frm ? $frm : "(undef)").
+    dbg("eval: forged-HELO: from=".(defined $frm ? $frm : "(undef)").
 			" helo=".(defined $hlo ? $hlo : "(undef)").
 			" by=".(defined $by ? $by : "(undef)"));
 
@@ -263,7 +269,7 @@ sub _check_for_forged_received {
 		&& $frm =~ /^\w+(?:[\w.-]+\.)+\w+$/
 		&& $frm ne $hlo && !helo_forgery_whitelisted($frm, $hlo))
     {
-      dbg ("forged-HELO: mismatch on HELO: '$hlo' != '$frm'");
+      dbg("eval: forged-HELO: mismatch on HELO: '$hlo' != '$frm'");
       $self->{mismatch_helo}++;
     }
 
@@ -280,9 +286,9 @@ sub _check_for_forged_received {
 	# allow private IP addrs here, could be a legit screwup
 	if ($hclassb && $fclassb && 
 		$hclassb ne $fclassb &&
-		!($hlo =~ /$IP_IN_RESERVED_RANGE/o))
+		!($hlo =~ /$IP_PRIVATE/o))
 	{
-	  dbg ("forged-HELO: massive mismatch on IP-addr HELO: '$hlo' != '$fip'");
+	  dbg("eval: forged-HELO: massive mismatch on IP-addr HELO: '$hlo' != '$fip'");
 	  $self->{mismatch_ip_helo}++;
 	}
       }
@@ -293,7 +299,7 @@ sub _check_for_forged_received {
 		&& $prev =~ /^\w+(?:[\w.-]+\.)+\w+$/
 		&& $by ne $prev && !helo_forgery_whitelisted($by, $prev))
     {
-      dbg ("forged-HELO: mismatch on from: '$prev' != '$by'");
+      dbg("eval: forged-HELO: mismatch on from: '$prev' != '$by'");
       $self->{mismatch_from}++;
     }
   }
@@ -335,7 +341,10 @@ sub _check_for_forged_hotmail_received_headers {
   $rcvd =~ s/\s+/ /gs;		# just spaces, simplify the regexp
 
   return if ($rcvd =~
-        /from mail pickup service by hotmail\.com with Microsoft SMTPSVC;/);
+	/from mail pickup service by hotmail\.com with Microsoft SMTPSVC;/);
+
+  # Microsoft passes Hotmail mail directly to MSN Group servers.
+  return if $self->check_for_msn_groups_headers();
 
   my $ip = $self->get('X-Originating-Ip');
   my $IP_ADDRESS = IP_ADDRESS;
@@ -389,12 +398,17 @@ sub check_for_msn_groups_headers {
 
   # from Theo Van Dinter, see
   # http://www.hughes-family.org/bugzilla/show_bug.cgi?id=591
-  return 0 unless $self->get('Message-Id') =~ /^<$listname-\S+\@groups\.msn\.com>/;
-  return 0 unless $self->get('X-Loop') =~ /^notifications\@groups\.msn\.com/;
-  return 0 unless $self->get('EnvelopeFrom') =~ /<$listname-bounce\@groups\.msn\.com>/;
+  # Updated by DOS, based on messages from Bob Menschel, bug 4301
 
-  $_ = $self->get('Received');
-  return 0 if !/from mail pickup service by groups\.msn\.com\b/;
+  return 0 unless $self->get('Received') =~ /from mail pickup service by ((?:p\d\d\.)groups\.msn\.com)\b/;
+  my $server = $1;
+
+  if ($listname =~ /^notifications$/) {
+    return 0 unless $self->get('Message-Id') =~ /^<\S+\@$server>/;
+  } else {
+    return 0 unless $self->get('Message-Id') =~ /^<$listname-\S+\@groups\.msn\.com>/;
+    return 0 unless $self->get('EnvelopeFrom') =~ /$listname-bounce\@groups\.msn\.com/;
+  }
   return 1;
 
 # MSN Groups
@@ -408,6 +422,35 @@ sub check_for_msn_groups_headers {
 # X-loop: notifications@groups.msn.com
 # Reply-to: "List Full Name" <ListName@groups.msn.com>
 # To: "List Full Name" <ListName@groups.msn.com>
+
+# Return-path: <ListName-bounce@groups.msn.com>
+# Received: from p04.groups.msn.com ([65.54.195.216]) etc...
+# Received: from mail pickup service by p04.groups.msn.com with Microsoft SMTPSVC;
+#          Thu, 5 May 2005 20:30:37 -0700
+# X-Originating-Ip: 207.68.170.30
+# From: =?iso-8859-1?B?IqSj4/D9pEbzeN9s9vLw6qQiIA==?=<zzzzzzzz@hotmail.com>
+# To: "Managers of List Name" <notifications@groups.msn.com>
+# Subject: =?iso-8859-1?Q?APPROVAL_NEEDED:_=A4=A3=E3=F0=FD=A4F=F3x=DFl?=
+#         =?iso-8859-1?Q?=F6=F2=F0=EA=A4_applied_to_join_List_Name=2C?=
+#         =?iso-8859-1?Q?_an_MSN_Group?=
+# Date: Thu, 5 May 2005 20:30:37 -0700
+# MIME-Version: 1.0
+# Content-Type: multipart/alternative;
+#         boundary="----=_NextPart_000_333944_01C551B1.4BBA02B0"
+# X-MimeOLE: Produced By Microsoft MimeOLE V5.50.4927.1200
+# Message-ID: <TK2DCPUBA042cv0aGlt00020aa3@p04.groups.msn.com>
+
+# Return-path: <ListName-bounce@groups.msn.com>
+# Received: from [65.54.208.83] (helo=p05.groups.msn.com) etc...
+# Received: from mail pickup service by p05.groups.msn.com with Microsoft SMTPSVC;
+#          Fri, 6 May 2005 14:59:25 -0700
+# X-Originating-Ip: 207.68.170.30
+# Message-Id: <ListName-101@groups.msn.com>
+# Reply-To: "List Name" <ListName@groups.msn.com>
+# From: "whoever" <zzzzzzzzzz@hotmail.com>
+# To: "List Name" <ListName@groups.msn.com>
+# Subject: whatever
+# Date: Fri, 6 May 2005 14:59:25 -0700
 
 }
 
@@ -603,14 +646,10 @@ sub gated_through_received_hdr_remover {
 
     # ensure we have other indicative headers too
     if ($dlto =~ /^mailing list \S+\@\S+/ &&
-      	$rcvd =~ /qmail \d+ invoked by .{3,20}\); \d+ ... \d+/)
+        $rcvd =~ /qmail \d+ invoked (?:from network|by .{3,20})\); \d+ ... \d+/)
     {
       return 1;
     }
-    # jm: this line *was* included:
-    #   $rcvd =~ /qmail \d+ invoked from network\); \d+ ... \d+/ &&
-    # but I've found FPs where it did not appear in the mail; it's
-    # not required.
   }
 
   if ($self->get("Received") !~ /\S/) {
@@ -646,8 +685,8 @@ sub _check_received_helos {
   for (my $i = 0; $i < $self->{num_relays_untrusted}; $i++) {
     my $rcvd = $self->{relays_untrusted}->[$i];
 
-    # Ignore where IP is in reserved IP space
-    next if ($rcvd->{ip_is_reserved});
+    # Ignore where IP is in private IP space
+    next if ($rcvd->{ip_private});
 
     my $from_host = $rcvd->{rdns};
     my $helo_host = $rcvd->{helo};
@@ -675,7 +714,7 @@ sub _check_received_helos {
 
       # ok, let's catch the case where there's *no* reverse DNS there either
       if ($no_rdns) {
-	dbg ("Received: no rDNS for dotcom HELO: from=$from_host HELO=$helo_host");
+	dbg("eval: Received: no rDNS for dotcom HELO: from=$from_host HELO=$helo_host");
 	$self->{no_rdns_dotcom_helo} = 1;
       }
     }
@@ -762,8 +801,8 @@ sub check_for_sender_no_reverse {
   # Ignore if the from host is domainless (has no dot)
   return 0 unless ($srcvd->{rdns} =~ /\./);
 
-  # Ignore if the from host is from a reserved IP range
-  return 0 if ($srcvd->{ip_is_reserved});
+  # Ignore if the from host is from a private IP range
+  return 0 if ($srcvd->{ip_private});
 
   return 1;
 } # check_for_sender_no_reverse()
@@ -773,7 +812,7 @@ sub check_for_sender_no_reverse {
 sub check_from_in_list {
   my ($self,$list) = @_;
   my $list_ref = $self->{conf}{$list};
-  warn "Could not find list $list" unless defined $list_ref;
+  warn "eval: could not find list $list" unless defined $list_ref;
 
   foreach my $addr (all_from_addrs $self) {
     return 1 if _check_whitelist $self $list_ref, $addr;
@@ -787,7 +826,7 @@ sub check_from_in_list {
 sub check_to_in_list {
   my ($self,$list) = @_;
   my $list_ref = $self->{conf}{$list};
-  warn "Could not find list $list" unless defined $list_ref;
+  warn "eval: could not find list $list" unless defined $list_ref;
 
   foreach my $addr (all_to_addrs $self) {
     return 1 if _check_whitelist $self $list_ref, $addr;
@@ -873,79 +912,6 @@ sub _check_from_in_default_whitelist {
 
 ###########################################################################
 
-sub check_from_in_auto_whitelist {
-    my ($self) = @_;
-
-    return unless defined $self->{main}->{pers_addr_list_factory};
-
-    local $_ = lc $self->get('From:addr');
-    return 0 unless /\S/;
-
-    # find the earliest usable "originating IP".  ignore reserved nets
-    my $origip;
-    foreach my $rly (reverse (@{$self->{relays_trusted}}, @{$self->{relays_untrusted}}))
-    {
-      next if ($rly->{ip_is_reserved});
-      if ($rly->{ip}) {
-	$origip = $rly->{ip}; last;
-      }
-    }
-
-    my $awlpoints = $self->_get_autowhitelist_points();
-
-    # Create the AWL object, catching 'die's
-    my $whitelist;
-    my $evalok = eval {
-      $whitelist = Mail::SpamAssassin::AutoWhitelist->new($self->{main});
-
-      # check
-      my $meanscore = $whitelist->check_address($_, $origip);
-      my $delta = 0;
-
-      dbg("AWL active, pre-score: $self->{score}, autolearn score: $awlpoints, ".
-	"mean: ". ($meanscore || 'undef') .", IP: ". ($origip || 'undef'));
-
-      if (defined ($meanscore)) {
-        $delta = ($meanscore - $awlpoints) * $self->{main}->{conf}->{auto_whitelist_factor};
-	$self->{tag_data}->{AWL} = sprintf("%2.1f",$delta);
-	# Save this for _AWL_ tag
-      }
-
-      # Update the AWL *before* adding the new score, otherwise
-      # early high-scoring messages are reinforced compared to
-      # later ones.  http://bugs.debian.org/cgi-bin/bugreport.cgi?bug=159704
-      if (!$self->{disable_auto_learning}) {
-        $whitelist->add_score($awlpoints);
-      }
-
-      # current AWL score changes with each hit
-      for my $set (0..3) {
-	$self->{conf}->{scoreset}->[$set]->{"AWL"} = sprintf("%0.3f", $delta);
-      }
-
-      if ($delta != 0) {
-        $self->_handle_hit("AWL", $delta, "AWL: ",
-			   $self->{main}->{conf}->{descriptions}->{AWL});
-      }
-
-      $whitelist->finish();
-      1;
-    };
-
-    if (!$evalok) {
-      dbg ("open of AWL file failed: $@");
-      # try an unlock, in case we got that far
-      eval { $whitelist->finish(); };
-    }
-
-    dbg("Post AWL score: ".$self->{score});
-
-    # test hit is above
-    return 0;
-}
-
-###########################################################################
-
 # look up $addr and trusted relays in a whitelist with rcvd
 # note if it appears to be a forgery and $addr is not in any-relay list
 sub _check_whitelist_rcvd {
@@ -961,20 +927,24 @@ sub _check_whitelist_rcvd {
   }
   # then try the trusted ones; the user could have whitelisted a trusted
   # relay, totally permitted
-  if ($self->{num_relays_trusted} > 0) {
+  # but do not do this if any untrusted relays, to avoid forgery -- bug 4425
+  if ($self->{num_relays_trusted} > 0 && !$self->{num_relays_untrusted} ) {
     push (@relays, @{$self->{relays_trusted}});
   }
 
   $addr = lc $addr;
   my $found_forged = 0;
   foreach my $white_addr (keys %{$list}) {
-    my $regexp = $list->{$white_addr}{re};
+    my $regexp = qr/$list->{$white_addr}{re}/i;
     foreach my $domain (@{$list->{$white_addr}{domain}}) {
       
-      if ($addr =~ qr/${regexp}/i) {
+      if ($addr =~ $regexp) {
         foreach my $lastunt (@relays) {
           my $rdns = $lastunt->{lc_rdns};
-          if ($rdns =~ /(?:^|\.)\Q${domain}\E$/) { return 1; }
+          if ($rdns =~ /(?:^|\.)\Q${domain}\E$/i) { 
+            dbg("rules: address $addr matches (def_)whitelist_from_rcvd $list->{$white_addr}{re} ${domain}");
+            return 1;
+          }
         }
         # found address match but no relay match. note as possible forgery
         $found_forged = -1;
@@ -1002,6 +972,7 @@ sub _check_whitelist {
   study $addr;
   foreach my $regexp (values %{$list}) {
     if ($addr =~ qr/$regexp/i) {
+      dbg("rules: address $addr matches whitelist or blacklist regexp: $regexp");
       return 1;
     }
   }
@@ -1044,7 +1015,7 @@ sub all_from_addrs {
   my %addrs = map { $_ => 1 } @addrs;
   @addrs = keys %addrs;
 
-  dbg("all '*From' addrs: " . join(" ", @addrs));
+  dbg("eval: all '*From' addrs: " . join(" ", @addrs));
   $self->{all_from_addrs} = \@addrs;
   return @addrs;
 }
@@ -1098,7 +1069,7 @@ sub all_to_addrs {
     # noted some in <http://www.ii.com/internet/robots/procmail/qs/#envelope>
   }
 
-  dbg("all '*To' addrs: " . join(" ", @addrs));
+  dbg("eval: all '*To' addrs: " . join(" ", @addrs));
   $self->{all_to_addrs} = \@addrs;
   return @addrs;
 
@@ -1148,13 +1119,8 @@ sub _check_unique_words {
       $count{$token}++;
     }
   }
-  my $unique = 0;
-  my $repeat = 0;
-  for my $count (values %count) {
-    $count == 1 ? $unique++ : $repeat++;
-  }
-  $self->{unique_words_repeat} = $repeat;
-  $self->{unique_words_unique} = $unique;
+  $self->{unique_words_unique} = scalar grep { $_ == 1 } values(%count);
+  $self->{unique_words_repeat} = scalar keys(%count) - $self->{unique_words_unique};
 }
 
 ###########################################################################
@@ -1230,8 +1196,14 @@ sub check_rbl_backend {
   return 0 if $self->{conf}->{skip_rbl_checks};
   return 0 unless $self->is_dns_available();
   $self->load_resolver();
-  
-  dbg ("checking RBL $rbl_server, set $set", "rbl", -1);
+
+  if (($rbl_server !~ /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/) &&
+      (index($rbl_server, '.') >= 0) &&
+      ($rbl_server !~ /\.$/)) {
+    $rbl_server .= ".";
+  }
+
+  dbg("dns: checking RBL $rbl_server, set $set");
 
   # ok, make a list of all the IPs in the untrusted set
   my @fullips = map { $_->{ip} } @{$self->{relays_untrusted}};
@@ -1252,21 +1224,23 @@ sub check_rbl_backend {
   my @originating = ();
   for my $header ('X-Originating-IP', 'X-Apparently-From') {
     my $str = $self->get($header);
-    next unless defined $str;
+    next unless $str;
     push (@originating, ($str =~ m/($IP_ADDRESS)/g));
   }
 
-  # Let's go ahead and trim away all Reserved ips (KLC)
+  # Let's go ahead and trim away all private ips (KLC)
   # also uniq the list and strip dups. (jm)
-  my @ips = $self->ip_list_uniq_and_strip_reserved (@fullips);
+  my @ips = $self->ip_list_uniq_and_strip_private(@fullips);
 
   # if there's no untrusted IPs, it means we trust all the open-internet
   # relays, so we can return right now.
   return 0 unless (scalar @ips + scalar @originating > 0);
 
-  dbg("rbl: IPs found: full-external: ".join(", ", @fullips).
+  dbg("dns: IPs found: full-external: ".join(", ", @fullexternal).
 	" untrusted: ".join(", ", @ips).
-	" originating: ".join(", ", @originating), "rbl", -3);
+	" originating: ".join(", ", @originating));
+
+  my $trusted = $self->{conf}->{trusted_networks};
 
   if (scalar @ips + scalar @originating > 0) {
     # If name is foo-notfirsthop, check all addresses except for
@@ -1274,14 +1248,21 @@ sub check_rbl_backend {
     # note that if there's only 1 IP in the untrusted set, do NOT pop the
     # list, since it'd remove that one, and a legit user is supposed to
     # use their SMTP server (ie. have at least 1 more hop)!
-    if ($set =~ /-notfirsthop$/)
+    # If name is foo-lastexternal, check only the Received header just before
+    # it enters our internal networks; we can trust it and it's the one that
+    # passed mail between networks
+    if ($set =~ /-(notfirsthop|lastexternal)$/)
     {
       # use the external IP set, instead of the trusted set; the user may have
       # specified some third-party relays as trusted.  Also, don't use
       # @originating; those headers are added by a phase of relaying through
       # a server like Hotmail, which is not going to be in dialup lists anyway.
-      @ips = $self->ip_list_uniq_and_strip_reserved(@fullexternal);
-      if (scalar @ips > 1) { pop @ips; }
+      @ips = $self->ip_list_uniq_and_strip_private(@fullexternal);
+      if ($1 eq "lastexternal") {
+        @ips = (defined $ips[0]) ? ($ips[0]) : ();
+      } else {
+	pop @ips if (scalar @ips > 1);
+      }
     }
     # If name is foo-firsttrusted, check only the Received header just
     # after it enters our trusted networks; that's the only one we can
@@ -1289,18 +1270,29 @@ sub check_rbl_backend {
     # And if name is foo-untrusted, check any untrusted IP address.
     elsif ($set =~ /-(first|un)trusted$/)
     {
-      push(@ips, @originating);
-      if ($1 eq "first") {
-	@ips = ($ips[0]);
+      my @tips = ();
+      foreach my $ip (@originating) {
+        if ($ip && !$trusted->contains_ip($ip)) {
+          push(@tips, $ip);
+        }
       }
-      else {
-	shift @ips;
+      @ips = $self->ip_list_uniq_and_strip_private (@ips, @tips);
+      if ($1 eq "first") {
+        @ips = (defined $ips[0]) ? ($ips[0]) : ();
+      } else {
+        shift @ips;
       }
     }
     else
     {
-      # add originating IPs as untrusted IPs
-      @ips = reverse $self->ip_list_uniq_and_strip_reserved (@ips, @originating);
+      my @tips = ();
+      foreach my $ip (@originating) {
+        if ($ip && !$trusted->contains_ip($ip)) {
+          push(@tips, $ip);
+        }
+      }
+      # add originating IPs as untrusted IPs (if they are untrusted)
+      @ips = reverse $self->ip_list_uniq_and_strip_private (@ips, @tips);
 
       # How many IPs max you check in the received lines
       my $checklast=$self->{conf}->{num_check_received};
@@ -1310,7 +1302,7 @@ sub check_rbl_backend {
       }
     }
   }
-  dbg("rbl: only inspecting the following IPs: ".join(", ", @ips), "rbl", -3);
+  dbg("dns: only inspecting the following IPs: ".join(", ", @ips));
 
   eval {
     foreach my $ip (@ips) {
@@ -1347,62 +1339,45 @@ sub check_rbl_sub {
 
 # backward compatibility
 sub check_rbl_results_for {
-  #warn "check_rbl_results_for() is deprecated, use check_rbl_sub()\n";
+  #warn "dns: check_rbl_results_for() is deprecated, use check_rbl_sub()\n";
   check_rbl_sub(@_);
-}
-
-# check a RBL if a message is Habeas SWE
-sub check_rbl_swe {
-  my ($self, $rule, $set, $rbl_server, $subtest) = @_;
-
-  if (!defined $self->{habeas_swe}) {
-    $self->message_is_habeas_swe();
-  }
-  if (defined $self->{habeas_swe} && $self->{habeas_swe}) {
-    $self->check_rbl_backend($rule, $set, $rbl_server, 'A', $subtest);
-  }
-  return 0;
 }
 
 # this only checks the address host name and not the domain name because
 # using the domain name had much worse results for dsn.rfc-ignorant.org
 sub check_rbl_from_host {
-  my ($self, $rule, $set, $rbl_server) = @_;
-
-  return 0 if $self->{conf}->{skip_rbl_checks};
-  return 0 unless $self->is_dns_available();
-
-  my %hosts;
-  for my $from ($self->all_from_addrs()) {
-    if ($from =~ m/\@(\S+\.\S+)/) {
-      $hosts{lc($1)} = 1;
-    }
-  }
-  return unless scalar keys %hosts;
-
-  $self->load_resolver();
-  for my $host (keys %hosts) {
-    $self->do_rbl_lookup($rule, $set, 'A', $rbl_server, "$host.$rbl_server");
-  }
+  _check_rbl_addresses(@_, $_[0]->all_from_addrs());
 }
 
 # this only checks the address host name and not the domain name because
 # using the domain name had much worse results for dsn.rfc-ignorant.org
 sub check_rbl_envfrom {
-  my ($self, $rule, $set, $rbl_server) = @_;
+  _check_rbl_addresses(@_, $_[0]->get('EnvelopeFrom:addr'));
+}
 
+sub _check_rbl_addresses {
+  my ($self, $rule, $set, $rbl_server, @addresses) = @_;
+  
   return 0 if $self->{conf}->{skip_rbl_checks};
   return 0 unless $self->is_dns_available();
 
   my %hosts;
-  for my $from ($self->get('EnvelopeFrom:addr')) {
-    if ($from =~ m/\@(\S+\.\S+)/) {
+  for my $address (@addresses) {
+    if ($address =~ m/\@(\S+\.\S+)/) {
       $hosts{lc($1)} = 1;
     }
   }
   return unless scalar keys %hosts;
 
   $self->load_resolver();
+
+  if (($rbl_server !~ /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/) &&
+      (index($rbl_server, '.') >= 0) &&
+      ($rbl_server !~ /\.$/)) {
+    $rbl_server .= ".";
+  }
+  dbg("dns: _check_rbl_addresses RBL $rbl_server, set $set");
+
   for my $host (keys %hosts) {
     $self->do_rbl_lookup($rule, $set, 'A', $rbl_server, "$host.$rbl_server");
   }
@@ -1433,7 +1408,7 @@ sub check_dns_sender {
     return 0;
   }
 
-  dbg ("checking A and MX for host $host", "rbl", -1);
+  dbg("dns: checking A and MX for host $host");
 
   $self->do_dns_lookup($rule, 'A', $host);
   $self->do_dns_lookup($rule, 'MX', $host);
@@ -1452,15 +1427,15 @@ sub check_for_from_dns {
   }
 }
 
-sub ip_list_uniq_and_strip_reserved {
+sub ip_list_uniq_and_strip_private {
   my ($self, @origips) = @_;
   my @ips = ();
   my %seen = ();
-  my $IP_IN_RESERVED_RANGE = IP_IN_RESERVED_RANGE;
+  my $IP_PRIVATE = IP_PRIVATE;
   foreach my $ip (@origips) {
     next unless $ip;
     next if (exists ($seen{$ip})); $seen{$ip} = 1;
-    next if ($ip =~ /$IP_IN_RESERVED_RANGE/o);
+    next if ($ip =~ /$IP_PRIVATE/o);
     push(@ips, $ip);
   }
   return @ips;
@@ -1493,7 +1468,8 @@ sub check_for_unique_subject_id {
         || /[!\?]\s*(\d{4,}|\w+(-\w+)+)\s*$/
 
         # 9095IPZK7-095wsvp8715rJgY8-286-28 and similar
-        || /\b(\w{7,}-\w{7,}(-\w+)*)\s*$/
+	# excluding 'Re:', etc and the first word
+        || /(?:\w{2,3}:\s)?\w+\s+(\w{7,}-\w{7,}(-\w+)*)\s*$/
 
         # #30D7 and similar
         || /\s#\s*([a-f0-9]{4,})\s*$/
@@ -1549,19 +1525,15 @@ sub word_is_in_dictionary {
   return 1 if ($word_len < 3);
 
   if (!$triplets_loaded) {
-    # take a copy to avoid modifying the real one
-    my @default_triplets_path = @Mail::SpamAssassin::default_rules_path;
-    @default_triplets_path = map { s,$,/triplets.txt,; $_; }
-				    @default_triplets_path;
-    my $filename = $self->{main}->first_existing_path (@default_triplets_path);
+    my $filename = $self->{main}->find_rule_support_file('triplets.txt');
 
     if (!defined $filename) {
-      dbg("failed to locate the triplets.txt file");
+      dbg("eval: failed to locate the triplets.txt file");
       return 1;
     }
 
     if (!open (TRIPLETS, "<$filename")) {
-      dbg ("failed to open '$filename', cannot check dictionary");
+      dbg("eval: failed to open '$filename', cannot check dictionary");
       return 1;
     }
 
@@ -1580,7 +1552,7 @@ sub word_is_in_dictionary {
   for ($i = 0; $i < ($word_len - 2); $i++) {
     my $triplet = substr($word, $i, 3);
     if (!$triplets{$triplet}) {
-      dbg ("Unique ID: Letter triplet '$triplet' from word '$word' not valid");
+      dbg("eval: unique ID: letter triplet '$triplet' from word '$word' not valid");
       return 0;
     }
   } # for ($i = 0; $i < ($word_len - 2); $i++)
@@ -1784,22 +1756,22 @@ gotone:
   my $revdns = $self->lookup_ptr ($relayerip);
   if (!defined $revdns) { $revdns = '(unknown)'; }
 
-  dbg ("round-the-world: mail relayed through $relay by ".	
+  dbg("eval: round-the-world: mail relayed through $relay by ".	
   	"$relayerip (HELO $relayer, rev DNS says $revdns)");
 
   if ($revdns =~ /\.${ROUND_THE_WORLD_RELAYERS}$/oi) {
-    dbg ("round-the-world: yep, I think so (from rev dns)");
+    dbg("eval: round-the-world: yep, I think so (from rev dns)");
     $self->{round_the_world_revdns} = 1;
     return;
   }
 
   if ($relayer =~ /\.${ROUND_THE_WORLD_RELAYERS}$/oi) {
-    dbg ("round-the-world: yep, I think so (from HELO)");
+    dbg("eval: round-the-world: yep, I think so (from HELO)");
     $self->{round_the_world_helo} = 1;
     return;
   }
 
-  dbg ("round-the-world: probably not");
+  dbg("eval: round-the-world: probably not");
   return;
 }
 
@@ -1914,11 +1886,10 @@ sub _get_received_header_times {
     foreach $rcvd (@local) {
       if ($rcvd =~ m/(\s.?\d+ \S\S\S \d+ \d+:\d+:\d+ \S+)/) {
 	my $date = $1;
-	dbg ("trying Received fetchmail header date for real time: $date",
-	     "datediff", -2);
+	dbg("eval: trying Received fetchmail header date for real time: $date");
 	my $time = Mail::SpamAssassin::Util::parse_rfc822_date($date);
 	if (defined($time) && (time() >= $time)) {
-	  dbg ("time_t from date=$time, rcvd=$date", "datediff", -2);
+	  dbg("eval: time_t from date=$time, rcvd=$date");
 	  push @fetchmail_times, $time;
 	}
       }
@@ -1935,10 +1906,10 @@ sub _get_received_header_times {
   foreach $rcvd (@received) {
     if ($rcvd =~ m/(\s.?\d+ \S\S\S \d+ \d+:\d+:\d+ \S+)/) {
       my $date = $1;
-      dbg ("trying Received header date for real time: $date", "datediff", -2);
+      dbg("eval: trying Received header date for real time: $date");
       my $time = Mail::SpamAssassin::Util::parse_rfc822_date($date);
       if (defined($time)) {
-	dbg ("time_t from date=$time, rcvd=$date", "datediff", -2);
+	dbg("eval: time_t from date=$time, rcvd=$date");
 	push @header_times, $time;
       }
     }
@@ -1947,7 +1918,7 @@ sub _get_received_header_times {
   if (scalar(@header_times)) {
     $self->{received_header_times} = [ @header_times ];
   } else {
-    dbg ("no dates found in Received headers", "datediff", -1);
+    dbg("eval: no dates found in Received headers");
   }
 }
 
@@ -1987,10 +1958,10 @@ sub _check_date_received {
   if (scalar(@dates_poss)) {	# use median
     $self->{date_received} = (sort {$b <=> $a}
 			      (@dates_poss))[int($#dates_poss/2)];
-    dbg("Date chosen from message: " .
-	scalar(localtime($self->{date_received})), "datediff", -2);
+    dbg("eval: date chosen from message: " .
+	scalar(localtime($self->{date_received})));
   } else {
-    dbg("no dates found in message", "datediff", -1);
+    dbg("eval: no dates found in message");
   }
 }
 
@@ -2046,7 +2017,7 @@ sub subject_is_all_caps {
    # If so, punt on this test to avoid FPs.  We just list the known charsets
    # this test will FP on, here.
    my $subjraw = $self->get('Subject:raw');
-   if ($subjraw =~ /^=\?${CHARSETS_LIKELY_TO_FP_AS_CAPS}\?/i) {
+   if ($subjraw =~ /=\?${CHARSETS_LIKELY_TO_FP_AS_CAPS}\?/i) {
      return 0;
    }
 
@@ -2055,67 +2026,56 @@ sub subject_is_all_caps {
 
 ###########################################################################
 
-sub message_from_bugzilla {
-  my ($self) = @_;
+# check an RBL if the message contains an "accreditor assertion,"
+# that is, the message contains the name of a service that will vouch
+# for their practices.
+#
+sub check_rbl_accreditor {
+  my ($self, $rule, $set, $rbl_server, $subtest, $accreditor) = @_;
 
-  my $all    = $self->get('ALL');
-  
-  # Let's look for a Bugzilla Subject...
-  if ($all   =~ /^Subject: [^\n]{0,10}\[Bug \d+\] /m && (
-        # ... in combination with either a Bugzilla message header...
-        $all =~ /^X-Bugzilla-[A-Z][a-z]+: /m ||
-        # ... or sender.
-        $all =~ /^From: bugzilla/mi
-     )) {
-    return 1;
+  if (!defined $self->{accreditor_tag}) {
+    $self->message_accreditor_tag();
   }
-
+  if ($self->{accreditor_tag}->{$accreditor}) {
+    $self->check_rbl_backend($rule, $set, $rbl_server, 'A', $subtest);
+  }
   return 0;
 }
 
-sub message_from_debian_bts {
-  my ($self)  = @_;
-
-  my  $all    = $self->get('ALL');
-
-  # This is the main case; A X-<Project>-PR-Message header exists and the
-  # Subject looks "buggy". Watch out: The DBTS is used not only by Debian
-  # but by other <Project>s, eg. KDE, too.
-  if ($all    =~ /^X-[A-Za-z0-9]+-PR-Message: [a-z-]+ \d+$/m &&
-      $all    =~ /^Subject: Bug#\d+: /m) {
-    return 1;
-  }
-  # Sometimes the DBTS sends out messages which don't include the X- header.
-  # In this case we look if the message is From a DBTS account and Subject
-  # and Message-Id look good.
-  elsif ($all =~ /^From: owner\@/mi &&
-         $all =~ /^Subject: Processed(?: \([^)]+\))?: /m &&
-         $all =~ /^Message-ID: <handler\./m) {
-    return 1;
-  }
-
-  return 0;
-}
-
-sub message_is_habeas_swe {
+# Check for an Accreditor Assertion within the message, that is, the name of
+#	a third-party who will vouch for the sender's practices. The accreditor
+#	can be asserted in the EnvelopeFrom like this:
+#
+#	    listowner@a--accreditor.mail.example.com
+#
+#	or in an 'Accreditor" Header field, like this:
+#
+#	    Accreditor: accreditor1, parm=value; accreditor2, parm-value
+#
+#	This implementation supports multiple accreditors, but ignores any
+#	parameters in the header field.
+#
+sub message_accreditor_tag {
   my ($self) = @_;
+  my %acctags;
 
-  return $self->{habeas_swe} if defined $self->{habeas_swe};
-
-  $self->{habeas_swe} = 0;
-
-  my $text = '';
-  for (my $i = 1; $i <= 9; $i++) {
-    $text .= (lc($self->get("X-Habeas-SWE-$i")) || return 0);
+  if ($self->get('EnvelopeFrom:addr') =~ /[@.]a--([a-z0-9]{3,})\./i) {
+    (my $tag = $1) =~ tr/A-Z/a-z/;
+    $acctags{$tag} = -1;
   }
-  if ($text) {
-    $text =~ s/\s+/ /g;
-    $text =~ s/^\s|\s$//g;
-    $text =~ s@/?>@/>@;
-    $self->{habeas_swe} = (sha1_hex($text) eq '76c65d9eb65e572166a08b50fd197b29af09d43a');
+  my $accreditor_field = $self->get('Accreditor');
+  if (defined($accreditor_field)) {
+    my @accreditors = split(/,/, $accreditor_field);
+    foreach my $accreditor (@accreditors) {
+      my @terms = split(' ', $accreditor);
+      if ($#terms >= 0) {
+	  my $tag = $terms[0];
+	  $tag =~ tr/A-Z/a-z/;
+	  $acctags{$tag} = -1;
+      }
+    }
   }
-
-  return $self->{habeas_swe};
+  $self->{accreditor_tag} = \%acctags;
 }
 
 ###########################################################################
@@ -2199,82 +2159,6 @@ sub check_for_uppercase {
   return ($self->{uppercase} > $min && $self->{uppercase} <= $max);
 }
 
-# UNWANTED_LANGUAGE_BODY
-sub check_language {
-  my ($self, $body) = @_;
-  $self->_check_language();
-  return $self->{undesired_language_body};
-}
-
-# UNWANTED_LANGUAGE_BODY
-sub _check_language {
-  my ($self, $body) = @_;
-
-  if (defined $self->{undesired_language_body}) {
-    return $self->{undesired_language_body};
-  }
-
-  $self->{undesired_language_body} = 0;
-  my @languages = split(' ', $self->{conf}->{ok_languages});
-
-  if (grep { $_ eq "all" } @languages) {
-    return $self->{undesired_language_body};
-  }
-
-  my @matches = @{$self->{msg}->{metadata}->{textcat_matches}};
-
-  # not able to get a match, assume it's okay
-  if (! @matches) {
-    $self->{undesired_language_body} = 0;
-    return $self->{undesired_language_body};
-  }
-
-  # map of languages that are very often mistaken for another, perhaps with
-  # more than 0.02% false positives.  This is used when we're less certain
-  # about the result.
-  my $len = $self->{msg}->{metadata}->{languages_body_len};
-  my %mistakable;
-  if ($len < 1024 * (scalar @matches)) {
-    $mistakable{sco} = 'en';
-  }
-
-  # see if any matches are okay
-  foreach my $match (@matches) {
-    $match =~ s/\..*//;
-    $match = $mistakable{$match} if exists $mistakable{$match};
-    foreach my $language (@languages) {
-      $language = $mistakable{$language} if exists $mistakable{$language};
-      if ($match eq $language) {
-	$self->{undesired_language_body} = 0;
-	return $self->{undesired_language_body};
-      }
-    }
-  }
-  $self->{undesired_language_body} = 1;
-  return $self->{undesired_language_body};
-}
-
-sub check_for_body_8bits {
-  my ($self, $body) = @_;
-
-  my @languages = split(' ', $self->{conf}->{ok_languages});
-
-  for (@languages) {
-    return 0 if $_ eq "all";
-    # this list is initially conservative, it includes any language with
-    # a common n-gram sequence of 2+ consecutive bytes matching [\x80-\xff]
-    # here are the one more likely to be removed: cs=czech, et=estonian,
-    # fi=finnish, hi=hindi, is=icelandic, pt=portuguese, tr=turkish,
-    # uk=ukrainian, vi=vietnamese
-    return 0 if /^(?:am|ar|be|bg|cs|el|et|fa|fi|he|hi|hy|is|ja|ka|ko|mr|pt|ru|ta|th|tr|uk|vi|yi|zh)$/;
-  }
-
-  foreach my $line (@$body) {
-    return 1 if $line =~ /[\x80-\xff]{8,}/;
-  }
-  return 0;
-}
-
 ###########################################################################
 # MIME/uuencode attachment tests
 ###########################################################################
@@ -2292,7 +2176,7 @@ sub check_for_mime_html {
   my ($self) = @_;
 
   my $ctype = $self->get('Content-Type');
-  return 1 if (defined($ctype) && $ctype =~ m@text/html@i);
+  return 1 if (defined($ctype) && $ctype =~ m@^text/html@i);
 
   $self->_check_attachments unless exists $self->{mime_body_html_count};
   return ($self->{mime_body_html_count} > 0);
@@ -2303,7 +2187,7 @@ sub check_for_mime_html_only {
   my ($self) = @_;
 
   my $ctype = $self->get('Content-Type');
-  return 1 if (defined($ctype) && $ctype =~ m@text/html@i);
+  return 1 if (defined($ctype) && $ctype =~ m@^text/html@i);
 
   $self->_check_attachments unless exists $self->{mime_body_html_count};
   return ($self->{mime_body_html_count} > 0 &&
@@ -2346,6 +2230,10 @@ sub _check_mime_header {
     $self->{mime_qp_count}++;
   }
 
+  if ($cd && $cd =~ /attachment/) {
+    $self->{mime_attachment}++;
+  }
+
   if ($ctype =~ /^text/ &&
       $cte =~ /base64/ &&
       $charset !~ /utf-8/ &&
@@ -2356,6 +2244,12 @@ sub _check_mime_header {
 
   if ($cte =~ /base64/ && !$name) {
     $self->{mime_base64_no_name} = 1;
+  }
+
+  if ($charset =~ /iso-\S+-\S+\b/i &&
+      $charset !~ /iso-(?:8859-\d{1,2}|2022-(?:jp|kr))\b/)
+  {
+    $self->{mime_bad_iso_charset} = 1;
   }
 
   # MIME_BASE64_LATIN: now a zero-hitter
@@ -2396,32 +2290,6 @@ sub _check_mime_header {
       }
     }
   }
-
-  if ($name && $ctype ne "application/octet-stream") {
-    # MIME_SUSPECT_NAME triggered here
-    $name =~ s/.*\.//;
-    $ctype =~ s@/(x-|vnd\.)@/@;
-
-    if (((($name eq "txt") || ($name =~ /^[px]?html?$/) ||
-	  ($name eq "xml")) &&
-	 ($ctype !~
-	  m@^text/(?:plain|[px]?html?|english|sgml|xml|enriched|richtext)@) &&
-	 ($ctype !~ m@^message/external-body@)) # RFC-Editor emails...
-	|| ((($name =~ /^(?:jpe?g|tiff?)$/) || ($name eq "gif") ||
-	     ($name eq "png"))
-	    && ($ctype !~ m@^image/@)
-	    && ($ctype !~ m@^application/mac-binhex@))
-	|| ($name eq "vcf" && $ctype ne "text/vcard")
-	|| ($name =~ /^(?:bat|com|exe|pif|scr|swf|vbs)$/
-	    && $ctype !~ m@^application/@)
-	|| ($name eq "doc" && $ctype !~ m@^application/.*word$@)
-	|| ($name eq "ppt" && $ctype !~ m@^application/.*(?:powerpoint|ppt)$@)
-	|| ($name eq "xls" && $ctype !~ m@^application/.*excel$@)
-       )
-    {
-       $self->{mime_suspect_name} = 1;
-    }
-  }
 }
 
 sub _check_attachments {
@@ -2459,7 +2327,6 @@ sub _check_attachments {
   # $self->{mime_qp_inline_no_charset} = 0;
   $self->{mime_qp_long_line} = 0;
   $self->{mime_qp_ratio} = 0;
-  $self->{mime_suspect_name} = 0;
 
   # Get all parts ...
   foreach my $p ($self->{msg}->find_parts(qr/./)) {
@@ -2552,14 +2419,16 @@ sub _check_attachments {
   if ($self->{mime_multipart_alternative}) {
     my $text;
     my $html;
-    for (my $i = 0; $i <= $part; $i++) {
+    # bug 4207: we want the size of the last parts
+    for (my $i = $part; $i >= 0; $i--) {
       next if !defined $part_bytes[$i];
       if (!defined($html) && $part_type[$i] eq 'text/html') {
 	$html = $part_bytes[$i];
       }
-      if (!defined($text) && $part_type[$i] eq 'text/plain') {
+      elsif (!defined($text) && $part_type[$i] eq 'text/plain') {
 	$text = $part_bytes[$i];
       }
+      last if (defined($html) && defined($text));
     }
     if (defined($text) && defined($html) && $html > 0) {
       $self->{mime_multipart_ratio} = ($text / $html);
@@ -2572,56 +2441,6 @@ sub _check_attachments {
       $self->{mime_missing_boundary} = 1;
       last;
     }
-  }
-}
-
-###########################################################################
-# FULL-MESSAGE TESTS:
-###########################################################################
-
-sub check_razor2 {
-  my ($self) = @_;
-
-  return 0 unless ($self->is_razor2_available());
-  return $self->{razor2_result} if (defined $self->{razor2_result});
-
-  # note: we don't use $fulltext. instead we get the raw message,
-  # unfiltered, for razor2 to check.  ($fulltext removes MIME
-  # parts etc.)
-  my $full = $self->{msg}->get_pristine();
-  return $self->razor2_lookup (\$full);
-}
-
-sub check_pyzor {
-  my ($self, $full) = @_;
-
-  return 0 unless ($self->is_pyzor_available());
-  return 0 if ($self->{already_checked_pyzor});
-
-  $self->{already_checked_pyzor} = 1;
-
-  return $self->pyzor_lookup($full);
-}
-
-sub check_dcc {
-  my ($self, $full) = @_;
-  my $have_dccifd = $self->is_dccifd_available();
-
-  return 0 unless ($have_dccifd || $self->is_dcc_available() );
-  return 0 if ($self->{already_checked_dcc});
-
-  $self->{already_checked_dcc} = 1;
-
-  # First check if there's already a X-DCC header with value of "bulk"
-  # and short-circuit if there is -- someone upstream might already have
-  # checked DCC for us.
-  return 1 if grep(/^X-DCC-(?:[^:]{1,80}-)?Metrics:/ && /bulk/, $self->{msg}->get_all_headers());
-  
-  if ($have_dccifd) {
-    return $self->dccifd_lookup($full);
-  }
-  else {
-    return $self->dcc_lookup($full);
   }
 }
 
@@ -2674,7 +2493,7 @@ sub check_for_to_in_subject {
   elsif ($test eq "user") {
     my $to = $full_to;
     $to =~ s/\@.*//;
-    return $subject =~ /^\s*\Q$to\E,\S/i;	# "user,\S" case insensitive
+    return $subject =~ /^\s*\Q$to\E,\s/i;	# "user,\s" case insensitive
   }
   return 0;
 }
@@ -2738,30 +2557,6 @@ sub check_outlook_message_id {
   return (abs($diff) >= $fudge);
 }
 
-# Check the cf value of a given message and return if it's within the
-# given range
-sub check_razor2_range {
-  my ($self,$fulltext,$min,$max) = @_;
-
-  # If the Razor2 general test is disabled, don't continue.
-  return 0 unless $self->{conf}{scores}{'RAZOR2_CHECK'};
-
-  # If Razor2 hasn't been checked yet, go ahead and run it.
-  if (!defined $self->{razor2_result}) {
-    # note: we don't use $fulltext. instead we get the raw message,
-    # unfiltered, for razor2 to check.  ($fulltext removes MIME
-    # parts etc.)
-    my $full = $self->{msg}->get_pristine();
-    $self->razor2_lookup (\$full);
-  }
-
-  if ($self->{razor2_cf_score} >= $min && $self->{razor2_cf_score} <= $max) {
-    $self->test_log(sprintf ("cf: %3d", $self->{razor2_cf_score}));
-    return 1;
-  }
-  return 0;
-}
-
 sub check_messageid_not_usable {
   my ($self) = @_;
   local ($_);
@@ -2801,8 +2596,8 @@ sub check_blank_line_ratio {
     $minlines = 1;
   }
 
-  $fulltext = $self->get_decoded_body_text_array();
   if (! exists $self->{blank_line_ratio}->{$minlines}) {
+    $fulltext = $self->get_decoded_body_text_array();
     my ($blank) = 0;
     if (scalar @{$fulltext} >= $minlines) {
       foreach my $line (@{$fulltext}) {
@@ -2819,96 +2614,6 @@ sub check_blank_line_ratio {
   return (($min == 0 && $self->{blank_line_ratio}->{$minlines} <= $max) ||
 	  ($self->{blank_line_ratio}->{$minlines} > $min &&
 	   $self->{blank_line_ratio}->{$minlines} <= $max));
-}
-
-sub check_access_database {
-  my ($self, $path) = @_;
-
-  if (!HAS_DB_FILE) {
-    return 0;
-  }
-
-  my %access;
-  my %ok = map { $_ => 1 } qw/ OK SKIP /;
-  my %bad = map { $_ => 1 } qw/ REJECT ERROR DISCARD /;
-
-  $path = $self->{main}->sed_path ($path);
-  dbg("Tie-ing to DB file R/O in $path");
-  if (tie %access,"DB_File",$path, O_RDONLY) {
-    my @lookfor = ();
-
-    # Look for "From:" versions as well!
-    foreach my $from ($self->all_from_addrs()) {
-      # $user."\@"
-      # rotate through $domain and check
-      my ($user,$domain) = split(/\@/, $from,2);
-      push(@lookfor, "From:$from",$from);
-      if ($user) {
-        push(@lookfor, "From:$user\@", "$user\@");
-      }
-      if ($domain) {
-        while ($domain =~ /\./) {
-          push(@lookfor, "From:$domain", $domain);
-          $domain =~ s/^[^.]*\.//;
-        }
-        push(@lookfor, "From:$domain", $domain);
-      }
-    }
-
-    # we can only match this if we have at least 1 untrusted header
-    if ($self->{num_relays_untrusted} > 0) {
-      my $lastunt = $self->{relays_untrusted}->[0];
-
-      # If there was a reverse lookup, use it in a lookup
-      if (! $lastunt->{no_reverse_dns}) {
-        my $rdns = $lastunt->{lc_rdns};
-        while($rdns =~ /\./) {
-          push(@lookfor, "From:$rdns", $rdns);
-          $rdns =~ s/^[^.]*\.//;
-        }
-        push(@lookfor, "From:$rdns", $rdns);
-      }
-
-      # do both IP and net (rotate over IP)
-      my ($ip) = $lastunt->{ip};
-      $ip =~ tr/0-9.//cd;
-      while($ip =~ /\./) {
-        push(@lookfor, "From:$ip", $ip);
-	$ip =~ s/\.[^.]*$//;
-      }
-      push(@lookfor, "From:$ip", $ip);
-    }
-
-    my $retval = 0;
-    my %cache = ();
-    foreach (@lookfor) {
-      next if ($cache{$_}++);
-      dbg("accessdb: Looking for $_");
-
-      # Some systems put a null at the end of the key, most don't...
-      my $result = $access{$_} || $access{"$_\000"} || next;
-
-      my ($type) = split(/\W/,$result);
-      if (exists $ok{$type}) {
-	dbg("accessdb: hit OK: $type, $_");
-        $retval = 0;
-	last;
-      }
-      if (exists $bad{$type} || $type =~ /^\d+$/) {
-        $retval = 1;
-	dbg("accessdb: hit not-OK: $type, $_");
-      }
-    }
-
-    dbg("Untie-ing DB file $path");
-    untie %access;
-
-    return $retval;
-  }
-  else {
-    dbg("Cannot open accessdb $path R/O: $!");
-  }
-  0;
 }
 
 sub sent_by_applemail {
@@ -2962,7 +2667,7 @@ sub check_for_rdns_helo_mismatch {	# T_FAKE_HELO_*
       if ($self->is_dns_available()) {
 	my $vrdns = $self->lookup_ptr ($relay->{ip});
 	if (defined $vrdns && $vrdns ne $claimed) {
-	  dbg ("rdns/helo mismatch: helo=$relay->{helo} ".	
+	  dbg("eval: rdns/helo mismatch: helo=$relay->{helo} ".	
 		"claimed-rdns=$claimed true-rdns=$vrdns");
 	  return 1;
 	  # TODO: instead, we should set a flag and check it later for
@@ -2982,7 +2687,7 @@ sub check_for_rdns_helo_mismatch {	# T_FAKE_HELO_*
       }
 
       # otherwise there *is* a mismatch
-      dbg ("rdns/helo mismatch: helo=$relay->{helo} rdns=$claimed");
+      dbg("eval: rdns/helo mismatch: helo=$relay->{helo} rdns=$claimed");
       return 1;
     }
   }
@@ -2995,15 +2700,15 @@ sub check_for_rdns_helo_mismatch {	# T_FAKE_HELO_*
 sub helo_ip_mismatch {
   my ($self) = @_;
   my $IP_ADDRESS = IPV4_ADDRESS;
-  my $IP_IN_RESERVED_RANGE = IP_IN_RESERVED_RANGE;
+  my $IP_PRIVATE = IP_PRIVATE;
 
   for my $relay (@{$self->{relays_untrusted}}) {
     # is HELO usable?
     next unless ($relay->{helo} =~ m/^$IP_ADDRESS$/ &&
-		 $relay->{helo} !~ /^$IP_IN_RESERVED_RANGE/);
+		 $relay->{helo} !~ /$IP_PRIVATE/);
     # compare HELO with IP
     return 1 if ($relay->{ip} =~ m/^$IP_ADDRESS$/ &&
-		 $relay->{ip} !~ m/^$IP_IN_RESERVED_RANGE/ &&
+		 $relay->{ip} !~ m/$IP_PRIVATE/ &&
 		 $relay->{helo} ne $relay->{ip} &&
 		 # different IP is okay if in same /24
 		 $relay->{helo} =~ /^(\d+\.\d+\.\d+\.)/ &&
@@ -3017,7 +2722,7 @@ sub helo_ip_mismatch {
 
 sub check_all_trusted {
   my ($self) = @_;
-  return $self->{num_relays_trusted} 
+  return $self->{num_relays_trusted}
         && !$self->{num_relays_untrusted}
         && !$self->{num_relays_unparseable};
 }
@@ -3043,9 +2748,9 @@ sub html_tag_balance {
   $rawtag =~ /^([a-zA-Z0-9]+)$/; my $tag = $1;
   $rawexpr =~ /^([\<\>\=\!\-\+ 0-9]+)$/; my $expr = $1;
 
-  return 0 unless exists $self->{html}{"inside_$tag"};
+  return 0 unless exists $self->{html}{inside}{$tag};
 
-  $self->{html}{"inside_$tag"} =~ /^([\<\>\=\!\-\+ 0-9]+)$/;
+  $self->{html}{inside}{$tag} =~ /^([\<\>\=\!\-\+ 0-9]+)$/;
   my $val = $1;
   return eval "\$val $expr";
 }
@@ -3053,7 +2758,7 @@ sub html_tag_balance {
 sub html_image_only {
   my ($self, undef, $min, $max) = @_;
 
-  return (exists $self->{html}{"inside_img"} &&
+  return (exists $self->{html}{inside}{img} &&
 	  exists $self->{html}{length} &&
 	  $self->{html}{length} > $min &&
 	  $self->{html}{length} <= $max);
@@ -3092,7 +2797,7 @@ sub html_charset_faraway {
 
 sub html_tag_exists {
   my ($self, undef, $tag) = @_;
-  return exists $self->{html}{"inside_$tag"};
+  return exists $self->{html}{inside}{$tag};
 }
 
 sub html_test {
@@ -3122,6 +2827,23 @@ sub html_text_match {
     }
   }
   return 0;
+}
+
+sub html_title_subject_ratio {
+  my ($self, undef, $ratio) = @_;
+
+  my $subject = $self->get('Subject');
+  if (! $subject) {
+    return 0;
+  }
+  my $max = 0;
+  for my $string (@{ $self->{html}{title} }) {
+    if ($string) {
+      my $ratio = length($string) / length($subject);
+      $max = $ratio if $ratio > $max;
+    }
+  }
+  return $max > $ratio;
 }
 
 sub html_text_not_match {
@@ -3170,9 +2892,18 @@ sub multipart_alternative_difference {
   return 0;
 }
 
+sub multipart_alternative_difference_count {
+  my ($self, $fulltext, $ratio, $minhtml) = @_;
+  $self->_multipart_alternative_difference() unless (exists $self->{madiff});
+  return 0 unless $self->{madiff_html} > $minhtml;
+  return(($self->{madiff_text} / $self->{madiff_html}) > $ratio);
+}
+
 sub _multipart_alternative_difference {
   my ($self) = @_;
   $self->{madiff} = 0;
+  $self->{madiff_html} = 0;
+  $self->{madiff_text} = 0;
 
   # Find all multipart/alternative parts in the message
   my @ma = $self->{msg}->find_parts(qr@^multipart/alternative\b@i);
@@ -3210,20 +2941,20 @@ sub _multipart_alternative_difference {
       # in one part will be the same in other parts.
       #
       if ($type eq 'text/html') {
-        foreach my $w (grep(/\w/,split(/\s+/,$rnd))) {
-	  #dbg("HTML: $w");
+        foreach my $w (grep(/\w/, split(/\s+/, $rnd))) {
+	  #dbg("eval: HTML: $w");
           $html{$w}++;
         }
 
 	# If there are no words, mark if there's at least 1 image ...
-	if (keys %html == 0 && exists $self->{html}{"inside_img"}) {
+	if (keys %html == 0 && exists $self->{html}{inside}{img}) {
 	  # Use "\n" as the mark since it can't ever occur normally
 	  $html{"\n"}=1;
 	}
       }
       else {
-        foreach my $w (grep(/\w/,split(/\s+/,$rnd))) {
-	  #dbg("TEXT: $w");
+        foreach my $w (grep(/\w/, split(/\s+/, $rnd))) {
+	  #dbg("eval: TEXT: $w");
           $text{$w}++;
         }
       }
@@ -3233,13 +2964,17 @@ sub _multipart_alternative_difference {
     my $orig = keys %html;
     next if ($orig == 0);
 
+    $self->{madiff_html} = $orig;
+    $self->{madiff_text} = keys %text;
+    dbg('eval: text words: ' . $self->{madiff_text} . ', html words: ' . $self->{madiff_html});
+
     # If the token appears at least as many times in the text part as
     # in the html part, remove it from the list of html tokens.
     while(my ($k,$v) = each %text) {
       delete $html{$k} if (exists $html{$k} && $html{$k}-$text{$k} < 1);
     }
 
-    #map { dbg("LEFT: $_") } keys %html;
+    #map { dbg("eval: LEFT: $_") } keys %html;
 
     # In theory, the tokens should be the same in both text and html
     # parts, so there would be 0 tokens left in the html token list, for
@@ -3248,7 +2983,7 @@ sub _multipart_alternative_difference {
     my $diff = scalar(keys %html)/$orig*100;
     $self->{madiff} = $diff if ($diff > $self->{madiff});
 
-    dbg(sprintf "madiff: left: %d, orig: %d, max-difference: %0.2f%%", scalar(keys %html), $orig, $self->{madiff});
+    dbg("eval: " . sprintf "madiff: left: %d, orig: %d, max-difference: %0.2f%%", scalar(keys %html), $orig, $self->{madiff});
   }
 
   return;
@@ -3278,7 +3013,7 @@ sub check_for_http_redirector {
 	$_ = Mail::SpamAssassin::Util::uri_to_domain(lc($_)) || $_;
       }
       next if ($redir eq $dest);
-      dbg("redirect: found $redir to $dest, flagging");
+      dbg("eval: redirect: found $redir to $dest, flagging");
       return 1;
     }
   }
@@ -3294,8 +3029,8 @@ sub check_for_numeric_helo {
 
   if ($rcvd) {
     my $IP_ADDRESS = IPV4_ADDRESS;
-    my $IP_IN_RESERVED_RANGE = IP_IN_RESERVED_RANGE;
-    if ($rcvd =~ /helo=($IP_ADDRESS)\b/i && $1 !~ /^$IP_IN_RESERVED_RANGE/) {
+    my $IP_PRIVATE = IP_PRIVATE;
+    if ($rcvd =~ /helo=($IP_ADDRESS)\b/i && $1 !~ /$IP_PRIVATE/) {
       return 1;
     }
   }
@@ -3321,10 +3056,92 @@ sub check_for_illegal_ip {
 
 ###########################################################################
 
-sub check_for_long_header {
+sub check_msg_parse_flags {
+  my($self, $type, $type2) = @_;
+  $type = $type2 if ref($type);
+  return defined $self->{msg}->{$type};
+}
+
+###########################################################################
+
+sub check_unresolved_template {
   my ($self) = @_;
 
-  return defined $self->{msg}->{'truncated_header'};
+  my $all = $self->get('ALL');	# cached access
+  $all =~ s/\n[ \t]+/ /gs;	# fix continuation lines
+  
+  for my $header (split(/\n/, $all)) {
+    # slightly faster to test in this order
+    if ($header =~ /%[A-Z][A-Z_-]/ &&
+	$header !~ /^(?:X-UIDL|X-Face|To|Cc|From|Subject|References|In-Reply-To|(?:X-|Resent-|X-Original-)?Message-Id):/i)
+    {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+###########################################################################
+
+sub check_ratware_name_id {
+  my ($self) = @_;
+
+  my $mid = $self->get('MESSAGEID');
+  my $from = $self->get('From');
+  if ($mid =~ m/<[A-Z]{28}\.([^>]+?)>/) {
+     if ($from =~ m/\"[^\"]+\"\s*<\Q$1\E>/) {
+       return 1;
+     }
+  }
+  return 0;
+}
+
+sub check_https_ip_mismatch {
+  my ($self) = @_;
+
+  while (my($k,$v) = each %{$self->{html}->{uri_detail}}) {
+    next if ($k !~ m%^https?:/*(?:[^\@/]+\@)?\d+\.\d+\.\d+\.\d+%i);
+    foreach (@{$v->{anchor_text}}) {
+      next if (m%^https:/*(?:[^\@/]+\@)?\d+\.\d+\.\d+\.\d+%i);
+      if (m%https:%i) {
+        keys %{$self->{html}->{uri_detail}}; # resets iterator, bug 4829
+        return 1;
+      }
+    }
+  }
+
+  return 0;
+}
+
+sub check_iframe_src {
+  my ($self) = @_;
+
+  foreach my $v ( values %{$self->{html}->{uri_detail}} ) {
+    return 1 if $v->{types}->{iframe};
+  }
+
+  return 0;
+}
+
+sub check_ratware_envelope_from {
+  my ($self) = @_;
+
+  my $to = $self->get('To:addr');
+  my $from = $self->get('EnvelopeFrom');
+
+  return 0 unless ($to && $from);
+  return 0 if ($from =~ /^SRS\d=/);
+
+  if ($to =~ /^([^@]+)@(.+)$/) {
+    my($user,$dom) = ($1,$2);
+    $dom = Mail::SpamAssassin::Util::RegistrarBoundaries::trim_domain($dom);
+    return unless
+        (Mail::SpamAssassin::Util::RegistrarBoundaries::is_domain_valid($dom));
+
+    return 1 if ($from =~ /\b\Q$dom\E.\Q$user\E@/i);
+  }
+
+  return 0;
 }
 
 1;

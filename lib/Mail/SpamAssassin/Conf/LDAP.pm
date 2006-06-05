@@ -1,3 +1,19 @@
+# <@LICENSE>
+# Copyright 2004 Apache Software Foundation
+# 
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+# 
+#     http://www.apache.org/licenses/LICENSE-2.0
+# 
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# </@LICENSE>
+
 =head1 NAME
 
 Mail::SpamAssassin::Conf::LDAP - load SpamAssassin scores from LDAP database
@@ -24,7 +40,10 @@ interfaces.
 
 package Mail::SpamAssassin::Conf::LDAP;
 
+use Mail::SpamAssassin::Logger;
+
 use strict;
+use warnings;
 use bytes;
 use Carp;
 
@@ -52,7 +71,7 @@ sub new {
 ###########################################################################
 
 sub load_modules {		# static
-  dbg("LDAP: loading Net::LDAP and URI");
+  dbg("ldap: loading Net::LDAP and URI");
   eval {
     require Net::LDAP; # actual server connection
     require URI;       # parse server connection dsn
@@ -73,9 +92,9 @@ sub load {
    my ($self, $username) = @_;
 
    my $url = $self->{main}->{conf}->{user_scores_dsn}; # an ldap URI
-   dbg("LDAP: URL is $url");
+   dbg("ldap: URL is $url");
    if(!defined($url) || $url eq '') {
-     dbg ("LDAP: No URL defined; skipping LDAP");
+     dbg("ldap: No URL defined; skipping LDAP");
      return;
    }
 
@@ -88,7 +107,7 @@ sub load {
    };
 
    if ($@) {
-     warn "failed to load user scores from LDAP server, ignored\n";
+     warn "ldap: failed to load user scores from LDAP server, ignored\n";
    }
 }
 
@@ -103,7 +122,7 @@ sub load_with_ldap {
 
   my $host   = $uri->host;
   if (!defined($host) || $host eq '') {
-    dbg("LDAP: No server specified, assuming localhost");
+    dbg("ldap: No server specified, assuming localhost");
     $host = "localhost";
   }
   my $port   = $uri->port;
@@ -114,7 +133,7 @@ sub load_with_ldap {
   my %extn   = $uri->extensions; # unused
 
   $filter =~ s/__USERNAME__/$username/g;
-  dbg("LDAP: host=$host, port=$port, base='$base', attr=${attr[0]}, scope=$scope, filter='$filter'");
+  dbg("ldap: host=$host, port=$port, base='$base', attr=${attr[0]}, scope=$scope, filter='$filter'");
 
   my $main = $self->{main};
   my $ldapuser = $main->{conf}->{user_scores_ldap_username};
@@ -123,14 +142,14 @@ sub load_with_ldap {
   if(!$ldapuser) {
       undef($ldapuser);
   } else {
-      dbg("LDAP: user='$ldapuser'");
+      dbg("ldap: user='$ldapuser'");
   }
 
   if(!$ldappass) {
       undef($ldappass);
   } else {
       # don't log this to avoid leaking sensitive info
-      # dbg("LDAP: pass='$ldappass'");
+      # dbg("ldap: pass='$ldappass'");
   }
 
   my $f_attribute = $attr[0];
@@ -152,7 +171,7 @@ sub load_with_ldap {
   foreach my $entry ($result->all_entries) {
     my @v = $entry->get_value($f_attribute);
     foreach my $v (@v) {
-      dbg("LDAP: retrieving prefs for $username: $v");
+      dbg("ldap: retrieving prefs for $username: $v");
       $conf .= $v."\n";
     }
   }
@@ -164,8 +183,7 @@ sub load_with_ldap {
 
 ###########################################################################
 
-sub dbg { Mail::SpamAssassin::dbg (@_); }
-sub sa_die { Mail::SpamAssassin::sa_die (@_); }
+sub sa_die { Mail::SpamAssassin::sa_die(@_); }
 
 ###########################################################################
 

@@ -17,7 +17,10 @@
 # </@LICENSE>
 
 sub usage {
-  die <<ENDOFUSAGE;
+  my $status = shift;
+
+  my $out = $status ? STDERR : STDOUT;
+  print $out <<EOF;
 usage: mass-check [options] target ...
  
   -c=file       set configuration/rules directory
@@ -26,7 +29,8 @@ usage: mass-check [options] target ...
   -j=jobs       specify the number of processes to run simultaneously
   --net         turn on network checks!
   --mid         report Message-ID from each message
-  --debug       report debugging information
+  --debug=LIST  report debugging information (default is all facilities, LIST
+                is a comma-separated list of facilities)
   --progress    show progress updates during check
   --rewrite=OUT save rewritten message to OUT (default is /tmp/out)
   --showdots    print a dot for each scanned message
@@ -35,11 +39,13 @@ usage: mass-check [options] target ...
   --deencap=RE  Extract SpamAssassin-encapsulated spam mails only if they
                 were encapsulated by servers matching the regexp RE
                 (default = extract all SpamAssassin-encapsulated mails)
+  --lint        check rules for syntax before running
  
   log options
   -o            write all logs to stdout
   --loghits     log the text hit for patterns (useful for debugging)
   --loguris	log the URIs found
+  --logmem	log the memory delta (only on Linux)
   --hamlog=log  use <log> as ham log ('ham.log' is default)
   --spamlog=log use <log> as spam log ('spam.log' is default)
  
@@ -58,32 +64,43 @@ usage: mass-check [options] target ...
   --file        subsequent targets are files in RFC 822 format
   --mbox        subsequent targets are mbox files
   --mbx         subsequent targets are mbx files
- 
+
   Just left over functions we should remove at some point:
   --bayes       report score from Bayesian classifier
- 
+
+  options used during score generation process
+  --learn=N     learn N% of messages as spam or ham
+  --reuse       reuse network checks if X-Spam-Status: is present in messages
+
   non-option arguments are used as target names (mail files and folders),
   the target format is: <class>:<format>:<location>
   <class>       is "spam" or "ham"
   <format>      is "dir", "file", "mbx", or "mbox"
   <location>    is a file or directory name.  globbing of ~ and * is supported
 
-ENDOFUSAGE
+EOF
+  exit($status);
 }
 
 ###########################################################################
 
 use vars qw($opt_c $opt_p $opt_f $opt_j $opt_n $opt_o $opt_all $opt_bayes
 	    $opt_debug $opt_format $opt_hamlog $opt_head $opt_loghits
-	    $opt_mid $opt_mh $opt_ms $opt_net $opt_nosort $opt_progress
-	    $opt_showdots $opt_spamlog $opt_tail $opt_rules $opt_restart
-	    $opt_loguris $opt_after $opt_before $opt_rewrite $opt_deencap);
+	    $opt_mid $opt_net $opt_nosort $opt_progress $opt_showdots
+	    $opt_spamlog $opt_tail $opt_rules $opt_restart $opt_loguris
+	    $opt_logmem $opt_after $opt_before $opt_rewrite $opt_deencap
+	    $opt_learn $opt_reuse $opt_lint
+	    $total_messages $statusevery
+	    %reuse %orig_conf %reuse_conf $reuse_rules_loaded_p);
 
 use FindBin;
 use lib "$FindBin::Bin/../lib";
+use lib "$FindBin::Bin/tmp";
 eval "use bytes";
 use Mail::SpamAssassin::ArchiveIterator;
 use Mail::SpamAssassin;
+use Mail::SpamAssassin::Logger;
+use File::Copy;
 use Getopt::Long;
 use POSIX qw(strftime);
 use constant HAS_TIME_PARSEDATE => eval { require Time::ParseDate; };
@@ -96,36 +113,75 @@ $opt_j = 1;
 $opt_net = 0;
 $opt_hamlog = "ham.log";
 $opt_spamlog = "spam.log";
+$opt_learn = 0;
+$reuse_rules_loaded_p = 0;
 
-GetOptions("c=s", "p=s", "f=s", "j=i", "n", "o", "all", "bayes", "debug",
+GetOptions("c=s", "p=s", "f=s", "j=i", "n", "o", "all", "bayes", "debug:s",
 	   "hamlog=s", "head=i", "loghits", "mh", "mid", "ms", "net",
 	   "progress", "rewrite:s", "showdots", "spamlog=s", "tail=i",
-	   "rules=s", "restart=i", "after=s", "before=s", "loguris", "deencap=s",
+	   "rules=s", "restart=i", "after=s", "before=s", "loguris",
+	   "deencap=s", "logmem", "learn=i", "reuse", "lint",
 	   "dir" => sub { $opt_format = "dir"; },
 	   "file" => sub { $opt_format = "file"; },
 	   "mbox" => sub { $opt_format = "mbox"; },
 	   "mbx" => sub { $opt_format = "mbx"; },
-	   '<>' => \&target) or usage();
+	   "help" => sub { usage(0); },
+	   '<>' => \&target) or usage(1);
 
+# rules.pl is for the --reuse option, score set doesn't matter
+if ($opt_reuse && ! -f "$FindBin::Bin/tmp/rules.pl") {
+  system("cd $FindBin::Bin; perl parse-rules-for-masses -d $opt_c");
+}
+
+require "rules.pl" if $opt_reuse;
+
+# test messages for the mass-check
+my @targets;
 if ($opt_f) {
   open(F, $opt_f) || die $!;
   push(@targets, map { chomp; $_ } <F>);
   close(F);
 }
+usage(1) if !@targets;
 
-if (scalar @targets == 0) { usage(); }
+$opt_debug ||= 'all' if defined $opt_debug;
 
-#if ($opt_ms) {
-#find_missed($opt_spamlog);
-#}
-#elsif ($opt_mh) {
-#find_missed($opt_hamlog);
-#}
+my $user_prefs = "$opt_p/user_prefs";
+
+# --lint
+# In theory we could probably use the same spamtest object as below,
+# but since it's probably not expecting that, and we don't want
+# strange things happening, create a local object.
+if ($opt_lint) {
+
+  my $spamlint = new Mail::SpamAssassin ({
+    'debug'              			=> $opt_debug,
+    'rules_filename'     			=> $opt_c,
+    'userprefs_filename' 			=> $user_prefs,
+    'site_rules_filename'			=> "$opt_p/local.cf",
+    'userstate_dir'     			=> "$opt_p",
+    'save_pattern_hits'  			=> $opt_loghits,
+    'dont_copy_prefs'   			=> 1,
+    'local_tests_only'   			=> $opt_net ? 0 : 1,
+    'only_these_rules'   			=> $opt_rules,
+    'ignore_safety_expire_timeout'	=> 1,
+    PREFIX				=> '',
+    DEF_RULES_DIR        			=> $opt_c,
+    LOCAL_RULES_DIR      			=> '',
+  });
+
+
+  $spamlint->debug_diagnostics();
+  my $res = $spamlint->lint_rules();
+  $spamlint->finish();
+  warn "lint: $res issues detected, please rerun with debug enabled for more information\n" if ($res);
+  exit 1 if $res;
+}
 
 $spamtest = new Mail::SpamAssassin ({
   'debug'              			=> $opt_debug,
   'rules_filename'     			=> $opt_c,
-  'userprefs_filename' 			=> "$opt_p/user_prefs",
+  'userprefs_filename' 			=> $user_prefs,
   'site_rules_filename'			=> "$opt_p/local.cf",
   'userstate_dir'     			=> "$opt_p",
   'save_pattern_hits'  			=> $opt_loghits,
@@ -141,9 +197,34 @@ $spamtest = new Mail::SpamAssassin ({
 $spamtest->compile_now(1);
 $spamtest->read_scoreonly_config("$FindBin::Bin/mass-check.cf");
 
-my $who   = `id -un 2>/dev/null`;   chomp $who;
-my $where = `uname -n 2>/dev/null`; chomp $where;
-my $when  = `date -u`;              chomp $when;
+# generated user_prefs
+if ($opt_reuse) {
+  # copy current prefs if it exists
+
+  $spamtest->copy_config(undef, \%orig_conf);
+
+  # zeroed scores to mass_prefs
+  my @zero = sort grep { defined $reuse{$_}->{skip} } keys %reuse;
+  open(PREFS, ">> $opt_p/mass_prefs") || die "Unable to open $opt_p/mass_prefs: $!\nNeeded for --reuse to work properly";
+  for my $zero (@zero) {
+    print PREFS "score $zero 0\n";
+  }
+  close(PREFS);
+
+  $spamtest->read_scoreonly_config("$opt_p/mass_prefs");
+
+  $spamtest->copy_config(undef, \%reuse_conf);
+  $reuse_rules_loaded_p = 1;
+}
+
+my $who = `id -un 2>/dev/null`;
+my $where = `uname -n 2>/dev/null`;
+my $when = `date -u`;
+my $host = $ENV{'HOSTNAME'} || $ENV{'HOST'} || `hostname` || 'localhost';
+chomp $who;
+chomp $where;
+chomp $when;
+chomp $host;
 my $revision = "unknown";
 if (open(TESTING, "$opt_c/70_testing.cf")) {
   chomp($revision = <TESTING>);
@@ -154,14 +235,18 @@ my $log_header = "# mass-check results from $who\@$where, on $when\n" .
 		 "# M:SA version ".$spamtest->Version()."\n" .
 		 "# SVN revision: $revision\n" .
 		 "# Perl version: $] on $Config{archname}\n";
-my $host = $ENV{'HOSTNAME'} || $ENV{'HOST'} || `hostname` || 'localhost';
-chomp $host;
 
 my $updates = 10;
 my $total_count = 0;
 my $spam_count = 0;
 my $ham_count = 0;
 my $init_results = 0;
+
+# Deal with --rewrite
+if (defined $opt_rewrite) {
+  my $rewrite = ($opt_rewrite ? $opt_rewrite : "/tmp/out");
+  open(REWRITE, "> $rewrite") || die "open of $rewrite failed: $!";
+}
 
 # Deal with --before and --after
 foreach my $time ($opt_before, $opt_after) {
@@ -194,13 +279,24 @@ my $iter = new Mail::SpamAssassin::ArchiveIterator({
 });
 
 if ($opt_progress) {
-  my $now = strftime("%Y-%m-%d %X", localtime(time));
-  printf STDERR "status: pre-scanning and sorting. now: %s\n", $now;
+  status('starting scan stage');
 }
+
 $iter->set_functions(\&wanted, \&result);
 $iter->run(@targets);
+
+if ($opt_progress) {
+  status('completed run stage');
+}
+
 print STDERR "\n" if ($opt_showdots);
-exit;
+
+if (defined $opt_rewrite) {
+  close(REWRITE);
+}
+
+# exit status: did we check at least one message correctly?
+exit(!($ham_count || $spam_count));
 
 ###########################################################################
 
@@ -218,6 +314,20 @@ sub target  {
 ###########################################################################
 
 sub init_results {
+  if ($opt_progress) {
+    # make it a local variable for now
+    $total_messages = $Mail::SpamAssassin::ArchiveIterator::MESSAGES;
+
+    # round up since 100% will be caught at end already
+    $statusevery = int($total_messages / $updates + 1);
+
+    # if $messages < $updates, just give a status line per msg.
+    $statusevery ||= 1;
+
+    status("completed scan stage, $total_messages messages");
+    status('starting run stage');
+  }
+
   if ($opt_o) {
     autoflush STDOUT 1;
     print STDOUT $log_header;
@@ -257,21 +367,48 @@ sub result {
 }
 
 sub wanted {
-  my (undef, $id, $time, $dataref) = @_;
+  my ($class, $id, $time, $dataref, $format) = @_;
   my $out;
+
+  memory_track_start() if ($opt_logmem);
 
   my $ma = $spamtest->parse($dataref, 1);
 
   # remove SpamAssassin markup, if present and the mail was spam
-  my $stat = $ma->get_header("X-Spam-Status");
-  if ($stat && $stat =~ /^Yes,/) {
+  my $header = $ma->get_header("Received");
+  my $x_spam_status;
+  if ($opt_reuse) {
+    # get X-Spam-Status: header for rule hit resue
+    $x_spam_status = $ma->get_header("X-Spam-Status");
+  }
+  # previous hits
+  my @previous;
+  if ($x_spam_status) {
+    $x_spam_status =~ s/,\s+/,/gs;
+    if ($x_spam_status =~ m/tests=(\S*)/) {
+      push @previous, split(/,/, $1);
+
+      # we found previous tests, so move the reuse config into place
+      unless ($reuse_rules_loaded_p) {
+	$spamtest->copy_config(\%reuse_conf, undef);
+	$reuse_rules_loaded_p = 1;
+      }
+    }
+  }
+  elsif ($opt_reuse) {
+    if ($reuse_rules_loaded_p) {
+      $spamtest->copy_config(\%orig_conf, undef);
+      $reuse_rules_loaded_p = 0;
+    }
+  }
+
+  if ($header && $header =~ /\bwith SpamAssassin\b/) {
     if (!$opt_deencap || message_should_be_deencapped($ma)) {
       my $new_ma = $spamtest->parse($spamtest->remove_spamassassin_markup($ma), 1);
       $ma->finish();
       $ma = $new_ma;
     }
   }
-
 
   # log-uris support
   my $status;
@@ -290,6 +427,39 @@ sub wanted {
   }
 
   my @extra;
+
+  # sample-based learning
+  if ($opt_learn > 0) {
+    my $spam;
+    # spam learned as ham = 0.05%
+    if ($class eq 's' && rand(100) < 0.05) {
+      $spam = 0;
+    }
+    # ham learned as spam = 0.01%
+    elsif ($class eq 'h' && rand(100) < 0.01) {
+      $spam = 1;
+    }
+    # spam/ham learned correctly
+    elsif (rand(100) < $opt_learn) {
+      if ($class eq 's') {
+	$spam = 1;
+      }
+      elsif ($class eq 'h') {
+	$spam = 0;
+      }
+      else {
+	die "unknown class, learning failed";
+      }
+    }
+    if (defined $spam) {
+      my $result = ($spam ? "spam" : "ham");
+      my $status = $spamtest->learn($ma, undef, $spam, 0);
+      $learned = $status->did_learn();
+      $result = "undef" if !defined $learned;
+      push(@extra, "learn=".$result);
+    }
+  }
+
   if (defined($time)) {
     push(@extra, "time=".$time);
   }
@@ -312,6 +482,21 @@ sub wanted {
     push(@extra, "mid=$mid");
   }
   push(@extra, "scantime=" . ($after - $before));
+  push(@extra, "format=$format");
+
+  if ($opt_logmem) { 
+    my $mem = memory_track_finish();
+    if ($mem) {
+      push(@extra, $mem);
+    }
+  }
+
+  if ($reuse_rules_loaded_p) {
+    push(@extra, "reuse=yes");
+  }
+  else {
+    push(@extra, "reuse=no");
+  }
 
   my $yorn;
   my $score;
@@ -325,15 +510,27 @@ sub wanted {
     $extra = '';
   } else {
     $yorn = $status->is_spam() ? 'Y' : '.';
+    # don't bother adjusting scores for reuse
     $score = $status->get_score();
-    $tests = join(",", sort(grep(length,$status->get_names_of_tests_hit(),$status->get_names_of_subtests_hit())));
+    # list of tests hit
+    my @tests;
+    push @tests, split(/,/, $status->get_names_of_tests_hit());
+    push @tests, split(/,/, $status->get_names_of_subtests_hit());
+    # hit reuse
+    if ($x_spam_status) {
+      # generate mapping of hits to remove hits that are marked as skip
+      @tests = grep { !$reuse{$_}->{skip} } @tests;
+      # add hits from previous
+      for (@previous) {
+	push(@tests, $reuse{$_}->{reuse}) if $reuse{$_}->{reuse};
+      }
+    }
+    $tests = join(",", sort(@tests));
     $extra = join(",", @extra);
   }
 
   if (defined $opt_rewrite) {
-    open(REWRITE, "> " . ($opt_rewrite ? $opt_rewrite : "/tmp/out"));
     print REWRITE $status->rewrite_mail();
-    close(REWRITE);
   }
 
   $id =~ s/\s/_/g;
@@ -421,18 +618,56 @@ sub progress {
   my ($time) = @_;
   $time ||= 0;
 
-  my $messages = $Mail::SpamAssassin::ArchiveIterator::MESSAGES;
-  my $statusevery = int($messages / $updates);
-  $statusevery ||= 1; # if $messages < $updates, just give a status line per msg.
-
   # Are we at the end or otherwise at a point we should print status?  Then do it.
-  if ($messages == $total_count || $total_count % $statusevery == 0) {
+  if ($total_messages == $total_count || $total_count % $statusevery == 0) {
     my $time = strftime("%Y-%m-%d", localtime($time));
-    my $now = strftime("%Y-%m-%d %X", localtime(time));
-    printf STDERR "status: %3.0f%% ham: %-6d spam: %-6d date: %s now: %s\n",
-	($total_count / $messages) * 100, $ham_count, $spam_count, $time, $now;
+    status(sprintf("%3d%% ham: %-6d spam: %-6d date: %s",
+	int(($total_count / $total_messages) * 100), $ham_count, $spam_count, $time));
   }
+}
+
+sub status {
+  my($str) = @_;
+  my $now = strftime("%Y-%m-%d %X", localtime(time));
+  printf STDERR "status: %-48s now: %s\n", $str, $now;
 }
 
 ###########################################################################
 
+our ($mem_size, $mem_rss, $mem_shared);
+
+sub memory_track_start {
+  if ($^O =~ /linux/i) {
+    if (open (IN, "</proc/$$/statm")) {
+      my $statm = <IN>;
+      close IN;
+      if ($statm =~ /^(\d+) (\d+) (\d+) /) {
+        $mem_size = $1;
+        $mem_rss = $2;
+        $mem_shared = $3;
+      }
+    }
+  }
+}
+
+sub memory_track_finish {
+  my $str = '';
+
+  if ($^O =~ /linux/i) {
+    if (open (IN, "</proc/$$/statm")) {
+      my $statm = <IN>;
+      close IN;
+      if ($statm =~ /^(\d+) (\d+) (\d+) /) {
+        my $size = $1;
+        my $rss = $2;
+        my $shared = $3;
+
+        $str = sprintf ("memsz=%d,memrss=%d,memshr=%d",
+                ($size - $mem_size),
+                ($rss - $mem_rss),
+                ($shared - $mem_shared));
+      }
+    }
+  }
+  $str;
+}

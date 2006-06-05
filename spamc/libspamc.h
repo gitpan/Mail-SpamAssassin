@@ -36,7 +36,7 @@
 #include <netinet/in.h>
 #endif
 
-#ifdef _WIN32
+#if (defined(_WIN32) || !defined(_SYSEXITS_H))
 /* FIXME: This stuff has to go somewhere else */
 
 #define EX_OK           0
@@ -80,22 +80,38 @@
 #define SPAMC_RAW_MODE       0
 #define SPAMC_BSMTP_MODE     1
 
-#define SPAMC_USE_SSL	     (1<<27)
-#define SPAMC_SAFE_FALLBACK  (1<<28)
-#define SPAMC_CHECK_ONLY     (1<<29)
+#define SPAMC_USE_SSL	      (1<<27)
+#define SPAMC_SAFE_FALLBACK   (1<<28)
+#define SPAMC_CHECK_ONLY      (1<<29)
 
 /* Jan 30, 2003 ym: added reporting options */
-#define SPAMC_REPORT         (1<<26)
-#define SPAMC_REPORT_IFSPAM  (1<<25)
+#define SPAMC_REPORT          (1<<26)
+#define SPAMC_REPORT_IFSPAM   (1<<25)
 
 /* Feb  1 2003 jm: might as well fix bug 191 as well */
-#define SPAMC_SYMBOLS        (1<<24)
+#define SPAMC_SYMBOLS         (1<<24)
 
 /* 2003/04/16 SJF: randomize hostname order (quasi load balancing) */
 #define SPAMC_RANDOMIZE_HOSTS (1<<23)
 
 /* log to stderr */
-#define SPAMC_LOG_TO_STDERR  (1<<22)
+#define SPAMC_LOG_TO_STDERR   (1<<22)
+
+/* Nov 24, 2004 NP: added learning support */
+#define SPAMC_LEARN	      (1<<21)
+
+/* May 5, 2005 NP: added list reporting support */
+#define SPAMC_REPORT_MSG      (1<<20)
+
+
+#define SPAMC_MESSAGE_CLASS_SPAM 1
+#define SPAMC_MESSAGE_CLASS_HAM  2
+
+#define SPAMC_SET_LOCAL          1
+#define SPAMC_SET_REMOTE         2
+
+#define SPAMC_REMOVE_LOCAL       4
+#define SPAMC_REMOVE_REMOTE      8
 
 /* Aug 14, 2002 bj: A struct for storing a message-in-progress */
 typedef enum
@@ -118,11 +134,12 @@ struct message
     /* Filled in by message_read */
     message_type_t type;
     char *raw;
-    unsigned int raw_len;		/* Raw message buffer */
+    int raw_len;		/* Raw message buffer */
+    /* note: do not make "raw_len" in particular unsigned! see bug 4593 */
     char *pre;
     int pre_len;		/* Pre-message data (e.g. SMTP commands) */
     char *msg;
-    unsigned int msg_len;		/* The message */
+    int msg_len;		/* The message */
     char *post;
     int post_len;		/* Post-message data (e.g. SMTP commands) */
     int content_length;
@@ -131,6 +148,7 @@ struct message
     int is_spam;		/* EX_ISSPAM if the message is spam, EX_NOTSPAM
 				   if not */
     float score, threshold;	/* score and threshold */
+    char *outbuf;		/* Buffer for output from spamd */
     char *out;
     int out_len;		/* Output from spamd. Either the filtered
 				   message, or the check-only response. Or else,
@@ -206,6 +224,15 @@ long message_write(int out_fd, struct message *m);
  */
 int message_filter(struct transport *tp, const char *username,
 		   int flags, struct message *m);
+
+/* Process the message through the spamd tell command, making as many
+ * connection attempts as are implied by the transport structure. To make
+ * this do failover, more than one host is defined, but if there is only
+ * one there, no failover is done.
+ */
+int message_tell(struct transport *tp, const char *username, int flags,
+		 struct message *m, int msg_class,
+		 unsigned int tellflags, unsigned int *didtellflags);
 
 /* Dump the message. If there is any data in the message (typically, m->type
  * will be MESSAGE_ERROR) it will be message_writed. Then, fd_in will be piped

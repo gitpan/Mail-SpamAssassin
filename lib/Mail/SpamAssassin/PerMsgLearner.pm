@@ -46,12 +46,13 @@ the learning process.
 package Mail::SpamAssassin::PerMsgLearner;
 
 use strict;
+use warnings;
 use bytes;
 
 use Mail::SpamAssassin;
-use Mail::SpamAssassin::AutoWhitelist;
 use Mail::SpamAssassin::PerMsgStatus;
 use Mail::SpamAssassin::Bayes;
+use Mail::SpamAssassin::Logger;
 
 use vars qw{
   @ISA
@@ -180,10 +181,6 @@ sub finish {
   delete $self->{conf};
   delete $self->{bayes_scanner};
 }
-
-###########################################################################
-
-sub dbg { Mail::SpamAssassin::dbg (@_); }
 
 ###########################################################################
 

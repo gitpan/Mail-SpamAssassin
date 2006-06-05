@@ -1,5 +1,3 @@
-# $Id: MailingList.pm,v 1.12 2003/01/09 23:51:56 msquadrat Exp $
-
 # <@LICENSE>
 # Copyright 2004 Apache Software Foundation
 # 
@@ -24,6 +22,7 @@ package Mail::SpamAssassin::MailingList;
 package Mail::SpamAssassin::PerMsgStatus;
 
 use strict;
+use warnings;
 use bytes;
 
 
