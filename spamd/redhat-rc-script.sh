@@ -19,7 +19,7 @@
 
 # Set default spamd configuration.
 SPAMDOPTIONS="-d -c -m5 -H"
-SPAMD_PID=/var/run/spamd.pid
+SPAMD_PID=/var/run/spamassassin/spamd.pid
 
 # Source spamd configuration.
 if [ -f /etc/sysconfig/spamassassin ] ; then
@@ -41,6 +41,7 @@ case "$1" in
 	RETVAL=$?
         echo
 	if [ $RETVAL = 0 ]; then
+		[ -n "$SPAMD_PID" ] && ln -s $SPAMD_PID /var/run/spamd.pid
 		touch /var/lock/subsys/spamassassin
 	fi
         ;;
@@ -52,7 +53,7 @@ case "$1" in
         echo
 	if [ $RETVAL = 0 ]; then
 		rm -f /var/lock/subsys/spamassassin
-		rm -f $SPAMD_PID
+		rm -f /var/run/spamd.pid
 	fi
         ;;
   restart)

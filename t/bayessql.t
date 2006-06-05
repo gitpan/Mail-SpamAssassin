@@ -3,9 +3,8 @@
 use lib '.'; use lib 't';
 use SATest;
 use Test;
-use Symbol qw(delete_package);
 
-use constant TEST_ENABLED => conf_bool('run_bayes_sql_tests');
+use constant TEST_ENABLED => (-e 'bayessql.cf' || -e 't/bayessql.cf');
 use constant HAS_DBI => eval { require DBI; }; # for our cleanup stuff
 
 BEGIN { 
@@ -17,7 +16,7 @@ BEGIN {
     unshift(@INC, '../blib/lib');
   }
 
-  plan tests => ((TEST_ENABLED && HAS_DBI) ? 53 : 0);
+  plan tests => ((TEST_ENABLED && HAS_DBI) ? 44 : 0);
 
   onfail => sub {
     warn "\n\nNote: Failure may be due to an incorrect config.";
@@ -26,96 +25,42 @@ BEGIN {
 
 exit unless TEST_ENABLED;
 
-my $dbdsn = conf('bayes_sql_dsn');
-my $dbusername = conf('bayes_sql_username');
-my $dbpassword = conf('bayes_sql_password');
+my $dbconfig;
+my $dbdsn;
+my $dbusername;
+my $dbpassword;
 
-my $dbconfig = '';
-foreach my $setting (qw(
-                  bayes_store_module
-                  bayes_sql_dsn
-                  bayes_sql_username
-                  bayes_sql_password
-                ))
-{
-  $val = conf($setting);
-  $dbconfig .= "$setting $val\n" if $val;
+open(CONFIG,"<bayessql.cf");
+while (my $line = <CONFIG>) {
+  $dbconfig .= $line;
+  if ($line =~ /^bayes_sql_dsn (.*)/) {
+    $dbdsn = $1;
+    chomp($dbdsn);
+  }
+  elsif ($line =~ /^bayes_sql_username (.*)/) {
+    $dbusername = $1;
+    chomp($dbusername);
+  }
+  elsif ($line =~ /^bayes_sql_password (.*)/) {
+    $dbpassword = $1;
+    chomp($dbpassword);
+  }
 }
+close(CONFIG);
 
 my $testuser = 'tstusr.'.$$.'.'.time();
 
 sa_t_init("bayes");
 
 tstlocalrules ("
+bayes_store_module Mail::SpamAssassin::BayesStore::SQL
 $dbconfig
 bayes_sql_override_username $testuser
-loadplugin validuserplugin ../../data/validuserplugin.pm
-bayes_sql_username_authorized 1
 ");
 
 use Mail::SpamAssassin;
 
 my $sa = create_saobj();
-
-$sa->init();
-
-ok($sa);
-
-ok($sa->{bayes_scanner});
-
-ok($sa->{bayes_scanner}->{store}->tie_db_writable());
-
-# This bit breaks abstraction a bit, the userid is an implementation detail,
-# but is necessary to perform some of the tests.  Perhaps in the future we
-# can add some sort of official API for this sort of thing.
-my $testuserid = $sa->{bayes_scanner}->{store}->{_userid};
-ok(defined($testuserid));
-
-ok($sa->{bayes_scanner}->{store}->clear_database());
-
-ok(database_clear_p($testuser, $testuserid));
-
-$sa->finish_learner();
-
-undef $sa;
-
-# this removes the loaded plugin from this scope so we can reload it again later
-delete_package("validuserplugin");
-
-sa_t_init("bayes");
-
-tstlocalrules ("
-$dbconfig
-bayes_sql_override_username iwillfail
-loadplugin validuserplugin ../../data/validuserplugin.pm
-bayes_sql_username_authorized 1
-");
-
-$sa = create_saobj();
-
-$sa->init();
-
-ok($sa);
-
-ok($sa->{bayes_scanner});
-
-ok(!$sa->{bayes_scanner}->{store}->tie_db_writable());
-
-$sa->finish_learner();
-
-undef $sa;
-
-# this removes the loaded plugin from this scope so we can reload it again later
-delete_package("validuserplugin");
-
-sa_t_init("bayes");
-
-tstlocalrules ("
-$dbconfig
-bayes_sql_override_username $testuser
-");
-
-$sa = create_saobj();
 
 $sa->init();
 
@@ -235,7 +180,7 @@ $sa->{bayes_scanner}->{store}->untie_db();
 # This bit breaks abstraction a bit, the userid is an implementation detail,
 # but is necessary to perform some of the tests.  Perhaps in the future we
 # can add some sort of official API for this sort of thing.
-$testuserid = $sa->{bayes_scanner}->{store}->{_userid};
+my $testuserid = $sa->{bayes_scanner}->{store}->{_userid};
 ok(defined($testuserid));
 
 ok($sa->{bayes_scanner}->{store}->clear_database());
@@ -250,6 +195,7 @@ sa_t_init('bayes'); # this wipes out what is there and begins anew
 
 # make sure we learn to a journal
 tstlocalrules ("
+bayes_store_module Mail::SpamAssassin::BayesStore::SQL
 $dbconfig
 bayes_min_spam_num 10
 bayes_min_ham_num 10
@@ -258,7 +204,7 @@ bayes_sql_override_username $testuser
 
 # we get to bastardize the existing pattern matching code here.  It lets us provide
 # our own checking callback and keep using the existing ok_all_patterns call
-%patterns = ( 1 => 'Acted on message' );
+%patterns = ( 1 => 'Learned from message' );
 
 ok(salearnrun("--spam data/spam", \&check_examined));
 ok_all_patterns();
@@ -311,8 +257,7 @@ my $score = $sa->{bayes_scanner}->scan($msgstatus, $mail, $body);
 # Pretty much we can't count on the data returned with such little training
 # so just make sure that the score wasn't equal to .5 which is the default
 # return value.
-print "\treturned score: $score\n";
-ok($score =~ /\d/ && $score <= 1.0 && $score != .5);
+ok($score != .5);
 
 open(MAIL,"< ../sample-spam.txt");
 
@@ -340,8 +285,7 @@ $score = $sa->{bayes_scanner}->scan($msgstatus, $mail, $body);
 # Pretty much we can't count on the data returned with such little training
 # so just make sure that the score wasn't equal to .5 which is the default
 # return value.
-print "\treturned score: $score\n";
-ok($score =~ /\d/ && $score <= 1.0 && $score != .5);
+ok($score != .5);
 }
 
 # This bit breaks abstraction a bit, the userid is an implementation detail,
@@ -366,8 +310,8 @@ sub check_examined {
     $_ = join ('', <IN>);
   }
 
-  if ($_ =~ /(?:Forgot|Learned) tokens from \d+ message\(s\) \(\d+ message\(s\) examined\)/) {
-    $found{'Acted on message'}++;
+  if ($_ =~ /Learned from \d+ message\(s\) \(\d+ message\(s\) examined\)/) {
+    $found{'Learned from message'}++;
   }
 }
 

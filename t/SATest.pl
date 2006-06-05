@@ -21,9 +21,7 @@ if ($mode eq 'redirect') {
   open (STDOUT, ">$stdout") || die "Could not redirect STDOUT to $stdout: $!";
   open (STDERR, ">$stderr") || die "Could not redirect STDERR to $stderr: $!";
   
-  select STDERR; $| = 1;
-  select STDOUT; $| = 1;
-
+  $| = 1;
   exec { $args[0] } @args;
   die "Could not exec " . join(' ', @args) . ": $!";
 }

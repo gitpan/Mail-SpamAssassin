@@ -17,13 +17,11 @@
 package Mail::SpamAssassin::DBBasedAddrList;
 
 use strict;
-use warnings;
 use bytes;
 use Fcntl;
 
 use Mail::SpamAssassin::PersistentAddrList;
 use Mail::SpamAssassin::Util;
-use Mail::SpamAssassin::Logger;
 
 use vars qw{
   @ISA
@@ -60,7 +58,7 @@ sub new_checker {
   my @order = split (' ', $main->{conf}->{auto_whitelist_db_modules});
   my $dbm_module = Mail::SpamAssassin::Util::first_available_module (@order);
   if (!$dbm_module) {
-    die "auto-whitelist: cannot find a usable DB package from auto_whitelist_db_modules: " .
+    die "Cannot find a usable DB package from auto_whitelist_db_modules: ".
 	$main->{conf}->{auto_whitelist_db_modules}."\n";
   }
 
@@ -70,11 +68,11 @@ sub new_checker {
     $path = $main->sed_path ($main->{conf}->{auto_whitelist_path});
 
     if ($main->{locker}->safe_lock
-			($path, 30, $main->{conf}->{auto_whitelist_file_mode}))
+			($path, 30))
     {
       $self->{locked_file} = $path;
       $self->{is_locked} = 1;
-      dbg("auto-whitelist: tie-ing to DB file of type $dbm_module R/W in $path");
+      dbg("Tie-ing to DB file R/W in $path");
       tie %{$self->{accum}},$dbm_module,$path,
 		  O_RDWR|O_CREAT,   #open rw w/lock
 		  (oct ($main->{conf}->{auto_whitelist_file_mode}) & 0666)
@@ -82,7 +80,7 @@ sub new_checker {
 
     } else {
       $self->{is_locked} = 0;
-      dbg("auto-whitelist: tie-ing to DB file of type $dbm_module R/O in $path");
+      dbg("Tie-ing to DB file R/O in $path");
       tie %{$self->{accum}},$dbm_module,$path,
 		  O_RDONLY,         #open ro w/o lock
 		  (oct ($main->{conf}->{auto_whitelist_file_mode}) & 0666)
@@ -100,17 +98,17 @@ failed_to_tie:
     $self->{main}->{locker}->safe_unlock ($self->{locked_file});
     $self->{is_locked} = 0;
   }
-  die "auto-whitelist: cannot open auto_whitelist_path $path: $!\n";
+  die "Cannot open auto_whitelist_path $path: $!\n";
 }
 
 ###########################################################################
 
 sub finish {
   my $self = shift;
-  dbg("auto-whitelist: DB addr list: untie-ing and unlocking");
+  dbg("DB addr list: untie-ing and unlocking.");
   untie %{$self->{accum}};
   if ($self->{is_locked}) {
-    dbg("auto-whitelist: DB addr list: file locked, breaking lock");
+    dbg ("DB addr list: file locked, breaking lock.");
     $self->{main}->{locker}->safe_unlock ($self->{locked_file});
     $self->{is_locked} = 0;
   }
@@ -129,7 +127,7 @@ sub get_addr_entry {
   $entry->{count} = $self->{accum}->{$addr} || 0;
   $entry->{totscore} = $self->{accum}->{$addr.'|totscore'} || 0;
 
-  dbg("auto-whitelist: db-based $addr scores ".$entry->{count}.'/'.$entry->{totscore});
+  dbg ("auto-whitelist (db-based): $addr scores ".$entry->{count}.'/'.$entry->{totscore});
   return $entry;
 }
 
@@ -144,7 +142,7 @@ sub add_score {
     $entry->{count}++;
     $entry->{totscore} += $score;
 
-    dbg("auto-whitelist: add_score: new count: ".$entry->{count}.", new totscore: ".$entry->{totscore});
+    dbg("add_score: New count: ".$entry->{count}.", new totscore: ".$entry->{totscore});
 
     $self->{accum}->{$entry->{addr}} = $entry->{count};
     $self->{accum}->{$entry->{addr}.'|totscore'} = $entry->{totscore};
@@ -176,5 +174,7 @@ sub remove_entry {
 }
 
 ###########################################################################
+
+sub dbg { Mail::SpamAssassin::dbg (@_); }
 
 1;

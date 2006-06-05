@@ -21,14 +21,11 @@ Mail::SpamAssassin::PluginHandler - SpamAssassin plugin handler
 =cut
 
 package Mail::SpamAssassin::PluginHandler;
-
 use Mail::SpamAssassin;
 use Mail::SpamAssassin::Plugin;
 use Mail::SpamAssassin::Util;
-use Mail::SpamAssassin::Logger;
 
 use strict;
-use warnings;
 use bytes;
 use File::Spec;
 
@@ -83,27 +80,28 @@ sub load_plugin {
     $path = Mail::SpamAssassin::Util::untaint_file_path(
               File::Spec->rel2abs($path)
 	    );
-    dbg("plugin: loading $package from $path");
+    dbg ("plugin: loading $package from $path");
     $ret = do $path;
   }
   else {
-    dbg("plugin: loading $package from \@INC");
+    dbg ("plugin: loading $package from \@INC");
     $ret = eval qq{ require $package; };
     $path = "(from \@INC)";
   }
 
   if (!$ret) {
-    if ($@) { warn "plugin: failed to parse plugin $path: $@\n"; }
-    elsif ($!) { warn "plugin: failed to load plugin $path: $!\n"; }
+    if ($@) { warn "failed to parse plugin $path: $@\n"; }
+    elsif ($!) { warn "failed to load plugin $path: $!\n"; }
   }
 
   my $plugin = eval $package.q{->new ($self->{main}); };
 
-  if ($@ || !$plugin) { warn "plugin: failed to create instance of plugin $package: $@\n"; }
+  if ($@ || !$plugin) { warn "failed to create instance of plugin $package: $@\n"; }
 
   # Don't load the same plugin twice!
   foreach my $old_plugin (@{$self->{plugins}}) {
     if (ref($old_plugin) eq ref($plugin)) {
+      warn "Plugin " . ref($old_plugin) . " already registered\n";
       dbg("plugin: did not register $plugin, already registered");
       return;
     }
@@ -119,7 +117,7 @@ sub register_plugin {
   my ($self, $plugin) = @_;
   $plugin->{main} = $self->{main};
   push (@{$self->{plugins}}, $plugin);
-  dbg("plugin: registered $plugin");
+  dbg ("plugin: registered $plugin");
 
   # invalidate cache entries for any configuration-time hooks, in case
   # one has already been built; this plugin may implement that hook!
@@ -144,7 +142,7 @@ sub callback {
       my $methodref = $plugin->can ($subname);
       if (defined $methodref) {
         push (@subs, [ $plugin, $methodref ]);
-        dbg("plugin: ${plugin} implements '$subname'");
+        dbg ("plugin: ${plugin} implements '$subname'");
       }
     }
     $self->{cbs}->{$subname} = \@subs;
@@ -158,17 +156,13 @@ sub callback {
     eval {
       $ret = &$methodref ($plugin, @_);
     };
-    if ($@) {
-      warn "plugin: eval failed: $@";
-    }
-
     if ($ret) {
-      #dbg("plugin: ${plugin}->${methodref} => $ret");
+      #dbg ("plugin: ${plugin}->${methodref} => $ret");
       $overallret = $ret;
     }
 
     if ($plugin->{_inhibit_further_callbacks}) {
-      # dbg("plugin: $plugin inhibited further callbacks");
+      #dbg ("plugin: $plugin inhibited further callbacks");
       last;
     }
   }
@@ -191,5 +185,7 @@ sub finish {
 }
 
 ###########################################################################
+
+sub dbg { Mail::SpamAssassin::dbg (@_); }
 
 1;

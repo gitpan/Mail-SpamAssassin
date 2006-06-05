@@ -17,7 +17,6 @@
 package Mail::SpamAssassin::Locales;
 
 use strict;
-use warnings;
 use bytes;
 
 use vars qw{

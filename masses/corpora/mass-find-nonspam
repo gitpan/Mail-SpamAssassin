@@ -101,7 +101,6 @@ my $killfile_froms = qr{(?:
 use lib "lib";
 use lib "../lib";
 use lib "../../lib";
-use Mail::SpamAssassin::Message;
 use Mail::SpamAssassin::ArchiveIterator;
 
 # flush buffer immediately so if mass-check fails or stops we don't get a corrupt line
@@ -148,7 +147,8 @@ sub get_or_empty {
 
 sub wanted {
   my (undef, $id, $time, $dataref) = @_;
-  my $ma = Mail::SpamAssassin::Message->new({message=>$dataref});
+
+  my $ma = Mail::SpamAssassin->parse ($dataref);
   my $from = $ma->get_header ("From");
   unless (defined $from) {
     $ma->finish();

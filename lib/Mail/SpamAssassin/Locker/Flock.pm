@@ -17,13 +17,11 @@
 package Mail::SpamAssassin::Locker::Flock;
 
 use strict;
-use warnings;
 use bytes;
 
 use Mail::SpamAssassin;
 use Mail::SpamAssassin::Locker;
 use Mail::SpamAssassin::Util;
-use Mail::SpamAssassin::Logger;
 use File::Spec;
 use IO::File;
 use Fcntl qw(:DEFAULT :flock);
@@ -46,43 +44,39 @@ sub new {
 # Attempt to create a file lock, using NFS-UNsafe locking techniques.
 
 sub safe_lock {
-  my ($self, $path, $max_retries, $mode) = @_;
+  my ($self, $path, $max_retries) = @_;
   my $is_locked = 0;
   my @stat;
 
   $max_retries ||= 30;
-  $mode ||= 0700;
 
   my $lock_file = "$path.mutex";
-  my $umask = umask (oct($mode) ^ 0700);
+  my $umask = umask 077;
   my $fh = new IO::File();
 
   if (!$fh->open ("$lock_file", O_RDWR|O_CREAT)) {
       umask $umask; # just in case
-      die "locker: safe_lock: cannot create lockfile $lock_file: $!\n";
+      die "lock: $$ cannot create lockfile $lock_file: $!\n";
   }
   umask $umask; # we've created the file, so reset umask
 
-  dbg("locker: safe_lock: created $lock_file");
+  dbg("lock: $$ created $lock_file");
 
   my $unalarmed = 0;
-  my $oldalarm = 0;
-
   # use a SIGALRM-based timer -- more efficient than second-by-second
   # sleeps
   eval {
     local $SIG{ALRM} = sub { die "alarm\n" };
-    dbg("locker: safe_lock: trying to get lock on $path with $max_retries timeout");
+    dbg("lock: $$ trying to get lock on $path with $max_retries timeout");
 
     # max_retries is basically seconds! so use it for the timeout
-    $oldalarm = alarm $max_retries;
+    alarm($max_retries);
 
     # HELLO!?! IO::File doesn't have a flock() method?!
     if (flock ($fh, LOCK_EX)) {
-      alarm $oldalarm;
-      $unalarmed = 1; # avoid calling alarm(0) twice
+      alarm(0) and $unalarmed = 1; # avoid calling alarm(0) twice
 
-      dbg("locker: safe_lock: link to $lock_file: link ok");
+      dbg("lock: $$ link to $lock_file: link ok");
       $is_locked = 1;
 
       # just to be nice: let people know when it was locked
@@ -96,14 +90,12 @@ sub safe_lock {
     }
   };
 
-  my $err = $@;
-
-  $unalarmed or alarm $oldalarm; # if we die'd above, need to reset here
-  if ($err) {
-    if ($err =~ /alarm/) {
-      dbg("locker: safe_lock: timed out after $max_retries seconds");
+  $unalarmed or alarm(0); # if we die'd above, need to reset here
+  if ($@) {
+    if ($@ =~ /alarm/) {
+      dbg ("lock: $$ timed out after $max_retries secs.");
     } else {
-      die "locker: safe_lock: $err";
+      die $@;
     }
   }
 
@@ -116,7 +108,7 @@ sub safe_unlock {
   my ($self, $path) = @_;
 
   if (!exists $self->{lock_fhs} || !defined $self->{lock_fhs}->{$path}) {
-    dbg("locker: safe_unlock: no lock handle for $path - already unlocked?");
+    dbg ("unlock: $$ no lock handle for $path - already unlocked?");
     return;
   }
 
@@ -126,7 +118,7 @@ sub safe_unlock {
   flock ($fh, LOCK_UN);
   $fh->close();
 
-  dbg("locker: safe_unlock: unlocked $path.mutex");
+  dbg("unlock: $$ unlocked $path.mutex");
 
   # do NOT unlink! this would open a race, whereby:
   #
@@ -152,7 +144,7 @@ sub refresh_lock {
   return unless $path;
 
   if (!exists $self->{lock_fhs} || !defined $self->{lock_fhs}->{$path}) {
-    warn "locker: refresh_lock: no lock handle for $path\n";
+    warn "refresh_lock: $$ no lock handle for $path\n";
     return;
   }
 
@@ -160,9 +152,11 @@ sub refresh_lock {
   $fh->print ("$$\n");
   $fh->flush ();
 
-  dbg("locker: refresh_lock: refresh $path.mutex");
+  dbg("refresh: $$ refresh $path.mutex");
 }
 
 ###########################################################################
+
+sub dbg { Mail::SpamAssassin::dbg (@_); }
 
 1;

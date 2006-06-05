@@ -57,7 +57,6 @@
 #include <sys/time.h>
 #endif
 
-/* FIXME: Make this configurable */
 #define MAX_CONNECT_RETRIES 3
 #define CONNECT_RETRY_SLEEP 1
 
@@ -97,7 +96,7 @@ extern char *optarg;
 #undef DO_CONNECT_DEBUG_SYSLOGS
 /* or #define DO_CONNECT_DEBUG_SYSLOGS 1 */
 
-/* static const int ESC_PASSTHROUGHRAW = EX__MAX + 666;  No longer seems to be used */
+static const int ESC_PASSTHROUGHRAW = EX__MAX + 666;
 
 /* set EXPANSION_ALLOWANCE to something more than might be
    added to a message in X-headers and the report template */
@@ -173,10 +172,6 @@ static int _opensocket(int flags, int type, int *psock)
     const char *typename;
     int proto = 0;
 
-#ifdef _WIN32
-    int socktout;
-#endif
-
     assert(psock != 0);
 
 	/*----------------------------------------------------------------
@@ -193,7 +188,7 @@ static int _opensocket(int flags, int type, int *psock)
     }
 
 #ifdef DO_CONNECT_DEBUG_SYSLOGS
-    libspamc_log(flags, LOG_DEBUG, "dbg: create socket(%s)", typename);
+    libspamc_log(flags, DEBUG_LEVEL, "dbg: create socket(%s)", typename);
 #endif
 
     if ((*psock = socket(type, SOCK_STREAM, proto))
@@ -237,30 +232,6 @@ static int _opensocket(int flags, int type, int *psock)
 	}
     }
 
-#ifdef _WIN32
-    /* bug 4344: makes timeout functional on Win32 */
-    socktout = libspamc_timeout * 1000;
-    if (type == PF_INET
-        && setsockopt(*psock, SOL_SOCKET, SO_RCVTIMEO, (char *)&socktout, sizeof(socktout)) != 0)
-    {
-        int origerrno;
-
-        origerrno = WSAGetLastError();
-        switch (origerrno)
-        {
-        case EBADF:
-        case ENOTSOCK:
-        case ENOPROTOOPT:
-        case EFAULT:
-            libspamc_log(flags, LOG_ERR, "setsockopt(SO_RCVTIMEO) failed: %d", origerrno);
-            closesocket(*psock);
-            return EX_SOFTWARE;
-
-        default:
-            break;             /* ignored */
-        }
-    }
-#endif
 
 	/*----------------------------------------------------------------
 	 * Do a bit of setup on the TCP socket if required. Notes above
@@ -334,17 +305,17 @@ static int _try_to_connect_unix(struct transport *tp, int *sockptr)
     addrbuf.sun_path[sizeof addrbuf.sun_path - 1] = '\0';
 
 #ifdef DO_CONNECT_DEBUG_SYSLOGS
-    libspamc_log(tp->flags, LOG_DEBUG, "dbg: connect(AF_UNIX) to spamd at %s",
+    libspamc_log(tp->flags, DEBUG_LEVEL, "dbg: connect(AF_UNIX) to spamd at %s",
 	   addrbuf.sun_path);
 #endif
 
-    status = timeout_connect(mysock, (struct sockaddr *) &addrbuf, sizeof(addrbuf));
+    status = connect(mysock, (struct sockaddr *) &addrbuf, sizeof(addrbuf));
 
     origerr = errno;
 
     if (status >= 0) {
 #ifdef DO_CONNECT_DEBUG_SYSLOGS
-	libspamc_log(tp->flags, LOG_DEBUG, "dbg: connect(AF_UNIX) ok");
+	libspamc_log(tp->flags, DEBUG_LEVEL, "dbg: connect(AF_UNIX) ok");
 #endif
 
 	*sockptr = mysock;
@@ -412,13 +383,13 @@ static int _try_to_connect_tcp(const struct transport *tp, int *sockptr)
 	ipaddr = inet_ntoa(addrbuf.sin_addr);
 
 #ifdef DO_CONNECT_DEBUG_SYSLOGS
-	libspamc_log(tp->flags, LOG_DEBUG,
+	libspamc_log(tp->flags, DEBUG_LEVEL,
 	       "dbg: connect(AF_INET) to spamd at %s (try #%d of %d)",
 		ipaddr, numloops + 1, MAX_CONNECT_RETRIES);
 #endif
 
 	status =
-	    timeout_connect(mysock, (struct sockaddr *) &addrbuf, sizeof(addrbuf));
+	    connect(mysock, (struct sockaddr *) &addrbuf, sizeof(addrbuf));
 
 	if (status != 0) {
 #ifndef _WIN32
@@ -438,7 +409,7 @@ static int _try_to_connect_tcp(const struct transport *tp, int *sockptr)
 	}
 	else {
 #ifdef DO_CONNECT_DEBUG_SYSLOGS
-	    libspamc_log(tp->flags, LOG_DEBUG,
+	    libspamc_log(tp->flags, DEBUG_LEVEL,
 		   "dbg: connect(AF_INET) to spamd at %s done", ipaddr);
 #endif
 	    *sockptr = mysock;
@@ -472,19 +443,9 @@ static void _clear_message(struct message *m)
     m->is_spam = EX_TOOBIG;
     m->score = 0.0;
     m->threshold = 0.0;
-    m->outbuf = NULL;
     m->out = NULL;
     m->out_len = 0;
     m->content_length = -1;
-}
-
-static void _use_msg_for_out(struct message *m)
-{
-    if (m->outbuf)
-	free(m->outbuf);
-    m->outbuf = NULL;
-    m->out = m->msg;
-    m->out_len = m->msg_len;
 }
 
 static int _message_read_raw(int fd, struct message *m)
@@ -500,13 +461,8 @@ static int _message_read_raw(int fd, struct message *m)
 	return EX_IOERR;
     }
     m->type = MESSAGE_ERROR;
-    if (m->raw_len > (int) m->max_len)
-    {
-        libspamc_log(m->priv->flags, LOG_ERR,
-                "skipped message, greater than max message size (%d bytes)",
-                m->max_len);
+    if (m->raw_len > m->max_len)
 	return EX_TOOBIG;
-    }
     m->type = MESSAGE_RAW;
     m->msg = m->raw;
     m->msg_len = m->raw_len;
@@ -517,9 +473,8 @@ static int _message_read_raw(int fd, struct message *m)
 
 static int _message_read_bsmtp(int fd, struct message *m)
 {
-    unsigned int i, j, p_len;
+    unsigned int i, j;
     char prev;
-    char* p;
 
     _clear_message(m);
     if ((m->raw = malloc(m->max_len + 1)) == NULL)
@@ -534,41 +489,33 @@ static int _message_read_bsmtp(int fd, struct message *m)
 	return EX_IOERR;
     }
     m->type = MESSAGE_ERROR;
-    if (m->raw_len > (int) m->max_len)
+    if (m->raw_len > m->max_len)
 	return EX_TOOBIG;
-    p = m->pre = m->raw;
-    /* Search for \nDATA\n which marks start of actual message */
-    while ((p_len = (m->raw_len - (p - m->raw))) > 8) { /* leave room for at least \nDATA\n.\n */
-      char* q = memchr(p, '\n', p_len - 8);  /* find next \n then see if start of \nDATA\n */
-      if (q == NULL) break;
-      q++;
-      if (((q[0]|0x20) == 'd') && /* case-insensitive ASCII comparison */
-	  ((q[1]|0x20) == 'a') &&
-	  ((q[2]|0x20) == 't') &&
-	  ((q[3]|0x20) == 'a')) {
-	q+=4;
-	if (q[0] == '\r') ++q;
-	if (*(q++) == '\n') {  /* leave q at start of message if we found it */
-	  m->msg = q;
-	  m->pre_len = q - m->raw;
-	  m->msg_len = m->raw_len - m->pre_len;
-	  break;
+    m->pre = m->raw;
+    for (i = 0; i < m->raw_len - 6; i++) {
+	if ((m->raw[i] == '\n') &&
+	    (m->raw[i + 1] == 'D' || m->raw[i + 1] == 'd') &&
+	    (m->raw[i + 2] == 'A' || m->raw[i + 2] == 'a') &&
+	    (m->raw[i + 3] == 'T' || m->raw[i + 3] == 't') &&
+	    (m->raw[i + 4] == 'A' || m->raw[i + 4] == 'a') &&
+	    ((m->raw[i + 5] == '\r' && m->raw[i + 6] == '\n')
+	     || m->raw[i + 5] == '\n')) {
+	    /* Found it! */
+	    i += 6;
+	    if (m->raw[i - 1] == '\r')
+		i++;
+	    m->pre_len = i;
+	    m->msg = m->raw + i;
+	    m->msg_len = m->raw_len - i;
+	    break;
 	}
-      }
-      p = q; /* the above code ensures no other '\n' comes before q */
     }
     if (m->msg == NULL)
 	return EX_DATAERR;
 
-    /* ensure this is >= 0 */
-    if (m->msg_len < 0) {
-	return EX_SOFTWARE;
-    }
-
     /* Find the end-of-DATA line */
-    /* if bad format with no end ".\n" will truncate the last two characters of the buffer */
     prev = '\n';
-    for (i = j = 0; (i+2) < (unsigned int) m->msg_len; i++) { /* (i+2) prevents out of bound reference msg[i+2] */
+    for (i = j = 0; i < m->msg_len; i++) {
 	if (prev == '\n' && m->msg[i] == '.') {
 	    /* Dot at the beginning of a line */
 	    if ((m->msg[i + 1] == '\r' && m->msg[i + 2] == '\n')
@@ -597,8 +544,6 @@ static int _message_read_bsmtp(int fd, struct message *m)
 
 int message_read(int fd, int flags, struct message *m)
 {
-    assert(m != NULL);
-
     libspamc_timeout = 0;
 
     /* create the "private" part of the struct message */
@@ -629,8 +574,6 @@ long message_write(int fd, struct message *m)
     off_t i, j;
     off_t jlimit;
     char buffer[1024];
-
-    assert(m != NULL);
 
     if (m->priv->flags & SPAMC_CHECK_ONLY) {
 	if (m->is_spam == EX_ISSPAM || m->is_spam == EX_NOTSPAM) {
@@ -775,8 +718,7 @@ static float _locale_safe_string_to_float(char *buf, int siz)
 
     cp = (dot + 1);
     postdot = (float) (strtol(cp, NULL, 10));
-    /* note: don't compare floats == 0.0, it's unsafe.  use a range */
-    if (postdot >= -0.00001 && postdot <= 0.00001) {
+    if (postdot == 0.0) {
 	return ret;
     }
 
@@ -808,13 +750,10 @@ static float _locale_safe_string_to_float(char *buf, int siz)
 }
 
 static int
-_handle_spamd_header(struct message *m, int flags, char *buf, int len,
-		     unsigned int *didtellflags)
+_handle_spamd_header(struct message *m, int flags, char *buf, int len)
 {
     char is_spam[6];
     char s_str[21], t_str[21];
-    char didset_ret[15];
-    char didremove_ret[15];
 
     UNUSED_VARIABLE(len);
 
@@ -861,28 +800,13 @@ _handle_spamd_header(struct message *m, int flags, char *buf, int len,
 	}
 	return EX_OK;
     }
-    else if (sscanf(buf, "DidSet: %14s", didset_ret) == 1) {
-      if (strstr(didset_ret, "local")) {
-	  *didtellflags |= SPAMC_SET_LOCAL;
-	}
-	if (strstr(didset_ret, "remote")) {
-	  *didtellflags |= SPAMC_SET_REMOTE;
-	}
-    }
-    else if (sscanf(buf, "DidRemove: %14s", didremove_ret) == 1) {
-        if (strstr(didremove_ret, "local")) {
-	  *didtellflags |= SPAMC_REMOVE_LOCAL;
-	}
-	if (strstr(didremove_ret, "remote")) {
-	  *didtellflags |= SPAMC_REMOVE_REMOTE;
-	}
-    }
 
-    return EX_OK;
+    libspamc_log(flags, LOG_ERR, "spamd responded with bad header '%s'", buf);
+    return EX_PROTOCOL;
 }
 
 int message_filter(struct transport *tp, const char *username,
-                   int flags, struct message *m)
+		   int flags, struct message *m)
 {
     char buf[8192];
     size_t bufsiz = (sizeof(buf) / sizeof(*buf)) - 4; /* bit of breathing room */
@@ -893,13 +817,9 @@ int message_filter(struct transport *tp, const char *username,
     float version;
     int response;
     int failureval;
-    unsigned int throwaway;
     SSL_CTX *ctx = NULL;
     SSL *ssl = NULL;
     SSL_METHOD *meth;
-
-    assert(tp != NULL);
-    assert(m != NULL);
 
     if (flags & SPAMC_USE_SSL) {
 #ifdef SPAMC_SSL
@@ -917,12 +837,12 @@ int message_filter(struct transport *tp, const char *username,
     }
 
     m->is_spam = EX_TOOBIG;
-    if ((m->outbuf = malloc(m->max_len + EXPANSION_ALLOWANCE + 1)) == NULL) {
+    if ((m->out = malloc(m->max_len + EXPANSION_ALLOWANCE + 1)) == NULL) {
 	failureval = EX_OSERR;
 	goto failure;
     }
-    m->out = m->outbuf;
     m->out_len = 0;
+
 
     /* Build spamd protocol header */
     if (flags & SPAMC_CHECK_ONLY)
@@ -938,7 +858,9 @@ int message_filter(struct transport *tp, const char *username,
 
     len = strlen(buf);
     if (len + strlen(PROTOCOL_VERSION) + 2 >= bufsiz) {
-	_use_msg_for_out(m);
+	free(m->out);
+	m->out = m->msg;
+	m->out_len = m->msg_len;
 	return EX_OSERR;
     }
 
@@ -948,7 +870,9 @@ int message_filter(struct transport *tp, const char *username,
 
     if (username != NULL) {
 	if (strlen(username) + 8 >= (bufsiz - len)) {
-	    _use_msg_for_out(m);
+	    free(m->out);
+	    m->out = m->msg;
+	    m->out_len = m->msg_len;
 	    return EX_OSERR;
 	}
 	strcpy(buf + len, "User: ");
@@ -957,10 +881,12 @@ int message_filter(struct transport *tp, const char *username,
 	len += strlen(buf + len);
     }
     if ((m->msg_len > 9999999) || ((len + 27) >= (bufsiz - len))) {
-	_use_msg_for_out(m);
+	free(m->out);
+	m->out = m->msg;
+	m->out_len = m->msg_len;
 	return EX_OSERR;
     }
-    len += sprintf(buf + len, "Content-length: %d\r\n\r\n", (int) m->msg_len);
+    len += sprintf(buf + len, "Content-length: %d\r\n\r\n", m->msg_len);
 
     libspamc_timeout = m->timeout;
 
@@ -970,7 +896,9 @@ int message_filter(struct transport *tp, const char *username,
 	rc = _try_to_connect_tcp(tp, &sock);
 
     if (rc != EX_OK) {
-	_use_msg_for_out(m);
+	free(m->out);
+	m->out = m->msg;
+	m->out_len = m->msg_len;
 	return rc;      /* use the error code try_to_connect_*() gave us. */
     }
 
@@ -1031,7 +959,7 @@ int message_filter(struct transport *tp, const char *username,
 	    break;		/* end of headers */
 	}
 
-	if (_handle_spamd_header(m, flags, buf, len, &throwaway) < 0) {
+	if (_handle_spamd_header(m, flags, buf, len) < 0) {
 	    failureval = EX_PROTOCOL;
 	    goto failure;
 	}
@@ -1102,7 +1030,9 @@ int message_filter(struct transport *tp, const char *username,
     return EX_OK;
 
   failure:
-	_use_msg_for_out(m);
+    free(m->out);
+    m->out = m->msg;
+    m->out_len = m->msg_len;
     if (sock != -1) {
 	closesocket(sock);
     }
@@ -1124,272 +1054,45 @@ int message_process(struct transport *trans, char *username, int max_size,
     int ret;
     struct message m;
 
-    assert(trans != NULL);
-
     m.type = MESSAGE_NONE;
 
-    /* enforce max_size being unsigned, therefore >= 0 */
-    if (max_size < 0) {
-	ret = EX_SOFTWARE;
-        goto FAIL;
-    }
-    m.max_len = (unsigned int) max_size;
-
+    m.max_len = max_size;
     ret = message_read(in_fd, flags, &m);
     if (ret != EX_OK)
-        goto FAIL;
+	goto FAIL;
     ret = message_filter(trans, username, flags, &m);
     if (ret != EX_OK)
-        goto FAIL;
+	goto FAIL;
     if (message_write(out_fd, &m) < 0)
-        goto FAIL;
+	goto FAIL;
     if (m.is_spam != EX_TOOBIG) {
-        message_cleanup(&m);
-        return m.is_spam;
+	message_cleanup(&m);
+	return m.is_spam;
     }
     message_cleanup(&m);
     return ret;
 
   FAIL:
     if (flags & SPAMC_CHECK_ONLY) {
-        full_write(out_fd, 1, "0/0\n", 4);
-        message_cleanup(&m);
-        return EX_NOTSPAM;
+	full_write(out_fd, 1, "0/0\n", 4);
+	message_cleanup(&m);
+	return EX_NOTSPAM;
     }
     else {
-        message_dump(in_fd, out_fd, &m);
-        message_cleanup(&m);
-        return ret;
+	message_dump(in_fd, out_fd, &m);
+	message_cleanup(&m);
+	return ret;
     }
-}
-
-int message_tell(struct transport *tp, const char *username, int flags,
-		 struct message *m, int msg_class,
-		 unsigned int tellflags, unsigned int *didtellflags)
-{
-    char buf[8192];
-    size_t bufsiz = (sizeof(buf) / sizeof(*buf)) - 4; /* bit of breathing room */
-    size_t len;
-    int sock = -1;
-    int rc;
-    char versbuf[20];
-    float version;
-    int response;
-    int failureval;
-    SSL_CTX *ctx = NULL;
-    SSL *ssl = NULL;
-    SSL_METHOD *meth;
-
-    assert(tp != NULL);
-    assert(m != NULL);
-
-    if (flags & SPAMC_USE_SSL) {
-#ifdef SPAMC_SSL
-	SSLeay_add_ssl_algorithms();
-	meth = SSLv2_client_method();
-	SSL_load_error_strings();
-	ctx = SSL_CTX_new(meth);
-#else
-	UNUSED_VARIABLE(ssl);
-	UNUSED_VARIABLE(meth);
-	UNUSED_VARIABLE(ctx);
-	libspamc_log(flags, LOG_ERR, "spamc not built with SSL support");
-	return EX_SOFTWARE;
-#endif
-    }
-
-    m->is_spam = EX_TOOBIG;
-    if ((m->outbuf = malloc(m->max_len + EXPANSION_ALLOWANCE + 1)) == NULL) {
-	failureval = EX_OSERR;
-	goto failure;
-    }
-    m->out = m->outbuf;
-    m->out_len = 0;
-
-    /* Build spamd protocol header */
-    strcpy(buf, "TELL ");
-
-    len = strlen(buf);
-    if (len + strlen(PROTOCOL_VERSION) + 2 >= bufsiz) {
-	_use_msg_for_out(m);
-	return EX_OSERR;
-    }
-
-    strcat(buf, PROTOCOL_VERSION);
-    strcat(buf, "\r\n");
-    len = strlen(buf);
-
-    if (msg_class != 0) {
-      strcpy(buf + len, "Message-class: ");
-      if (msg_class == SPAMC_MESSAGE_CLASS_SPAM) {
-	strcat(buf + len, "spam\r\n");
-      }
-      else {
-	strcat(buf + len, "ham\r\n");
-      }
-      len += strlen(buf + len);
-    }
-
-    if ((tellflags & SPAMC_SET_LOCAL) || (tellflags & SPAMC_SET_REMOTE)) {
-      int needs_comma_p = 0;
-      strcat(buf + len, "Set: ");
-      if (tellflags & SPAMC_SET_LOCAL) {
-	strcat(buf + len, "local");
-	needs_comma_p = 1;
-      }
-      if (tellflags & SPAMC_SET_REMOTE) {
-	if (needs_comma_p == 1) {
-	  strcat(buf + len, ",");
-	}
-	strcat(buf + len, "remote");
-      }
-      strcat(buf + len, "\r\n");
-      len += strlen(buf + len);
-    }
-
-    if ((tellflags & SPAMC_REMOVE_LOCAL) || (tellflags & SPAMC_REMOVE_REMOTE)) {
-      int needs_comma_p = 0;
-      strcat(buf + len, "Remove: ");
-      if (tellflags & SPAMC_REMOVE_LOCAL) {
-	strcat(buf + len, "local");
-	needs_comma_p = 1;
-      }
-      if (tellflags & SPAMC_REMOVE_REMOTE) {
-	if (needs_comma_p == 1) {
-	  strcat(buf + len, ",");
-	}
-	strcat(buf + len, "remote");
-      }
-      strcat(buf + len, "\r\n");
-      len += strlen(buf + len);
-    }
-
-    if (username != NULL) {
-	if (strlen(username) + 8 >= (bufsiz - len)) {
-	    _use_msg_for_out(m);
-	    return EX_OSERR;
-	}
-	strcpy(buf + len, "User: ");
-	strcat(buf + len, username);
-	strcat(buf + len, "\r\n");
-	len += strlen(buf + len);
-    }
-    if ((m->msg_len > 9999999) || ((len + 27) >= (bufsiz - len))) {
-	_use_msg_for_out(m);
-	return EX_OSERR;
-    }
-    len += sprintf(buf + len, "Content-length: %d\r\n\r\n", (int) m->msg_len);
-
-    libspamc_timeout = m->timeout;
-
-    if (tp->socketpath)
-	rc = _try_to_connect_unix(tp, &sock);
-    else
-	rc = _try_to_connect_tcp(tp, &sock);
-
-    if (rc != EX_OK) {
-	_use_msg_for_out(m);
-	return rc;      /* use the error code try_to_connect_*() gave us. */
-    }
-
-    if (flags & SPAMC_USE_SSL) {
-#ifdef SPAMC_SSL
-	ssl = SSL_new(ctx);
-	SSL_set_fd(ssl, sock);
-	SSL_connect(ssl);
-#endif
-    }
-
-    /* Send to spamd */
-    if (flags & SPAMC_USE_SSL) {
-#ifdef SPAMC_SSL
-	SSL_write(ssl, buf, len);
-	SSL_write(ssl, m->msg, m->msg_len);
-#endif
-    }
-    else {
-	full_write(sock, 0, buf, len);
-	full_write(sock, 0, m->msg, m->msg_len);
-	shutdown(sock, SHUT_WR);
-    }
-
-    /* ok, now read and parse it.  SPAMD/1.2 line first... */
-    failureval =
-	_spamc_read_full_line(m, flags, ssl, sock, buf, &len, bufsiz);
-    if (failureval != EX_OK) {
-	goto failure;
-    }
-
-    if (sscanf(buf, "SPAMD/%18s %d %*s", versbuf, &response) != 2) {
-	libspamc_log(flags, LOG_ERR, "spamd responded with bad string '%s'", buf);
-	failureval = EX_PROTOCOL;
-	goto failure;
-    }
-
-    versbuf[19] = '\0';
-    version = _locale_safe_string_to_float(versbuf, 20);
-    if (version < 1.0) {
-	libspamc_log(flags, LOG_ERR, "spamd responded with bad version string '%s'",
-	       versbuf);
-	failureval = EX_PROTOCOL;
-	goto failure;
-    }
-
-    m->score = 0;
-    m->threshold = 0;
-    m->is_spam = EX_TOOBIG;
-    while (1) {
-	failureval =
-	    _spamc_read_full_line(m, flags, ssl, sock, buf, &len, bufsiz);
-	if (failureval != EX_OK) {
-	    goto failure;
-	}
-
-	if (len == 0 && buf[0] == '\0') {
-	    break;		/* end of headers */
-	}
-
-	if (_handle_spamd_header(m, flags, buf, len, didtellflags) < 0) {
-	    failureval = EX_PROTOCOL;
-	    goto failure;
-	}
-    }
-
-    len = 0;			/* overwrite those headers */
-
-    shutdown(sock, SHUT_RD);
-    closesocket(sock);
-    sock = -1;
-
-    libspamc_timeout = 0;
-
-    return EX_OK;
-
-  failure:
-    _use_msg_for_out(m);
-    if (sock != -1) {
-        closesocket(sock);
-    }
-    libspamc_timeout = 0;
-
-    if (flags & SPAMC_USE_SSL) {
-#ifdef SPAMC_SSL
-	SSL_free(ssl);
-	SSL_CTX_free(ctx);
-#endif
-    }
-    return failureval;
 }
 
 void message_cleanup(struct message *m)
 {
-    assert(m != NULL);
-    if (m->outbuf != NULL)
-        free(m->outbuf);
+    if (m->out != NULL && m->pre != NULL && m->out != m->pre+m->pre_len)
+	free(m->out);
     if (m->raw != NULL)
-        free(m->raw);
+	free(m->raw);
     if (m->priv != NULL)
-        free(m->priv);
+	free(m->priv);
     _clear_message(m);
 }
 
@@ -1402,19 +1105,19 @@ int process_message(struct transport *tp, char *username, int max_size,
 
     flags = SPAMC_RAW_MODE;
     if (my_check_only)
-        flags |= SPAMC_CHECK_ONLY;
+	flags |= SPAMC_CHECK_ONLY;
     if (my_safe_fallback)
-        flags |= SPAMC_SAFE_FALLBACK;
+	flags |= SPAMC_SAFE_FALLBACK;
 
     return message_process(tp, username, max_size, in_fd, out_fd, flags);
 }
 
 /*
-* init_transport()
-*
-*	Given a pointer to a transport structure, set it to "all empty".
-*	The default is a localhost connection.
-*/
+ * init_transport()
+ *
+ *	Given a pointer to a transport structure, set it to "all empty".
+ *	The default is a localhost connection.
+ */
 void transport_init(struct transport *tp)
 {
     assert(tp != 0);
@@ -1427,14 +1130,14 @@ void transport_init(struct transport *tp)
 }
 
 /*
-* randomize_hosts()
-*
-*	Given the transport object that contains one or more IP addresses
-*	in this "hosts" list, rotate it by a random number of shifts to
-*	randomize them - this is a kind of load balancing. It's possible
-*	that the random number will be 0, which says not to touch. We don't
-*	do anything unless 
-*/
+ * randomize_hosts()
+ *
+ *	Given the transport object that contains one or more IP addresses
+ *	in this "hosts" list, rotate it by a random number of shifts to
+ *	randomize them - this is a kind of load balancing. It's possible
+ *	that the random number will be 0, which says not to touch. We don't
+ *	do anything unless 
+ */
 
 static void _randomize_hosts(struct transport *tp)
 {
@@ -1443,187 +1146,144 @@ static void _randomize_hosts(struct transport *tp)
     assert(tp != 0);
 
     if (tp->nhosts <= 1)
-        return;
+	return;
 
     rnum = rand() % tp->nhosts;
 
     while (rnum-- > 0) {
-        struct in_addr tmp = tp->hosts[0];
-        int i;
+	struct in_addr tmp = tp->hosts[0];
+	int i;
 
-        for (i = 1; i < tp->nhosts; i++)
-            tp->hosts[i - 1] = tp->hosts[i];
+	for (i = 1; i < tp->nhosts; i++)
+	    tp->hosts[i - 1] = tp->hosts[i];
 
-        tp->hosts[i - 1] = tmp;
+	tp->hosts[i - 1] = tmp;
     }
 }
 
 /*
-* transport_setup()
-*
-*	Given a "transport" object that says how we're to connect to the
-*	spam daemon, perform all the initial setup required to make the
-*	connection process a smooth one. The main work is to do the host
-*	name lookup and copy over all the IP addresses to make a local copy
-*	so they're not kept in the resolver's static state.
-*
-*	Here we also manage quasi-load balancing and failover: if we're
-*	doing load balancing, we randomly "rotate" the list to put it in
-*	a different order, and then if we're not doing failover we limit
-*	the hosts to just one. This way *all* connections are done with
-*	the intention of failover - makes the code a bit more clear.
-*/
+ * transport_setup()
+ *
+ *	Given a "transport" object that says how we're to connect to the
+ *	spam daemon, perform all the initial setup required to make the
+ *	connection process a smooth one. The main work is to do the host
+ *	name lookup and copy over all the IP addresses to make a local copy
+ *	so they're not kept in the resolver's static state.
+ *
+ *	Here we also manage quasi-load balancing and failover: if we're
+ *	doing load balancing, we randomly "rotate" the list to put it in
+ *	a different order, and then if we're not doing failover we limit
+ *	the hosts to just one. This way *all* connections are done with
+ *	the intention of failover - makes the code a bit more clear.
+ */
 int transport_setup(struct transport *tp, int flags)
 {
-    struct hostent *hp;
-    char *hostlist, *hostname;
-    int errbits;
+    struct hostent *hp = 0;
     char **addrp;
 
 #ifdef _WIN32
-    /* Start Winsock up */
+    // Start Winsock up
     WSADATA wsaData;
     int nCode;
     if ((nCode = WSAStartup(MAKEWORD(1, 1), &wsaData)) != 0) {
-        printf("WSAStartup() returned error code %d\n", nCode);
-        return EX_OSERR;
+	printf("WSAStartup() returned error code %d\n", nCode);
+	return EX_OSERR;
     }
 
 #endif
 
-    assert(tp != NULL);
     tp->flags = flags;
+
+    assert(tp != 0);
 
     switch (tp->type) {
 #ifndef _WIN32
     case TRANSPORT_UNIX:
-        assert(tp->socketpath != 0);
-        return EX_OK;
+	assert(tp->socketpath != 0);
+	return EX_OK;
 #endif
     case TRANSPORT_LOCALHOST:
-        tp->hosts[0].s_addr = inet_addr("127.0.0.1");
-        tp->nhosts = 1;
-        return EX_OK;
+	tp->hosts[0].s_addr = inet_addr("127.0.0.1");
+	tp->nhosts = 1;
+	return EX_OK;
 
     case TRANSPORT_TCP:
-        if ((hostlist = strdup(tp->hostname)) == NULL)
-            return EX_OSERR;
+	if (NULL == (hp = gethostbyname(tp->hostname))) {
+	    int origherr = h_errno;	/* take a copy before syslog() */
 
-        /* We want to return the least permanent error, in this bitmask we
-         * record the errors seen with:
-         *  0: no error
-         *  1: EX_TEMPFAIL
-         *  2: EX_NOHOST
-         * EX_OSERR will return immediately.
-         * Bits aren't reset so a check against nhosts is needed to determine
-         * if something went wrong.
-         */
-        errbits = 0;
-        tp->nhosts = 0;
-        /* Start with char offset in front of the string because we'll add 
-         * one in the loop
-         */
-        hostname = hostlist - 1;
-        do {
-            char *hostend;
-            
-            hostname += 1;
-            hostend = strchr(hostname, ',');
-            if (hostend != NULL) {
-                *hostend = '\0';
-            }
-            
-            if ((hp = gethostbyname(hostname)) == NULL) {
-                int origerr = h_errno; /* take a copy before syslog() */
-                libspamc_log(flags, LOG_DEBUG, "gethostbyname(%s) failed: h_errno=%d",
-                    hostname, origerr);
-                switch (origerr) {
-                case TRY_AGAIN:
-                    errbits |= 1;
-                    break;
-                case HOST_NOT_FOUND:
-                case NO_ADDRESS:
-                case NO_RECOVERY:
-                    errbits |= 2;
-                    break;
-                default:
-                    /* should not happen, all errors are checked above */
-                    free(hostlist);
-                    return EX_OSERR;
-                }
-                goto nexthost; /* try next host in list */
-            }
-            
-            /* If we have no hosts at all, or if they are some other
-             * kind of address family besides IPv4, then we really
-             * just have no hosts at all. TODO: IPv6
-             */
-            if (hp->h_addr_list[0] == NULL
-             || hp->h_length != sizeof tp->hosts[0]
-             || hp->h_addrtype != AF_INET) {
-                /* no hosts/bad size/wrong family */
-                errbits |= 1;
-                goto nexthost; /* try next host in list */
-            }
+	    libspamc_log(flags, LOG_ERR, "gethostbyname(%s) failed: h_errno=%d",
+		    tp->hostname, origherr);
+	    switch (origherr) {
+	    case HOST_NOT_FOUND:
+	    case NO_ADDRESS:
+	    case NO_RECOVERY:
+		return EX_NOHOST;
+	    case TRY_AGAIN:
+		return EX_TEMPFAIL;
+	    default:
+		return EX_OSERR;
+	    }
+	}
 
-            /* Copy all the IP addresses into our private structure.
-             * This gets them out of the resolver's static area and
-             * means we won't ever walk all over the list with other
-             * calls.
-             */
-            for (addrp = hp->h_addr_list; *addrp; addrp++) {
-                if (tp->nhosts == TRANSPORT_MAX_HOSTS) {
-                    libspamc_log(flags, LOG_NOTICE, "hit limit of %d hosts, ignoring remainder",
-                        TRANSPORT_MAX_HOSTS);
-                    break;
-                }
-                memcpy(&tp->hosts[tp->nhosts], *addrp, hp->h_length);
-                tp->nhosts++;
-            }
-            
-nexthost:
-            hostname = hostend;
-        } while (hostname != NULL);
-        free(hostlist);
-        
-        if (tp->nhosts == 0) {
-            if (errbits & 1) {
-                libspamc_log(flags, LOG_ERR, "could not resolve any hosts (%s): a temporary error occurred",
-                    tp->hostname); 
-                return EX_TEMPFAIL;
-            }
-            else {
-                libspamc_log(flags, LOG_ERR, "could not resolve any hosts (%s): no such host",
-                    tp->hostname); 
-                return EX_NOHOST;
-            }
-        }
-        
-        /* QUASI-LOAD-BALANCING
-         *
-         * If the user wants to do quasi load balancing, "rotate"
-         * the list by a random amount based on the current time.
-         * This may later be truncated to a single item. This is
-         * meaningful only if we have more than one host.
-         */
-        if ((flags & SPAMC_RANDOMIZE_HOSTS) && tp->nhosts > 1) {
-            _randomize_hosts(tp);
-        }
+		/*--------------------------------------------------------
+		 * If we have no hosts at all, or if they are some other
+	 	 * kind of address family besides IPv4, then we really
+		 * just have no hosts at all.
+		 */
+	if (hp->h_addr_list[0] == 0) {
+	    /* no hosts in this list */
+	    return EX_NOHOST;
+	}
 
-        /* If the user wants no fallback, simply truncate the host
-         * list to just one - this pretends that this is the extent
-         * of our connection list - then it's not a special case.
-         */
-        if (!(flags & SPAMC_SAFE_FALLBACK) && tp->nhosts > 1) {
-            /* truncating list */
-            tp->nhosts = 1;
-        }
-        
-        return EX_OK;
+	if (hp->h_length != sizeof tp->hosts[0]
+	    || hp->h_addrtype != AF_INET) {
+	    /* FAIL - bad size/protocol/family? */
+	    return EX_NOHOST;
+	}
+
+		/*--------------------------------------------------------
+		 * Copy all the IP addresses into our private structure.
+		 * This gets them out of the resolver's static area and
+		 * means we won't ever walk all over the list with other
+		 * calls.
+		 */
+	tp->nhosts = 0;
+
+	for (addrp = hp->h_addr_list; *addrp; addrp++) {
+	    if (tp->nhosts >= TRANSPORT_MAX_HOSTS - 1) {
+		libspamc_log(flags, LOG_ERR, "hit limit of %d hosts, ignoring remainder",
+		       TRANSPORT_MAX_HOSTS - 1);
+		break;
+	    }
+
+	    memcpy(&tp->hosts[tp->nhosts], *addrp, sizeof tp->hosts[0]);
+
+	    tp->nhosts++;
+	}
+
+		/*--------------------------------------------------------
+		 * QUASI-LOAD-BALANCING
+		 *
+		 * If the user wants to do quasi load balancing, "rotate"
+		 * the list by a random amount based on the current time.
+		 * This may later be truncated to a single item. This is
+		 * meaningful only if we have more than one host.
+		 */
+	if ((flags & SPAMC_RANDOMIZE_HOSTS) && tp->nhosts > 1) {
+	    _randomize_hosts(tp);
+	}
+
+		/*--------------------------------------------------------
+		 * If the user wants no fallback, simply truncate the host
+		 * list to just one - this pretends that this is the extent
+		 * of our connection list - then it's not a special case.
+		 */
+	if (!(flags & SPAMC_SAFE_FALLBACK) && tp->nhosts > 1) {
+	    /* truncating list */
+	    tp->nhosts = 1;
+	}
     }
-    
-    /* oops, unknown transport type */
-    return EX_OSERR;
+    return EX_OK;
 }
 
 /* --------------------------------------------------------------------------- */
@@ -1640,11 +1300,11 @@ libspamc_log (int flags, int level, char *msg, ...)
     va_start(ap, msg);
 
     if ((flags & SPAMC_LOG_TO_STDERR) != 0) {
-        /* create a log-line buffer */
+        // create a log-line buffer
         len = snprintf(buf, LOG_BUFSIZ, "spamc: ");
         len += vsnprintf(buf+len, LOG_BUFSIZ-len, msg, ap);
 
-        /* avoid buffer overflow */
+        // avoid buffer overflow
         if (len > (LOG_BUFSIZ-2)) { len = (LOG_BUFSIZ-3); }
 
         len += snprintf(buf+len, LOG_BUFSIZ-len, "\n");
@@ -1668,12 +1328,12 @@ libspamc_log (int flags, int level, char *msg, ...)
 /* --------------------------------------------------------------------------- */
 
 /*
-* Unit tests.  Must be built externally, e.g.:
-*
-* gcc -g -DLIBSPAMC_UNIT_TESTS spamd/spamc.c spamd/libspamc.c spamd/utils.c -o libspamctest
-* ./libspamctest
-*
-*/
+ * Unit tests.  Must be built externally, e.g.:
+ *
+ * gcc -g -DLIBSPAMC_UNIT_TESTS spamd/spamc.c spamd/libspamc.c spamd/utils.c -o libspamctest
+ * ./libspamctest
+ *
+ */
 #ifdef LIBSPAMC_UNIT_TESTS
 
 static void _test_locale_safe_string_to_float_val(float input)
@@ -1685,14 +1345,14 @@ static void _test_locale_safe_string_to_float_val(float input)
     sprintf(inputstr, "%f", input);
     output = _locale_safe_string_to_float(inputstr, 99);
     if (input == output) {
-        return;
+	return;
     }
 
     /* could be a rounding error.  print as string and compare those */
     sprintf(cmpbuf1, "%f", input);
     sprintf(cmpbuf2, "%f", output);
     if (!strcmp(cmpbuf1, cmpbuf2)) {
-        return;
+	return;
     }
 
     printf("FAIL: input=%f != output=%f\n", input, output);
@@ -1701,9 +1361,9 @@ static void _test_locale_safe_string_to_float_val(float input)
 static void unit_test_locale_safe_string_to_float(void)
 {
     float statictestset[] = {	/* will try both +ve and -ve */
-        0.1, 0.01, 0.001, 0.0001, 0.00001, 0.000001,
-        9.1, 9.91, 9.991, 9.9991, 9.99991, 9.999991,
-        0.0			/* end of set constant */
+	0.1, 0.01, 0.001, 0.0001, 0.00001, 0.000001,
+	9.1, 9.91, 9.991, 9.9991, 9.99991, 9.999991,
+	0.0			/* end of set constant */
     };
     float num;
     int i;
@@ -1711,14 +1371,14 @@ static void unit_test_locale_safe_string_to_float(void)
     printf("starting unit_test_locale_safe_string_to_float\n");
     /* tests of precision */
     for (i = 0; statictestset[i] != 0.0; i++) {
-        _test_locale_safe_string_to_float_val(statictestset[i]);
-        _test_locale_safe_string_to_float_val(-statictestset[i]);
-        _test_locale_safe_string_to_float_val(1 - statictestset[i]);
-        _test_locale_safe_string_to_float_val(1 + statictestset[i]);
+	_test_locale_safe_string_to_float_val(statictestset[i]);
+	_test_locale_safe_string_to_float_val(-statictestset[i]);
+	_test_locale_safe_string_to_float_val(1 - statictestset[i]);
+	_test_locale_safe_string_to_float_val(1 + statictestset[i]);
     }
     /* now exhaustive, in steps of 0.01 */
     for (num = -1000.0; num < 1000.0; num += 0.01) {
-        _test_locale_safe_string_to_float_val(num);
+	_test_locale_safe_string_to_float_val(num);
     }
     printf("finished unit_test_locale_safe_string_to_float\n");
 }

@@ -1,12 +1,10 @@
 Project Management Committee:
 
   This list contains PMC members in alphabetical order (and their Amazon
-  wishlists).  The PMC can be reached at <pmc /at/ spamassassin.apache.org>,
-  but the mailing lists should be used for all non-official correspondence.
+  wishlists).
 
    - Theo Van Dinter	http://www.amazon.com/o/registry/2ET4XKZ3OEDQW
    - Duncan Findlay
-   - Sidney Markowitz	http://www.amazon.com/o/registry/1WJ8J7403BLTS
    - Justin Mason	http://www.amazon.com/o/registry/1M0UDEXT6A3I7
    - Michael Parker	http://www.amazon.com/o/registry/10BBAR2M03T6F
    - Daniel Quinlan	http://www.amazon.com/o/registry/3B3ST4DS9DTL0
@@ -17,8 +15,9 @@ Committers:
   This list contains committers in alphabetical order (and their Amazon
   wishlists).
 
-   - Daryl C. W. O'Shea
+   - Sidney Markowitz
    - Henry Stern
+   - Matt Yackley
 
 Inactive committers:
 
@@ -28,10 +27,8 @@ Inactive committers:
   involved in other aspects of the project.  We wish them well and hope to see
   them return someday.
 
-   - Matthew Cline
    - Craig Hughes	http://www.amazon.com/o/registry/1G97F2FF1AWCK
    - Matt Sergeant
-   - Matt Yackley
 
 Spamc credits:
 
@@ -81,17 +78,12 @@ Major contributions:
 
   - Kristian Koehntopp <kris(at)koehntopp.de>: LDAP support.
 
-  - John Madden, <maddenj+spamassassin at skynet.ie>: spamc -F configuration
-    file support.
-
   - Sidney Markowitz, <sidney(at)sidney.com>: fix to DNS tests;
     message-size sanity-checking in spamc; language identification;
     Win32 build support.
   
   - Marc Merlin, <marc_soft(at)merlins.org>: RBL ordering/timeouts;
     time-logging for debug speed testing.
-
-  - Bob Menschel: 'longwords' rules, some documentation.
 
   - Eugene/Yevgeniy Miretsky, <eugene(at)invision.net>: bug fix for
     spamc -c; Spamc timeout support; support for REPORT, REPORT_IFSPAM
@@ -107,9 +99,6 @@ Major contributions:
 
   - Marc Perkel, <marc(at)perkel.com>: 30-or-so rules; about 20 of which are
     still in codebase.
-
-  - Nico Prenzel, <nico.prenzel(at)pn-systeme.de>: remote learning and
-    spam-reporting support in spamc/spamd.
 
   - Dustin Sallings, <dustin+spamassassin(at)spy.net>: support for
     virtual users in spamd.
@@ -340,4 +329,3 @@ Finally:
 
 Thanks to Christian Rauh, winner of the SpamAssassin logo contest, who
 created, designed, and illustrated the Apache SpamAssassin logo.
-

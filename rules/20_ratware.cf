@@ -27,9 +27,9 @@
 
 header RATWARE_EGROUPS		X-Mailer =~ /eGroups Message Poster/
 describe RATWARE_EGROUPS	Bulk email fingerprint (eGroups) found
-header RATWARE_HASH_2           X-Mailer =~ /^[A-Za-z0-9_]{16,}$/
+header RATWARE_HASH_2		X-Mailer =~ /^[A-Za-z0-9\._]{16,}$/
 describe RATWARE_HASH_2		Bulk email fingerprint (hash 2) found
-header RATWARE_HASH_2_V2        X-Mailer =~ /^[A-Za-z0-9_]{14,}$/
+header RATWARE_HASH_2_V2	X-Mailer =~ /^[A-Za-z0-9\._]{14,}$/
 describe RATWARE_HASH_2_V2	Bulk email fingerprint (hash 2 v2) found
 header RATWARE_JPFREE		X-Mailer =~ /jpfree Group Mail Express/
 describe RATWARE_JPFREE		Bulk email fingerprint (jpfree) found
@@ -45,9 +45,6 @@ header RATWARE_RCVD_LC_ESMTP	Received =~ /^from (?:(?:unknown|\d+\.\d+\.\d+\.\d+
 describe RATWARE_RCVD_LC_ESMTP	Bulk email fingerprint ('esmtp' Received) found
 header RATWARE_MOZ_MALFORMED	User-Agent =~ /Mozilla\/5\.0\d\d/
 describe RATWARE_MOZ_MALFORMED	Bulk email fingerprint (Mozilla malformed) found
-
-header RATWARE_MPOP_WEBMAIL	X-Mailer =~ /mPOP Web-Mail/i
-describe RATWARE_MPOP_WEBMAIL	Bulk email fingerprint (mPOP Web-Mail)
 
 ###########################################################################
 # Now, detect forgeries of real MUAs
@@ -89,7 +86,7 @@ describe FORGED_MUA_OUTLOOK	Forged mail pretending to be from MS Outlook
 
 # Outlook IMO (Internet Mail Only)
 header __OIMO_MUA		X-Mailer =~ /Outlook IMO/
-header __OIMO_MSGID		MESSAGEID =~ /^<[A-P]{26}A[ABC]\.[-\w.]+\@\S+>$/m
+header __OIMO_MSGID		MESSAGEID =~ /^<[A-P]{26}A[AB]\.[-_\w.]+\@\S+>$/m
 meta FORGED_MUA_OIMO		(__OIMO_MUA && !__OIMO_MSGID && !__OUTLOOK_DOLLARS_MSGID && !__UNUSABLE_MSGID)
 describe FORGED_MUA_OIMO	Forged mail pretending to be from MS Outlook IMO
 
@@ -109,7 +106,7 @@ describe FORGED_MUA_EUDORA	Forged mail pretending to be from Eudora
   
 # Mar 26 2003 jm: AOL MUAs add a Received line, and do not use "real names" in
 # From or To headers, as far as I can see, quinlan: also see bug 1426
-header __AOL_FROM		From:addr =~ /\@(?:aol|cs)\.com$/i
+header __AOL_FROM		From:addr =~ /\@aol\.com$/i
 meta FORGED_MUA_AOL_FROM	(__AOL_MUA && !__AOL_FROM)
 describe FORGED_MUA_AOL_FROM	Forged mail pretending to be from AOL (by From)
 
@@ -127,10 +124,7 @@ meta FORGED_MUA_THEBAT_BOUN     (__THEBAT_MUA_V1 && __CTYPE_HAS_BOUNDARY && !__B
 describe FORGED_MUA_THEBAT_CS	Mail pretending to be from The Bat! (charset)
 describe FORGED_MUA_THEBAT_BOUN Mail pretending to be from The Bat! (boundary)
 
-# bug 4649: bulk mail sent via Yahoo! often looks forged, even when it is not
-header __YAHOO_BULK		Received =~ /from \[\S+\] by \S+\.(?:groups|scd|dcn)\.yahoo\.com with NNFMP/
-
-meta FORGED_OUTLOOK_HTML	(!__YAHOO_BULK && __ANY_OUTLOOK_MUA && MIME_HTML_ONLY)
+meta FORGED_OUTLOOK_HTML	(__ANY_OUTLOOK_MUA && MIME_HTML_ONLY)
 describe FORGED_OUTLOOK_HTML	Outlook can't send HTML message only
 
 # bug 2525: FORGED_IMS_HTML fp'ing because new IMS *DOES* use text/html
@@ -138,33 +132,11 @@ describe FORGED_OUTLOOK_HTML	Outlook can't send HTML message only
 # after that to get away with it.
 header __IMS_HTML_BUILDS	X-Mailer =~ /^Internet Mail Service .(?:[6789]\.|5\.[6789]|5\.5\.(?:[3456789]|2[789]|26[6789]|265[6789]))/
 header __IMS_HTML_RCVD		Received =~ /\bby \S+ with Internet Mail Service .(?:[6789]\.|5\.[6789]|5\.5\.(?:[3456789]|2[789]|26[6789]|265[6789]))/
-meta FORGED_IMS_HTML		(!__YAHOO_BULK && __IMS_MUA && MIME_HTML_ONLY && !(__IMS_HTML_BUILDS && __IMS_HTML_RCVD))
+meta FORGED_IMS_HTML		(__IMS_MUA && MIME_HTML_ONLY && !(__IMS_HTML_BUILDS && __IMS_HTML_RCVD))
 describe FORGED_IMS_HTML	IMS can't send HTML message only
 
 meta FORGED_THEBAT_HTML		(__THEBAT_MUA_V1 && MIME_HTML_ONLY)
 describe FORGED_THEBAT_HTML	The Bat! can't send HTML message only
-
-# bug 2513
-header __REPTO_OVERQUOTE	Reply-To =~ /"[\w. -]+"\s*\</
-meta REPTO_OVERQUOTE_THEBAT	__REPTO_OVERQUOTE && __THEBAT_MUA
-describe REPTO_OVERQUOTE_THEBAT	The Bat! doesn't do quoting like this
-
-# bug 2513
-header __REPTO_QUOTE		Reply-To =~ /".*"\s*\</
-meta REPTO_QUOTE_AOL		__REPTO_QUOTE && __AOL_MUA
-describe REPTO_QUOTE_AOL	AOL doesn't do quoting like this
-
-meta REPTO_QUOTE_IMS		__REPTO_QUOTE && __IMS_MUA
-describe REPTO_QUOTE_IMS	IMS doesn't do quoting like this
-
-meta REPTO_QUOTE_MSN		__REPTO_QUOTE && (__FROM_MSN_COM || __AT_MSN_MSGID)
-describe REPTO_QUOTE_MSN	MSN doesn't do quoting like this
-
-meta REPTO_QUOTE_QUALCOMM	__REPTO_QUOTE && __ANY_QUALCOMM_MUA
-describe REPTO_QUOTE_QUALCOMM	Qualcomm/Eudora doesn't do quoting like this
-
-meta REPTO_QUOTE_YAHOO		__REPTO_QUOTE && (__FROM_YAHOO_COM || __AT_YAHOO_MSGID)
-describe REPTO_QUOTE_YAHOO	Yahoo! doesn't do quoting like this
 
 # bug 1561
 # stronger version of USER_AGENT_APPLEMAIL
@@ -175,10 +147,9 @@ describe REPTO_QUOTE_YAHOO	Yahoo! doesn't do quoting like this
 # MIME_HTML_ONLY.
 # perhaps limit CTYPE to "text/plain", "multipart/alternative" with
 # "text/plain" and "text/enhanced", or "multipart/mixed"?
-# bug 4223: expand for new Apple Mail version format
-header __X_MAILER_APPLEMAIL	X-Mailer =~ /^Apple Mail \(\d\.\d+(?:\.\d+)?\)$/
+header __X_MAILER_APPLEMAIL	X-Mailer =~ /^Apple Mail \(\d\.\d+\)$/
 header __MSGID_APPLEMAIL        Message-Id =~ /^<[0-9A-F]{8}-(?:[0-9A-F]{4}-){3}[0-9A-F]{12}\@\S+>$/
-header __MIME_VERSION_APPLEMAIL	Mime-Version =~ /^1\.0 \(Apple Message framework v\d+(?:\.\d+)?\)$/
+header __MIME_VERSION_APPLEMAIL	Mime-Version =~ /^1\.0 \(Apple Message framework v\d+\)$/
 meta __USER_AGENT_APPLEMAIL	!__CTYPE_HTML && __X_MAILER_APPLEMAIL && (__MSGID_APPLEMAIL || __MIME_VERSION_APPLEMAIL)
 
 # 2003-02-23: quinlan
@@ -200,10 +171,10 @@ describe FORGED_QUALCOMM_TAGS	QUALCOMM mailers can't send HTML in this format
 meta FORGED_AOL_TAGS		(__ANY_AOL_MUA && __MIME_HTML && !__TAG_EXISTS_HTML)
 describe FORGED_AOL_TAGS	AOL mailers can't send HTML in this format
 
-meta FORGED_IMS_TAGS		(!__YAHOO_BULK && __ANY_IMS_MUA && __MIME_HTML && !(__TAG_EXISTS_HTML && __TAG_EXISTS_HEAD && __TAG_EXISTS_META && __TAG_EXISTS_BODY))
+meta FORGED_IMS_TAGS		(__ANY_IMS_MUA && __MIME_HTML && !(__TAG_EXISTS_HTML && __TAG_EXISTS_HEAD && __TAG_EXISTS_META && __TAG_EXISTS_BODY))
 describe FORGED_IMS_TAGS	IMS mailers can't send HTML in this format
 
-meta FORGED_OUTLOOK_TAGS	(!__YAHOO_BULK && __ANY_OUTLOOK_MUA && __MIME_HTML && !(__TAG_EXISTS_HTML && __TAG_EXISTS_HEAD && __TAG_EXISTS_META && __TAG_EXISTS_BODY))
+meta FORGED_OUTLOOK_TAGS	(__ANY_OUTLOOK_MUA && __MIME_HTML && !(__TAG_EXISTS_HTML && __TAG_EXISTS_HEAD && __TAG_EXISTS_META && __TAG_EXISTS_BODY))
 describe FORGED_OUTLOOK_TAGS	Outlook can't send HTML in this format
 
 # Send-Safe ratware (idea from Alan Curry)
@@ -217,7 +188,7 @@ describe FORGED_OUTLOOK_TAGS	Outlook can't send HTML in this format
 # filters.
 #
 # http://groups.google.com/groups?selm=atp1ip0n22%40enews3.newsguy.com
-rawbody RATWARE_HASH_DASH	/[a-z\d]-[a-z\d]{16}-[a-z\d]{1,16}(?-i:l)\d/i
+rawbody RATWARE_HASH_DASH	/[a-z\d]+-([a-z\d]{16}-)+[a-z\d]+(?-i:l)\d+/i
 describe RATWARE_HASH_DASH	Contains a hashbuster in Send-Safe format
 
 # spammer tool, sometimes has "netIP with HTTP;" in Received: header
@@ -280,33 +251,8 @@ describe RCVD_BONUS_SPC_DATE	Bulk email fingerprint (bonus space) found
 header X_MESSAGE_INFO		exists:X-Message-Info
 describe X_MESSAGE_INFO		Bulk email fingerprint (X-Message-Info) found
 
-# case-sensitive rule
-# only significant rules with no FPs, hit recently, on 2+ corpuses
-header HEADER_SPAM		ALL =~ /^(Alternate-Recipient|Antivirus|Approved|Delivery-Notification|Disclose-Recipients|Error-path|Language|Location|Mime-Subversion|Newsletter-ID|PID|Rot|UID|X-BounceTrace|X-CS-IP|X-Company-Address|X-Company-City|X-Company-Country|X-Company-State|X-Company-Zip|X-E(?:[Mm]ail)?|X-Encoding|X-Originating-Company|X-RMD-Text|X-SG4|X-SP-Track-ID|X-Webmail-Time|X-bounce-to):/m
-describe HEADER_SPAM		Bulk email fingerprint (header-based) found
-
 header RATWARE_RCVD_PF		Received =~ / \(Postfix\) with ESMTP id [^;]+\; \S+ \d+ \S+ \d+ \d+:\d+:\d+ \S+$/s
 describe RATWARE_RCVD_PF	Bulk email fingerprint (Received PF) found
 
 header RATWARE_RCVD_AT		Received =~ / by \S+\@\S+ with Microsoft SMTPSVC/
 describe RATWARE_RCVD_AT	Bulk email fingerprint (Received @) found
-
-meta RATWARE_OUTLOOK_NONAME	__MSGID_DOLLARS_OK && !__HAS_X_MAILER
-describe RATWARE_OUTLOOK_NONAME	Bulk email fingerprint (Outlook no name) found
-
-header MSGID_RATWARE1		Message-Id =~ /<[A-Z]+\$[^\$]+\$.+@/
-describe MSGID_RATWARE1		Bulk email fingerprint found
-
-header RATWARE_BOUND_PIECE	Content-Type =~ /boundary=\"?--Piece/
-describe RATWARE_BOUND_PIECE	Bulk email fingerprint (piece boundary) found
-
-header __RATWARE_NAME_ID	eval:check_ratware_name_id()
-meta RATWARE_NAME_ID		__RATWARE_0_TZ_DATE && __RATWARE_NAME_ID
-describe RATWARE_NAME_ID	Bulk email fingerprint (msgid from) found
-
-header __MIMEOLE_MS		X-MIMEOLE =~ /^Produced By Microsoft MimeOLE/
-meta RATWARE_MS_HASH 		__MSGID_DOLLARS_OK && !__MIMEOLE_MS
-describe RATWARE_MS_HASH	Bulk email fingerprint (msgid ms hash) found
-
-header RATWARE_EFROM		eval:check_ratware_envelope_from()
-describe RATWARE_EFROM		Bulk email fingerprint (envfrom) found

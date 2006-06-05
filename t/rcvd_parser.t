@@ -18,7 +18,7 @@ if (-e 'test_dir') {            # running from test directory, not ..
 
 use lib '.'; use lib 't';
 use SATest; sa_t_init("rcvd_parser");
-use Test; BEGIN { plan tests => 48 };
+use Test; BEGIN { plan tests => 42 };
 
 
 use strict;
@@ -161,23 +161,6 @@ Received: from 24.8.231.233 by by1fd.bay1.hotmail.msn.com with HTTP;
 },
 q{
 
-Received: (qmail 22147 invoked by uid 526); 6 Feb 2005 21:11:38 -0000
-Received: from 156.56.111.196 by blazing.arsecandle.org (envelope-from <gentoo-announce-return-530-rod=arsecandle.org@lists.gentoo.org>, uid 502) with qmail-scanner-1.24
- (clamdscan: 0.80/594. f-prot: 4.4.2/3.14.11.
- Clear:RC:0(156.56.111.196):.
- Processed in 0.288806 secs); 06 Feb 2005 21:11:38 -0000
-DomainKey-Status: no signature
-Received: from lists.gentoo.org (HELO parrot.gentoo.org) (156.56.111.196)
-  by blazing.arsecandle.org with (DHE-RSA-AES256-SHA encrypted) SMTP; 6 Feb 2005 21:11:37 -0000
-Received: (qmail 3988 invoked by uid 89); 6 Feb 2005 21:11:12 +0000
-
-} => q{
-
-  [ ip=156.56.111.196 rdns=lists.gentoo.org helo=parrot.gentoo.org by=blazing.arsecandle.org ident= envfrom=gentoo-announce-return-530-rod=arsecandle.org@lists.gentoo.org id= auth= ]
-
-},
-q{
-
 Received: from hotmail.com (something.com [65.54.245.95]) at just after 10pm by Daffy.timing.com on a Friday (CrazyMTA) (envelope-from <foo@example.com>) with TFTP
 
 } => q{
@@ -262,7 +245,7 @@ Received: from a1200 ([24.83.2.7])
 
 } => q{
 
-[ ip=66.199.2.3 rdns= helo=bigass1.example.com by=slim1.example.com ident= envfrom= id= auth= ] [ ip=24.83.2.4 rdns= helo=a1200 by=bigass1.example.com ident= envfrom= id= auth=LOGIN ] [ ip=66.199.2.5 rdns=ns1.example.com helo=bigass1.example.com by=fiat.example.edu ident= envfrom= id=i06MBJ6U020255 auth= ] [ ip=24.83.2.6 rdns= helo=a1200 by=bigass1.example.com ident= envfrom= id= auth=LOGIN ] [ ip=24.83.2.7 rdns= helo=a1200 by=bigass1.example.com ident= envfrom= id= auth=LOGIN ]
+[ ip=66.199.2.3 rdns= helo=bigass1.example.com by=slim1.example.com ident= envfrom= id= auth= ] [ ip=24.83.2.4 rdns= helo=a1200 by=bigass1.example.com ident= envfrom= id= auth= ] [ ip=66.199.2.5 rdns=ns1.example.com helo=bigass1.example.com by=fiat.example.edu ident= envfrom= id=i06MBJ6U020255 auth= ] [ ip=24.83.2.6 rdns= helo=a1200 by=bigass1.example.com ident= envfrom= id= auth= ] [ ip=24.83.2.7 rdns= helo=a1200 by=bigass1.example.com ident= envfrom= id= auth= ]
 
 },
 q{
@@ -515,7 +498,7 @@ Received: from p50894de7.dip0.t-ipconnect.de ([80.137.77.231]:11218 helo=sandpip
 
 } => q{
  
-  [ ip=66.92.76.133 rdns=dsl092-076-133.bos1.dsl.speakeasy.net helo=pendaran.arborius.net by=sc8-sf-mx1.sourceforge.net ident= envfrom= id=1CIlfc-0003Pa-8W auth= ] [ ip=158.64.60.71 rdns=gilmore.ael.be helo= by=castlerea.stdlib.net ident= envfrom= id=1CIusZ-00049K-45 auth= ] [ ip=198.189.237.214 rdns=rubel.csumb.edu helo=rubel.csumb.edu by=sf1.isc.org ident= envfrom=snort@csumb.edu id=23587284EE auth= ] [ ip=80.137.77.231 rdns=p50894de7.dip0.t-ipconnect.de helo=sandpiper by=mail1.isc.de ident= envfrom= id=1CJaZW-0006rU-00 auth= ]
+  [ ip=66.92.76.133 rdns=dsl092-076-133.bos1.dsl.speakeasy.net helo=pendaran.arborius.net by=sc8-sf-mx1.sourceforge.net ident= envfrom= id=1CIlfc-0003Pa-8W auth= ] [ ip=158.64.60.71 rdns=gilmore.ael.be helo=gilmore.ael.be by=castlerea.stdlib.net ident= envfrom= id=1CIusZ-00049K-45 auth= ] [ ip=198.189.237.214 rdns=rubel.csumb.edu helo=rubel.csumb.edu by=sf1.isc.org ident= envfrom=snort@csumb.edu id=23587284EE auth= ] [ ip=80.137.77.231 rdns=p50894de7.dip0.t-ipconnect.de helo=sandpiper by=mail1.isc.de ident= envfrom= id=1CJaZW-0006rU-00 auth= ]
   
 },
 q{
@@ -554,63 +537,7 @@ Received: from bgp01132961bgs.ypeast01.mi.comcast.net ([68.42.119.201] helo=moon
  
   [ ip=84.131.183.192 rdns=p5483b7c0.dip.t-dialin.net helo=192.168.1.23 by=moonflower.de ident= envfrom= id=1CIoQP-0006SN-GV auth=asmtp ] [ ip=68.42.119.201 rdns=bgp01132961bgs.ypeast01.mi.comcast.net helo=moonweaver.home.awesomeplay.com by=outbound.mailhop.org ident= envfrom= id=1CJic5-00067m-U7 auth=esmtpsa ]
 
-},
-q{
-
-Received: from gorkcomputer (my.dns.com [1.2.3.4])
-  (AUTH: LOGIN gork@mydomain.com, SSL: TLSv1/SSLv3,128bits,RC4-MD5)
-  by mydomain.com with esmtp; Thu, 10 Nov 2005 08:24:21 -0600
-  id 000000DB.43735815.00001E11
-
-} => q{
-
-  [ ip=1.2.3.4 rdns=my.dns.com helo=gorkcomputer by=mydomain.com ident= envfrom= id=000000DB.43735815.00001E11 auth=LOGIN ]
-
-},
-q{
-
-Received: FROM hackers.mr.itd.umich.edu (smtp.mail.umich.edu [141.211.14.81])
-	BY madman.mr.itd.umich.edu ID 434B508E.174A6.13932 ; 11 Oct 2005 01:41:34 -0400
-Received: FROM [192.168.1.24] (s233-64-90-216.try.wideopenwest.com [64.233.216.90])
-	BY hackers.mr.itd.umich.edu ID 434B5051.8CDE5.15436 ; 11 Oct 2005 01:40:33 -0400
-
-} => q{
-
-  [ ip=141.211.14.81 rdns=smtp.mail.umich.edu helo=hackers.mr.itd.umich.edu by=madman.mr.itd.umich.edu ident= envfrom= id=434B508E.174A6.13932 auth= ] [ ip=64.233.216.90 rdns=s233-64-90-216.try.wideopenwest.com helo=!192.168.1.24! by=hackers.mr.itd.umich.edu ident= envfrom= id=434B5051.8CDE5.15436 auth= ]
-
-},
-q{
-
-Received: from TCE-E-7-182-54.bta.net.cn(202.106.182.54) via SMTP
-	by st.tahina.priv.at, id smtpdEDUB8h; Sun Nov 13 14:50:12 2005
-Received: from pl027.nas934.d-osaka.nttpc.ne.jp(61.197.82.27), claiming to be "foo.woas.net" via SMTP
-	by st.tahina.priv.at, id smtpd1PBsZT; Sun Nov 13 15:38:52 2005
-
-} => q{
-
-  [ ip=202.106.182.54 rdns=TCE-E-7-182-54.bta.net.cn helo= by=st.tahina.priv.at ident= envfrom= id=smtpdEDUB8h auth= ] [ ip=61.197.82.27 rdns=pl027.nas934.d-osaka.nttpc.ne.jp helo=foo.woas.net by=st.tahina.priv.at ident= envfrom= id=smtpd1PBsZT auth= ]
-
-},
-q{
-
-Received: from [206.51.230.145] (helo=t-online.de)
-	by mxeu2.kundenserver.de with ESMTP (Nemesis),
-	id 0MKpdM-1CkRpr14PF-000608; Fri, 31 Dec 2004 19:49:15 +0100
-
-} => q{
-
-  [ ip=206.51.230.145 rdns= helo=t-online.de by=mxeu2.kundenserver.de ident= envfrom= id=0MKpdM-1CkRpr14PF-000608 auth= ]
-
-},
-q{
-
-Received: from Amazon.com ([66.0.37.1])
-        by bi-staff1.beckman.uiuc.edu (8.12.8/8.12.8) with SMTP id k1SCIR87017358;
-        Tue, 28 Feb 2006 06:18:27 -0600
-} => q{
-
-[ ip=66.0.37.1 rdns= helo=Amazon.com by=bi-staff1.beckman.uiuc.edu ident= envfrom= intl=0 id=k1SCIR87017358 auth= ]
-
+  
 },
 );
 
@@ -630,7 +557,7 @@ foreach my $hdrs (sort keys %data) {
 
   #warn "JMD $result";
   $result =~ s/\n[ \t]+/ /gs;
-  $result =~ /(?:\n|^)X-Spam-Relays: ([^\n]*)\n/s;
+  $result =~ /\nX-Spam-Relays: ([^\n]*)\n/s;
   my $relays = $1;
   
   $relays =~ s/\s+/ /gs;

@@ -18,13 +18,15 @@
 
 Mail::SpamAssassin::Bayes - determine spammishness using a Bayesian classifier
 
+=head1 SYNOPSIS
+
 =head1 DESCRIPTION
 
 This is a Bayesian-like form of probability-analysis classification, using an
 algorithm based on the one detailed in Paul Graham's I<A Plan For Spam> paper
 at:
 
-  http://www.paulgraham.com/spam.html
+  http://www.paulgraham.com/
 
 It also incorporates some other aspects taken from Graham Robinson's webpage
 on the subject at:
@@ -46,17 +48,10 @@ The results are incorporated into SpamAssassin as the BAYES_* rules.
 package Mail::SpamAssassin::Bayes;
 
 use strict;
-use warnings;
 use bytes;
 
 use Mail::SpamAssassin;
 use Mail::SpamAssassin::PerMsgStatus;
-use Mail::SpamAssassin::Logger;
-
-# pick ONLY ONE of these combining implementations.
-use Mail::SpamAssassin::Bayes::CombineChi;
-# use Mail::SpamAssassin::Bayes::CombineNaiveBayes;
-
 use Digest::SHA1 qw(sha1 sha1_hex);
 
 use vars qw{
@@ -207,6 +202,23 @@ $OPPORTUNISTIC_LOCK_VALID = 300;
 # into the <0.5 range for nonspam and >0.5 for spam.
 use constant USE_ROBINSON_FX_EQUATION_FOR_LOW_FREQS => 1;
 
+# Value for 'x' in the f(w) equation.
+# "Let x = the number used when n [hits] is 0."
+use constant CHI_ROBINSON_X_CONSTANT  => 0.538;
+use constant GARY_ROBINSON_X_CONSTANT => 0.600;
+
+# Value for 's' in the f(w) equation.  "We can see s as the "strength" (hence
+# the use of "s") of an original assumed expectation ... relative to how
+# strongly we want to consider our actual collected data."  Low 's' means
+# trust collected data more strongly.
+use constant CHI_ROBINSON_S_CONSTANT  => 0.100;
+use constant GARY_ROBINSON_S_CONSTANT => 0.160;
+
+# Should we ignore tokens with probs very close to the middle ground (.5)?
+# tokens need to be outside the [ .5-MPS, .5+MPS ] range to be used.
+use constant CHI_ROBINSON_MIN_PROB_STRENGTH  => 0.346;
+use constant GARY_ROBINSON_MIN_PROB_STRENGTH => 0.430;
+
 # How many of the most significant tokens should we use for the p(w)
 # calculation?
 use constant N_SIGNIFICANT_TOKENS => 150;
@@ -254,6 +266,8 @@ sub new {
   $self;
 }
 
+###########################################################################
+
 sub finish {
   my $self = shift;
   #if (!$self->{conf}->{use_bayes}) { return; }
@@ -264,8 +278,6 @@ sub finish {
   $self->{store}->untie_db();
 }
 
-sub sa_die { Mail::SpamAssassin::sa_die(@_); }
-
 ###########################################################################
 
 sub sanity_check_is_untied {
@@ -275,7 +287,7 @@ sub sanity_check_is_untied {
   # after compiling; for example, spamd will never see that the
   # number of messages has reached the bayes-scanning threshold.
   if ($self->{store}->db_readable()) {
-    warn "bayes: oops! still tied to bayes DBs, untying\n";
+    warn "SpamAssassin: oops! still tied to bayes DBs, untie'ing\n";
     $self->{store}->untie_db();
   }
 }
@@ -290,6 +302,25 @@ sub read_db_configs {
   # use of hapaxes.  Set on bayes object, since it controls prob
   # computation.
   $self->{use_hapaxes} = $self->{conf}->{bayes_use_hapaxes};
+
+  # Use chi-squared combining instead of Gary-combining (Robinson/Graham-style
+  # naive-Bayesian)?
+  $self->{use_chi_sq_combining} = $self->{conf}->{bayes_use_chi2_combining};
+
+  # Use the appropriate set of constants; the different systems have different
+  # optimum settings for these.  (TODO: should these be exposed through Conf?)
+  if ($self->{use_chi_sq_combining}) {
+    $self->{robinson_x_constant} = CHI_ROBINSON_X_CONSTANT;
+    $self->{robinson_s_constant} = CHI_ROBINSON_S_CONSTANT;
+    $self->{robinson_min_prob_strength} = CHI_ROBINSON_MIN_PROB_STRENGTH;
+  } else {
+    $self->{robinson_x_constant} = GARY_ROBINSON_X_CONSTANT;
+    $self->{robinson_s_constant} = GARY_ROBINSON_S_CONSTANT;
+    $self->{robinson_min_prob_strength} = GARY_ROBINSON_MIN_PROB_STRENGTH;
+  }
+
+  $self->{robinson_s_times_x} =
+      ($self->{robinson_x_constant} * $self->{robinson_s_constant});
 }
 
 ###########################################################################
@@ -549,9 +580,7 @@ sub tokenize_headers {
     } else {
       $parsed{$hdr} = $val;
     }
-    if (would_log('dbg', 'bayes') > 1) {
-      dbg("bayes: header tokens for $hdr = \"$parsed{$hdr}\"");
-    }
+    dbg ("tokenize: header tokens for $hdr = \"$parsed{$hdr}\"");
   }
 
   return %parsed;
@@ -673,7 +702,7 @@ sub ignore_message {
   my $ignore = $PMS->check_from_in_list('bayes_ignore_from')
     		|| $PMS->check_to_in_list('bayes_ignore_to');
 
-  dbg("bayes: not using bayes, bayes_ignore_from or _to rule") if $ignore;
+  dbg("Not using Bayes, bayes_ignore_from or _to rule") if $ignore;
 
   return $ignore;
 }
@@ -724,7 +753,7 @@ sub learn {
   if ($@) {		# if we died, untie the dbs.
     my $failure = $@;
     $self->{store}->untie_db();
-    die "bayes: $failure";
+    die $failure;
   }
 
   return $ret;
@@ -744,20 +773,12 @@ sub learn_trapped {
 
     if (defined ($seen)) {
       if (($seen eq 's' && $isspam) || ($seen eq 'h' && !$isspam)) {
-        dbg("bayes: $msgid already learnt correctly, not learning twice");
+        dbg ("$msgid: already learnt correctly, not learning twice");
         return 0;
       } elsif ($seen !~ /^[hs]$/) {
-        warn("bayes: db_seen corrupt: value='$seen' for $msgid, ignored");
+        warn ("db_seen corrupt: value='$seen' for $msgid. ignored");
       } else {
-        # bug 3704: If the message was already learned, don't try learning it again.
-        # this prevents, for instance, manually learning as spam, then autolearning
-        # as ham, or visa versa.
-        if ($self->{main}->{learn_no_relearn}) {
-	  dbg("bayes: $msgid already learnt as opposite, not re-learning");
-	  return 0;
-	}
-
-        dbg("bayes: $msgid already learnt as opposite, forgetting first");
+        dbg ("$msgid: already learnt as opposite, forgetting first");
 
         # kluge so that forget() won't untie the db on us ...
         my $orig = $self->{main}->{learn_caller_will_untie};
@@ -770,7 +791,7 @@ sub learn_trapped {
     
         # forget() gave us a fatal error, so propagate that up
         if ($fatal) {
-          dbg("bayes: forget() returned a fatal error, so learn() will too");
+          dbg("forget() returned a fatal error, so learn() will too");
 	  return;
         }
       }
@@ -800,10 +821,12 @@ sub learn_trapped {
 
   my $tokens = $self->tokenize($msg, $msgdata);
 
-  if ($isspam) {
-    $self->{store}->multi_tok_count_change(1, 0, $tokens, $msgatime);
-  } else {
-    $self->{store}->multi_tok_count_change(0, 1, $tokens, $msgatime);
+  for my $token (keys %{$tokens}) {
+    if ($isspam) {
+      $self->{store}->tok_count_change (1, 0, $token, $msgatime);
+    } else {
+      $self->{store}->tok_count_change (0, 1, $token, $msgatime);
+    }
   }
 
   $self->{store}->seen_put ($msgid, ($isspam ? 's' : 'h'));
@@ -815,7 +838,7 @@ sub learn_trapped {
 					       msgatime => $msgatime,
 					     });
 
-  dbg("bayes: learned '$msgid', atime: $msgatime");
+  dbg("bayes: Learned '$msgid', atime: $msgatime");
 
   1;
 }
@@ -858,7 +881,7 @@ sub forget {
   if ($@) {		# if we died, untie the dbs.
     my $failure = $@;
     $self->{store}->untie_db();
-    die "bayes: $failure";
+    die $failure;
   }
 
   return $ret;
@@ -883,7 +906,7 @@ sub forget_trapped {
       } elsif ($seen eq 'h') {
         $isspam = 0;
       } else {
-        dbg("bayes: forget: msgid $msgid seen entry is neither ham nor spam, ignored");
+        dbg ("forget: msgid $msgid seen entry is neither ham nor spam, ignored");
         return 0;
       }
 
@@ -892,13 +915,13 @@ sub forget_trapped {
       last;
     }
     else {
-      dbg("bayes: forget: msgid $msgid not learnt, ignored");
+      dbg ("forget: msgid $msgid not learnt, ignored");
     }
   }
 
   # This message wasn't learnt before, so return
   if (!defined $isspam) {
-    dbg("bayes: forget: no msgid from this message has been learnt, skipping message");
+    dbg("forget: no msgid from this message has been learnt, skipping message");
     return 0;
   }
   elsif ($isspam) {
@@ -910,10 +933,12 @@ sub forget_trapped {
 
   my $tokens = $self->tokenize($msg, $msgdata);
 
-  if ($isspam) {
-    $self->{store}->multi_tok_count_change (-1, 0, $tokens);
-  } else {
-    $self->{store}->multi_tok_count_change (0, -1, $tokens);
+  for my $token (keys %{$tokens}) {
+    if ($isspam) {
+      $self->{store}->tok_count_change (-1, 0, $token);
+    } else {
+      $self->{store}->tok_count_change (0, -1, $token);
+    }
   }
 
   $self->{store}->seen_delete ($msgid);
@@ -969,7 +994,7 @@ sub get_body_from_msg {
 
   if (!ref $msg) {
     # I have no idea why this seems to happen. TODO
-    warn "bayes: msg not a ref: '$msg'";
+    warn "msg not a ref: '$msg'";
     return { };
   }
 
@@ -981,7 +1006,7 @@ sub get_body_from_msg {
 
   if (!defined $msgdata) {
     # why?!
-    warn "bayes: failed to get body for ".scalar($self->get_msgid($self->{msg}))."\n";
+    warn "failed to get body for ".scalar($self->get_msgid($self->{msg}))."\n";
     return { };
   }
 
@@ -1004,16 +1029,10 @@ sub sync {
   my ($self, $sync, $expire, $opts) = @_;
   if (!$self->{conf}->{use_bayes}) { return 0; }
 
-  if ($sync) {
-    dbg("bayes: bayes journal sync starting");
-    $self->{store}->sync($opts);
-    dbg("bayes: bayes journal sync completed");
-  }
-  if ($expire) {
-    dbg("bayes: expiry starting");
-    $self->{store}->expire_old_tokens($opts);
-    dbg("bayes: expiry completed");
-  }
+  dbg("Syncing Bayes and expiring old tokens...");
+  $self->{store}->sync($opts) if ( $sync );
+  $self->{store}->expire_old_tokens($opts) if ( $expire );
+  dbg("Syncing complete.");
 
   return 0;
 }
@@ -1048,7 +1067,7 @@ sub compute_prob_for_token {
   my $prob;
 
   if ($ratios == 0 && $ration == 0) {
-    warn "bayes: oops? ratios == ration == 0";
+    warn "oops? ratios == ration == 0";
     return;
   } else {
     $prob = ($ratios) / ($ration + $ratios);
@@ -1058,9 +1077,9 @@ sub compute_prob_for_token {
     # use Robinson's f(x) equation for low-n tokens, instead of just
     # ignoring them
     my $robn = $s+$n;
-    $prob = ($Mail::SpamAssassin::Bayes::Combine::FW_S_DOT_X + ($robn * $prob))
+    $prob = ($self->{robinson_s_times_x} + ($robn * $prob))
                              /
-            ($Mail::SpamAssassin::Bayes::Combine::FW_S_CONSTANT + $robn);
+		  ($self->{robinson_s_constant} + $robn);
   }
 
   if ($self->{log_raw_counts}) {
@@ -1090,17 +1109,16 @@ sub compute_declassification_distance {
   if (!$self->{use_hapaxes}) {return 0 if ($ns + $nn < 2);}
 
   return 0 if $Ns == 0 || $Nn == 0;
-  return 0 if abs( $prob - 0.5 ) <
-                $Mail::SpamAssassin::Bayes::Combine::MIN_PROB_STRENGTH;
+  return 0 if abs( $prob - 0.5 ) < $self->{robinson_min_prob_strength};
 
   my ($Na,$na,$Nb,$nb) = $prob > 0.5 ? ($Nn,$nn,$Ns,$ns) : ($Ns,$ns,$Nn,$nn);
-  my $p = 0.5 - $Mail::SpamAssassin::Bayes::Combine::MIN_PROB_STRENGTH;
+  my $p = 0.5 - $self->{robinson_min_prob_strength};
 
   return int( 1.0 - 1e-6 + $nb * $Na * $p / ($Nb * ( 1 - $p )) ) - $na
     unless USE_ROBINSON_FX_EQUATION_FOR_LOW_FREQS;
 
-  my $s = $Mail::SpamAssassin::Bayes::Combine::FW_S_CONSTANT;
-  my $sx = $Mail::SpamAssassin::Bayes::Combine::FW_S_DOT_X;
+  my $s = $self->{robinson_s_constant};
+  my $sx = $self->{robinson_s_times_x};
   my $a = $Nb * ( 1 - $p );
   my $b = $Nb * ( $sx + $nb * ( 1 - $p ) - $p * $s ) - $p * $Na * $nb;
   my $c = $Na * $nb * ( $sx - $p * ( $s + $nb ) );
@@ -1136,14 +1154,14 @@ sub is_scan_available {
   my ($ns, $nn) = $self->{store}->nspam_nham_get();
 
   if ($ns < $self->{conf}->{bayes_min_spam_num}) {
-    dbg("bayes: not available for scanning, only $ns spam(s) in bayes DB < ".$self->{conf}->{bayes_min_spam_num});
+    dbg("bayes: Not available for scanning, only $ns spam(s) in Bayes DB < ".$self->{conf}->{bayes_min_spam_num});
     if (!$self->{main}->{learn_caller_will_untie}) {
       $self->{store}->untie_db();
     }
     return 0;
   }
   if ($nn < $self->{conf}->{bayes_min_ham_num}) {
-    dbg("bayes: not available for scanning, only $nn ham(s) in bayes DB < ".$self->{conf}->{bayes_min_ham_num});
+    dbg("bayes: Not available for scanning, only $nn ham(s) in Bayes DB < ".$self->{conf}->{bayes_min_ham_num});
     if (!$self->{main}->{learn_caller_will_untie}) {
       $self->{store}->untie_db();
     }
@@ -1175,7 +1193,7 @@ sub scan {
     $self->{raw_counts} = " ns=$ns nn=$nn ";
   }
 
-  dbg("bayes: corpus size: nspam = $ns, nham = $nn");
+  dbg ("bayes corpus size: nspam = $ns, nham = $nn");
 
   my $msgdata = $self->get_msgdata_from_permsgstatus ($permsgstatus);
 
@@ -1199,7 +1217,7 @@ sub scan {
   # If none of the tokens were found in the DB, we're going to skip
   # this message...
   if (!keys %pw) {
-    dbg("bayes: cannot use bayes on this message; none of the tokens were found in the database");
+    dbg ("cannot use bayes on this message; none of the tokens were found in the database");
     goto skip;
   }
 
@@ -1231,8 +1249,7 @@ sub scan {
   {
     if ($count-- < 0) { last; }
     my $pw = $pw{$_}->{prob};
-    next if (abs($pw - 0.5) < 
-                $Mail::SpamAssassin::Bayes::Combine::MIN_PROB_STRENGTH);
+    next if (abs($pw - 0.5) < $self->{robinson_min_prob_strength});
 
     # What's more expensive, scanning headers for HAMMYTOKENS and
     # SPAMMYTOKENS tags that aren't there or collecting data that
@@ -1250,24 +1267,26 @@ sub scan {
     # update the atime on this token, it proved useful
     push(@touch_tokens, $_);
 
-    if (would_log('dbg', 'bayes') > 1) {
-      dbg("bayes: token '$raw_token' => $pw");
-    }
+    dbg ("bayes token '$raw_token' => $pw");
   }
 
   if (!@sorted || (REQUIRE_SIGNIFICANT_TOKENS_TO_SCORE > 0 && 
 	$#sorted <= REQUIRE_SIGNIFICANT_TOKENS_TO_SCORE))
   {
-    dbg("bayes: cannot use bayes on this message; not enough usable tokens found");
+    dbg ("cannot use bayes on this message; not enough usable tokens found");
     goto skip;
   }
 
-  $score = Mail::SpamAssassin::Bayes::Combine::combine($ns, $nn, \@sorted);
+  if ($self->{use_chi_sq_combining}) {
+    $score = chi_squared_probs_combine ($ns, $nn, @sorted);
+  } else {
+    $score = robinson_naive_bayes_probs_combine (@sorted);
+  }
 
   # Couldn't come up with a probability?
   goto skip unless defined $score;
 
-  dbg("bayes: score = $score");
+  dbg ("bayes: score = $score");
 
   # no need to call tok_touch_all unless there were significant
   # tokens and a score was returned
@@ -1290,19 +1309,11 @@ sub scan {
 
 skip:
   if (!defined $score) {
-    dbg("bayes: not scoring message, returning undef");
+    dbg ("bayes: not scoring message, returning undef");
   }
 
   # Take any opportunistic actions we can take
-  if ($self->{main}->{opportunistic_expire_check_only}) {
-    # we're supposed to report on expiry only -- so do the
-    # opportunistic_calls() run for the journal only.
-    $self->opportunistic_calls(1);
-    $permsgstatus->{bayes_expiry_due} = $self->{store}->expiry_due();
-  }
-  else {
-    $self->opportunistic_calls();
-  }
+  $self->opportunistic_calls();
 
   # Do any cleanup we need to do
   $self->{store}->cleanup();
@@ -1364,6 +1375,93 @@ sub opportunistic_calls {
 
 ###########################################################################
 
+sub dbg { Mail::SpamAssassin::dbg (@_); }
+sub sa_die { Mail::SpamAssassin::sa_die (@_); }
+
+###########################################################################
+
+sub robinson_naive_bayes_probs_combine {
+  my (@sorted) = @_;
+
+  my $wc = scalar @sorted;
+  return unless $wc;
+
+  my $P = 1;
+  my $Q = 1;
+
+  foreach my $pw (@sorted) {
+    $P *= (1-$pw);
+    $Q *= $pw;
+  }
+  $P = 1 - ($P ** (1 / $wc));
+  $Q = 1 - ($Q ** (1 / $wc));
+  return (1 + ($P - $Q) / ($P + $Q)) / 2.0;
+}
+
+###########################################################################
+
+# Chi-squared function
+sub chi2q {
+  my ($x2, $v) = @_;
+
+  die "v must be even in chi2q(x2, v)" if $v & 1;
+  my $m = $x2 / 2.0;
+  my ($sum, $term);
+  $sum = $term = exp(0 - $m);
+  for my $i (1 .. (($v/2)-1)) {
+    $term *= $m / $i;
+    $sum += $term;
+  }
+  return $sum < 1.0 ? $sum : 1.0;
+}
+
+# Chi-Squared method. Produces mostly boolean $result,
+# but with a grey area.
+sub chi_squared_probs_combine  {
+  my ($ns, $nn, @sorted) = @_;
+  # @sorted contains an array of the probabilities
+  my $wc = scalar @sorted;
+  return unless $wc;
+
+  my ($H, $S);
+  my ($Hexp, $Sexp);
+  $Hexp = $Sexp = 0;
+
+  # see bug 3118
+  my $totmsgs = ($ns + $nn);
+  if ($totmsgs == 0) { return; }
+  $S = ($ns / $totmsgs);
+  $H = ($nn / $totmsgs);
+
+  use POSIX qw(frexp);
+
+  foreach my $prob (@sorted) {
+    $S *= 1.0 - $prob;
+    $H *= $prob;
+    if ($S < 1e-200) {
+      my $e;
+      ($S, $e) = frexp($S);
+      $Sexp += $e;
+    }
+    if ($H < 1e-200) {
+      my $e;
+      ($H, $e) = frexp($H);
+      $Hexp += $e;
+    }
+  }
+
+  use constant LN2 => log(2);
+
+  $S = log($S) + $Sexp * LN2;
+  $H = log($H) + $Hexp * LN2;
+
+  $S = 1.0 - chi2q(-2.0 * $S, 2 * $wc);
+  $H = 1.0 - chi2q(-2.0 * $H, 2 * $wc);
+  return (($S - $H) + 1.0) / 2.0;
+}
+
+###########################################################################
+
 sub dump_bayes_db {
   my($self, $magic, $toks, $regex) = @_;
 
@@ -1405,7 +1503,3 @@ sub dump_bayes_db {
 }
 
 1;
-
-=back
-
-=cut

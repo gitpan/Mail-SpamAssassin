@@ -4,10 +4,10 @@ package main;
 
 use Cwd;
 use Config;
-use File::Basename;
-use File::Copy;
 use File::Path;
-use File::Spec;
+use File::Copy;
+use File::Basename;
+
 
 BEGIN {
   # No spamd test in Windows unless env override says user figured out a way
@@ -59,8 +59,7 @@ sub sa_t_init {
   $spamdhost = $ENV{'SPAMD_HOST'};
   $spamdhost ||= "localhost";
   $spamdport = $ENV{'SPAMD_PORT'};
-  $spamdport ||= probably_unused_spamd_port();
-
+  $spamdport ||= 48373;		# whatever
   $spamd_cf_args = "-C log/test_rules_copy";
   $spamd_localrules_args = " --siteconfigpath log/localrules.tmp";
   $scr_localrules_args =   " --siteconfigpath log/localrules.tmp";
@@ -80,8 +79,6 @@ sub sa_t_init {
 
   (-f "t/test_dir") && chdir("t");        # run from ..
 
-  read_config();
-
   $NO_SPAMC_EXE = ($RUNNING_ON_WINDOWS &&
                    !$ENV{'SPAMC_SCRIPT'} &&
                    !(-e "../spamc/spamc.exe"));
@@ -98,27 +95,18 @@ sub sa_t_init {
 
   rmtree ("log/user_state");
   rmtree ("log/outputdir.tmp");
-
   rmtree ("log/test_rules_copy");
   mkdir ("log/test_rules_copy", 0755);
-
   for $file (<../rules/*.cf>) {
     $base = basename $file;
     copy ($file, "log/test_rules_copy/$base")
       or warn "cannot copy $file to log/test_rules_copy/$base";
   }
 
-  copy ("data/01_test_rules.cf", "log/test_rules_copy/01_test_rules.cf")
-    or warn "cannot copy data/01_test_rules.cf to log/test_rules_copy/01_test_rules.cf";
-
   rmtree ("log/localrules.tmp");
   mkdir ("log/localrules.tmp", 0755);
-
-  for $file (<../rules/*.pre>) {
-    $base = basename $file;
-    copy ($file, "log/localrules.tmp/$base")
-      or warn "cannot copy $file to log/localrules.tmp/$base";
-  }
+  copy ("../rules/init.pre", "log/localrules.tmp/init.pre")
+    or die "init.pre copy failed";
 
   copy ("../rules/user_prefs.template", "log/test_rules_copy/99_test_default.cf")
     or die "user prefs copy failed";
@@ -138,37 +126,6 @@ sub sa_t_init {
 
   $ENV{'TEST_DIR'} = $cwd;
   $testname = $tname;
-}
-
-# a port number between 32768 and 65535; used to allow multiple test
-# suite runs on the same machine simultaneously
-sub probably_unused_spamd_port {
-  my $port;
-  my @nstat = ();
-  if (open(NSTAT, "netstat -a -n 2>&1 |")) {
-    @nstat = grep(/^\s*tcp/i, <NSTAT>);
-    close(NSTAT);
-  }
-  my $delta = ($$ % 32768) || int(rand(32768));
-  for (1..10) {
-    $port = 32768 + $delta;
-    last unless (getservbyport($port, "tcp") || grep(/[:.]$port\s/, @nstat));
-    $delta = int(rand(32768));
-  }
-  return $port;
-}
-
-sub locate_command {
-  my ($command) = @_;
-
-  my @path = File::Spec->path();
-  push(@path, '/usr/bin') if ! grep { m@/usr/bin/?$@ } @path;
-  for my $path (@path) {
-    $location = "$path/$command";
-    $location =~ s@//@/@g;
-    return $location if -x $location;
-  }
-  return 0;
 }
 
 sub sa_t_finish {
@@ -204,16 +161,6 @@ sub tstprefs {
   $scr_pref_args = "-p log/tst.cf";
 }
 
-# creates a .pre file in the localrules dir to be parsed alongside init.pre
-# make it zz_* just to make sure it is parse last
-
-sub tstpre {
-  my $lines = shift;
-
-  open (OUT, ">log/localrules.tmp/zz_tst.pre") or die;
-  print OUT $lines; close OUT;
-}
-
 # Run spamassassin. Calls back with the output.
 # in $args: arguments to run with
 # in $read_sub: callback for the output (should read from <IN>).
@@ -225,9 +172,6 @@ sub tstpre {
 sub sarun {
   my $args = shift;
   my $read_sub = shift;
-
-  my $post_redir = '';
-  $args =~ s/ 2\>\&1$// and $post_redir = ' 2>&1';
 
   rmtree ("log/outputdir.tmp"); # some tests use this
   mkdir ("log/outputdir.tmp", 0755);
@@ -244,7 +188,7 @@ sub sarun {
   my $scrargs = "$scr $args";
   $scrargs =~ s!/!\\!g if ($^O =~ /^MS(DOS|Win)/i);
   print ("\t$scrargs\n");
-  system ("$scrargs > log/$testname.${Test::ntest} $post_redir");
+  system ("$scrargs > log/$testname.${Test::ntest}");
   $sa_exitcode = ($?>>8);
   if ($sa_exitcode != 0) { return undef; }
   &checkfile ("$testname.${Test::ntest}", $read_sub) if (defined $read_sub);
@@ -302,18 +246,14 @@ sub spamcrun {
   }
 
   my $spamcargs;
-  if($args !~ /\b(?:-p\s*[0-9]+|-F|-U)\b/)
+  if($args !~ /\b(?:-p\s*[0-9]+|-U)\b/)
   {
-    $args = "-d $spamdhost -p $spamdport $args";
+    $spamcargs = "$spamc -d $spamdhost -p $spamdport $args";
   }
-
-  if ($args !~ /-F/) {
-    $spamcargs = "$spamc -F data/spamc_blank.cf $args";
-  }
-  else {
+  else
+  {
     $spamcargs = "$spamc $args";
   }
-
   $spamcargs =~ s!/!\\!g if ($^O =~ /^MS(DOS|Win)/i);
 
   print ("\t$spamcargs\n");
@@ -502,7 +442,6 @@ sub create_saobj {
 		     userprefs_filename => 'log/test_default.cf',
 		     userstate_dir => 'log/user_state',
 		     local_tests_only => 1,
-                     # debug => 'all',
 		   );
 
   # override default args
@@ -556,7 +495,6 @@ sub patterns_run_cb {
   } else {
     $_ = join ('', <IN>);
   }
-  $matched_output = $_;
 
   # create default names == the pattern itself, if not specified
   foreach my $pat (keys %patterns) {
@@ -640,79 +578,6 @@ sub skip_all_patterns {
 sub clear_pattern_counters {
   %found = ();
   %found_anti = ();
-}
-
-sub read_config {
-  return if defined($already_read_config);
-  $already_read_config = 1;
-
-  # allow reading config from top-level dir, outside the test suite;
-  # this is so read_config() will work even when called from
-  # a "use constant" line at compile time.
-  my $prefix = '';
-  if (-f 't/test_dir') { $prefix = "t/"; }
-
-  if (!open (CF, "<${prefix}config")) {
-    if (!open (CF, "<${prefix}config.dist")) {   # fall back to defaults
-      die "cannot open test suite configuration file 'config.dist'";
-    }
-  }
-
-  while (<CF>) {
-    s/#.*$//; s/^\s+//; s/\s+$//; next if /^$/;
-    /^([^=]+)=(.*)$/ or next;
-    $conf{$1} = $2;
-  }
-  close CF;
-}
-
-sub conf {
-  read_config();
-  return $conf{$_[0]};
-}
-
-sub conf_bool {
-  my $val = conf($_[0]);
-  return 0 unless defined($val);
-  return 1 if ($val =~ /^y/i);              # y, YES, yes, etc.
-  return ($val+0) if ($val =~ /^\d/);       # 1
-  return 0;                                 # n or 0
-}
-
-sub mk_safe_tmpdir {
-  return $safe_tmpdir if defined($safe_tmpdir);
-
-  my $dir = File::Spec->tmpdir() || 'log';
-
-  # be a little paranoid, since we're using a public tmp dir and
-  # are exposed to race conditions
-  my $retries = 10;
-  my $tmp;
-  while (1) {
-    $tmp = "$dir/satest.$$.".rand(99999);
-    if (!-d $tmp && mkdir ($tmp, 0755)) {
-      if (-d $tmp && -o $tmp) {     # check we own it
-        lstat($tmp);
-        if (-d _ && -o _) {         # double-check, ignoring symlinks
-          last;                     # we got it safely
-        }
-      }
-    }
-
-    die "cannot get tmp dir, giving up" if ($retries-- < 0);
-
-    warn "failed to create tmp dir '$tmp' safely, retrying...";
-    sleep 1;
-  }
-
-  $safe_tmpdir = $tmp;
-  return $tmp;
-}
-
-sub cleanup_safe_tmpdir {
-  if ($safe_tmpdir) {
-    rmtree($safe_tmpdir) or warn "cannot rmtree $safe_tmpdir";
-  }
 }
 
 1;

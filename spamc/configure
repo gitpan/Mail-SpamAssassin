@@ -2231,10 +2231,6 @@ ac_link='$CC -o conftest$ac_exeext $CFLAGS $CPPFLAGS $LDFLAGS conftest.$ac_ext $
 ac_compiler_gnu=$ac_cv_c_compiler_gnu
 
 
-if test "x$GCC" = "xyes" ; then
-  CFLAGS="-Wall $CFLAGS"
-fi
-
 
 
 
@@ -4530,8 +4526,6 @@ LDDLFLAGS=`perl -e 'use Config; print $Config::Config{lddlflags}'`
 
           ac_config_files="$ac_config_files Makefile"
 
-          ac_config_files="$ac_config_files spamc.h"
-
 cat >confcache <<\_ACEOF
 # This file is a shell script that caches the results of configure
 # tests run on this system so they can be shared between configure
@@ -5057,7 +5051,6 @@ do
   case "$ac_config_target" in
   # Handling of arguments.
   "Makefile" ) CONFIG_FILES="$CONFIG_FILES Makefile" ;;
-  "spamc.h" ) CONFIG_FILES="$CONFIG_FILES spamc.h" ;;
   "config.h" ) CONFIG_HEADERS="$CONFIG_HEADERS config.h" ;;
   *) { { echo "$as_me:$LINENO: error: invalid argument: $ac_config_target" >&5
 echo "$as_me: error: invalid argument: $ac_config_target" >&2;}

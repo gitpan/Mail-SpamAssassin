@@ -25,7 +25,6 @@ use File::Spec;
 use vars qw(
   $spamtest %opt $isspam $forget
   $messagecount $learnedcount $messagelimit
-  $progress $total_messages $init_results $start_time
   $synconly $learnprob @targets $bayes_override_path
 );
 
@@ -75,7 +74,6 @@ use Mail::SpamAssassin;
 use Mail::SpamAssassin::ArchiveIterator;
 use Mail::SpamAssassin::Message;
 use Mail::SpamAssassin::PerMsgLearner;
-use Mail::SpamAssassin::Util::Progress;
 
 ###########################################################################
 
@@ -109,7 +107,6 @@ GetOptions(
   'local|L'              => \$opt{'local'},
   'no-sync|nosync'       => \$opt{'nosync'},
   'showdots'             => \$opt{'showdots'},
-  'progress'             => \$opt{'progress'},
   'use-ignores'          => \$opt{'use-ignores'},
   'no-rebuild|norebuild' => sub { $opt{'nosync'} = 1; warn "The --no-rebuild option has been deprecated.  Please use --no-sync instead.\n" },
 
@@ -117,7 +114,7 @@ GetOptions(
   'randseed=i'  => \$opt{'randseed'},
   'stopafter=i' => \$opt{'stopafter'},
 
-  'debug-level|D:s' => \$opt{'debug'},
+  'debug-level|D:s' => \$opt{'debug-level'},
   'help|h|?'        => \$opt{'help'},
   'version|V'       => \$opt{'version'},
 
@@ -149,18 +146,8 @@ if ( defined $opt{'version'} ) {
   exit 0;
 }
 
-# set debug areas, if any specified (only useful for command-line tools)
-if (defined $opt{'debug'}) {
-  $opt{'debug'} ||= 'all';
-}
-
 if ( $opt{'force-expire'} ) {
   $synconly = 1;
-}
-
-if ($opt{'showdots'} && $opt{'progress'}) {
-  print "--showdots and --progress may not be used together, please select just one\n";
-  exit 0;
 }
 
 if ( !defined $isspam
@@ -201,8 +188,8 @@ $spamtest = new Mail::SpamAssassin(
     site_rules_filename => $opt{'siteconfigpath'},
     userprefs_filename  => $opt{'prefspath'},
     username            => $opt{'username'},
-    debug               => $opt{'debug'},
-    local_tests_only    => $opt{'local'},
+    debug               => defined( $opt{'debug-level'} ),
+    local_tests_only    => 1,
     dont_copy_prefs     => 1,
     PREFIX              => $PREFIX,
     DEF_RULES_DIR       => $DEF_RULES_DIR,
@@ -211,11 +198,6 @@ $spamtest = new Mail::SpamAssassin(
 );
 
 $spamtest->init(1);
-
-if (Mail::SpamAssassin::Util::am_running_on_windows()) {
-  binmode(STDIN);       # bug 4363
-  binmode(STDOUT);
-}
 
 # kluge to support old check_bayes_db operation
 if ( defined $bayes_override_path ) {
@@ -343,9 +325,6 @@ if ( !$opt{nosync} ) {
   $spamtest->rebuild_learner_caches();
 }
 
-# what is the result of the run?  will end up being the exit code.
-my $exit_status = 0;
-
 # run this lot in an eval block, so we can catch die's and clear
 # up the dbs.
 eval {
@@ -357,7 +336,7 @@ eval {
     while (<F>) {
       chomp;
       next unless ($_);
-      if (/^(?:ham|spam):\w*:/) {
+      if (/^(?:ham|spam):/) {
         push ( @targets, $_ );
       }
       else {
@@ -395,26 +374,19 @@ eval {
     {
       'opt_j'   => 0,
       'opt_n'   => 1,
-      'opt_all' => 0,       # skip messages over 250k
+      'opt_all' => 0,
     }
   );
 
-  $iter->set_functions(\&wanted, \&result);
+  $iter->set_functions( \&wanted, sub { } );
   $messagecount = 0;
   $learnedcount = 0;
 
-  $init_results = 0;
-  $start_time = time;
+  eval { $iter->run(@targets); };
 
-  # if exit_status isn't already set to non-zero, set it to the reverse of the
-  # run result (0 is bad, 1+ is good -- the opposite of exit status codes)
-  eval { $exit_status ||= ! $iter->run(@targets); };
-
-  print STDERR "\n" if ($opt{showdots});
-  $progress->final() if ($opt{progress} && $progress);
-
-  my $phrase = defined $forget ? "Forgot" : "Learned";
-  print "$phrase tokens from $learnedcount message(s) ($messagecount message(s) examined)\n";
+  print STDERR "\n" if ( $opt{showdots} );
+  print
+"Learned from $learnedcount message(s) ($messagecount message(s) examined).\n";
 
   # If we needed to make a tempfile, go delete it.
   if ( defined $tempfile ) {
@@ -431,7 +403,7 @@ if ($@) {
 }
 
 $spamtest->finish_learner();
-exit $exit_status;
+exit 0;
 
 ###########################################################################
 
@@ -451,29 +423,6 @@ sub target {
 
 ###########################################################################
 
-sub init_results {
-  $init_results = 1;
-
-  return unless $opt{'progress'};
-
-  $total_messages = $Mail::SpamAssassin::ArchiveIterator::MESSAGES;
-
-  $progress = Mail::SpamAssassin::Util::Progress->new({total => $total_messages,});
-}
-
-###########################################################################
-
-sub result {
-  my ($class, $result, $time) = @_;
-
-  # don't open results files until we get here to avoid overwriting files
-  &init_results if !$init_results;
-
-  $progress->update($messagecount) if ($opt{progress} && $progress);
-}
-
-###########################################################################
-
 sub wanted {
   my ( $class, $id, $time, $dataref ) = @_;
 
@@ -482,17 +431,16 @@ sub wanted {
   if ( defined($learnprob) ) {
     if ( int( rand( 1 / $learnprob ) ) != 0 ) {
       print STDERR '_' if ( $opt{showdots} );
-      return 1;
+      return;
     }
   }
 
   if ( defined($messagelimit) && $learnedcount > $messagelimit ) {
-    $progress->final() if ($opt{progress} && $progress);
     die 'HITLIMIT';
   }
 
   $messagecount++;
-  my $ma = $spamtest->parse($dataref);
+  my $ma = Mail::SpamAssassin->parse($dataref);
 
   if ( $ma->get_header("X-Spam-Checker-Version") ) {
     my $new_ma = $spamtest->parse($spamtest->remove_spamassassin_markup($ma), 1);
@@ -518,7 +466,6 @@ sub wanted {
   undef $ma;
 
   print STDERR '.' if ( $opt{showdots} );
-  return 1;
 }
 
 ###########################################################################
@@ -562,7 +509,6 @@ Options:
  --mbox                            Input sources are in mbox format
  --mbx                             Input sources are in mbx format
  --showdots                        Show progress using dots
- --progress                        Show progress using progress bar
  --no-sync                         Skip syncronizing the database and journal
                                    after learning
  -L, --local                       Operate locally, no network accesses
@@ -590,9 +536,8 @@ mean ham.
 Simply run this command once for each of your mail folders, and it will
 ''learn'' from the mail therein.
 
-Note that csh-style I<globbing> in the mail folder names is supported;
-in other words, listing a folder name as C<*> will scan every folder
-that matches.  See C<Mail::SpamAssassin::ArchiveIterator> for more details.
+Note that I<globbing> in the mail folder names is supported; in other
+words, listing a folder name as C<*> will scan every folder that matches.
 
 SpamAssassin remembers which mail messages it has learnt already, and will not
 re-learn those messages again, unless you use the B<--forget> option. Messages
@@ -628,25 +573,11 @@ made.
 =item B<--folders>=I<filename>, B<-f> I<filename>
 
 sa-learn will read in the list of folders from the specified file, one folder
-per line in the file.  If the folder is prefixed with C<ham:type:> or C<spam:type:>,
+per line in the file.  If the folder is prefixed with C<ham:> or C<spam:>,
 sa-learn will learn that folder appropriately, otherwise the folders will be
 assumed to be of the type specified by B<--ham> or B<--spam>.
 
-C<type> above is optional, but is the same as the standard for
-ArchiveIterator: mbox, mbx, dir, file, or detect (the default if not
-specified).
-
-=item B<--mbox>
-
-sa-learn will read in the file(s) containing the emails to be learned, 
-and will process them in mbox format (one or more emails per file). 
-
-=item B<--mbx>
-
-sa-learn will read in the file(s) containing the emails to be learned, 
-and will process them in mbx format (one or more emails per file). 
-
-=item B<--use-ignores>
+=item B<--use-ignore>
 
 Don't learn the message if a from address matches configuration file
 item C<bayes_ignore_from> or a to address matches C<bayes_ignore_to>.
@@ -715,11 +646,6 @@ If specified this username will override the username taken from the runtime
 environment.  You can use this option to specify users in a virtual user
 configuration.
 
-NOTE: This option will not change to the given I<username>, it will only attempt
-to act on behalf of that user.  Because of this you will need to have proper
-permissions to be able to change files owned by I<username>.  In the case of SQL
-this generally is not a problem.
-
 =item B<-C> I<path>, B<--configpath>=I<path>, B<--config-file>=I<path>
 
 Use the specified path for locating the distributed configuration files.
@@ -734,23 +660,9 @@ the default directories (usually C</etc/mail/spamassassin> or similar).
 
 Read user score preferences from I<prefs> (usually C<$HOME/.spamassassin/user_prefs>).
 
-=item B<--progress>
+ =item B<-D>, B<--debug-level>
 
-Prints a progress bar (to STDERR) showing the current progress.  In the case
-where no valid terminal is found this option will behave very much like the
---showdots option.
-
-=item B<-D>, B<--debug-level>
-
-Produce debugging output. If no areas are listed, all debugging information is
-printed. Diagnostic output can also be enabled for each area individually;
-I<area> is the area of the code to instrument. For example, to produce
-diagnostic output on bayes, learn, and dns, use:
-
-        spamassassin -D bayes,learn,dns
-
-Higher priority informational messages that are suitable for logging in normal
-circumstances are available with an area of "info".
+Produce diagnostic output.
 
 =item B<--no-sync>
 
@@ -790,55 +702,6 @@ Can also be used with the B<--dbpath> I<path> option to specify the location of
 the Bayes files to use.
 
 =back
-
-=head1 MIGRATION
-
-There are now multiple backend storage modules available for storing
-user's bayesian data. As such you might want to migrate from one
-backend to another. Here is a simple procedure for migrating from one
-backend to another.
-
-Note that if you have individual user databases you will have to
-perform a similar procedure for each one of them.
-
-=over 4
-
-=item sa-learn --sync
-
-This will sync any outstanding journal entries
-
-=item sa-learn --backup > backup.txt
-
-This will save all your Bayes data to a plain text file.
-
-=item sa-learn --clear
-
-This is optional, but good to do to clear out the old database.
-
-=item Repeat!
-
-At this point, if you have multiple databases, you should perform the
-procedure above for each of them. (i.e. each user's database needs to
-be backed up before continuing.)
-
-=item Switch backends
-
-Once you have backed up all databases you can update your
-configuration for the new database backend. This will involve at least
-the bayes_store_module config option and may involve some additional
-config options depending on what is required by the module. (For
-example, you may need to configure an SQL database.)
-
-=item sa-learn --restore backup.txt
-
-Again, you need to do this for every database.
-
-=back
-
-If you are migrating to SQL you can make use of the -u <username>
-option in sa-learn to populate each user's database. Otherwise, you
-must run sa-learn as the user who database you are restoring.
-
 
 =head1 INTRODUCTION TO BAYESIAN FILTERING
 
@@ -1057,10 +920,10 @@ development releases, and 2 for all more recent databases.
 
 =item bayes_seen
 
-A map of Message-Id and some data from headers and body to what that
-message was learnt as. This is used so that SpamAssassin can avoid
-re-learning a message it has already seen, and so it can reverse the
-training if you later decide that message was learnt incorrectly.
+A map of message-ID to what that message was learnt as.  This is used so that
+SpamAssassin can avoid re-learning a message it has already seen, and so it can
+reverse the training if you later decide that message was previously learnt
+incorrectly.
 
 This is a database file, using C<DB_File>.
 
@@ -1113,7 +976,7 @@ or
 
 =over 4
 
-=item - a journal sync has previously occurred, and at least 1 day has
+=item - a journal sync has previously occured, and at least 1 day has
 passed since that sync
 
 =back
@@ -1238,7 +1101,6 @@ or by hand.
 spamassassin(1)
 spamc(1)
 Mail::SpamAssassin(3)
-Mail::SpamAssassin::ArchiveIterator(3)
 
 E<lt>http://www.paulgraham.com/E<gt>
 Paul Graham's "A Plan For Spam" paper
