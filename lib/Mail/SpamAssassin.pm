@@ -94,20 +94,20 @@ use vars qw{
   @site_rules_path
 };
 
-$VERSION = "3.001003";      # update after release (same format as perl $])
+$VERSION = "3.001004";      # update after release (same format as perl $])
 #$IS_DEVEL_BUILD = 1;        # change for release versions
 
 @ISA = qw();
 
 # SUB_VERSION is now just <yyyy>-<mm>-<dd>
-$SUB_VERSION = (split(/\s+/,'$LastChangedDate: 2006-06-01 07:35:36 -0700 (Thu, 01 Jun 2006) $ updated by SVN'))[1];
+$SUB_VERSION = (split(/\s+/,'$LastChangedDate: 2006-07-25 15:06:10 -0700 (Tue, 25 Jul 2006) $ updated by SVN'))[1];
 
 # If you hacked up your SA, you should add a version_tag to your .cf files.
 # This variable should not be modified directly.
 @EXTRA_VERSION = qw();
 if (defined $IS_DEVEL_BUILD && $IS_DEVEL_BUILD) {
   push(@EXTRA_VERSION,
-       ('r' . qw{$LastChangedRevision: 410869 $ updated by SVN}[1]));
+       ('r' . qw{$LastChangedRevision: 425535 $ updated by SVN}[1]));
 }
 
 sub Version {
@@ -561,7 +561,7 @@ Finish learning.
 
 sub finish_learner {
   my $self = shift;
-  $self->{bayes_scanner}->finish();
+  $self->{bayes_scanner}->sanity_check_is_untied(1);
   1;
 }
 
@@ -1235,8 +1235,13 @@ sub lint_rules {
   $self->{lint_rules} = $self->{conf}->{lint_rules} = 1;
   $self->{syntax_errors} = 0;
 
+  my $olddcp = $self->{dont_copy_prefs};
+  $self->{dont_copy_prefs} = 1;
+
   $self->init(1);
   $self->{syntax_errors} += $self->{conf}->{errors};
+
+  $self->{dont_copy_prefs} = $olddcp;       # revert back to previous
 
   my $mail = $self->parse(\@testmsg, 1);
   my $status = Mail::SpamAssassin::PerMsgStatus->new($self, $mail,
@@ -1805,7 +1810,7 @@ spamassassin(1)
 
 =head1 BUGS
 
-See E<lt>http://bugzilla.spamassassin.org/E<gt>
+See E<lt>http://issues.apache.org/SpamAssassin/E<gt>
 
 =head1 AUTHORS
 

@@ -380,6 +380,7 @@ t/debug.t
 t/desc_wrap.t
 t/dnsbl.t
 t/forged_rcvd.t
+t/get_headers.t
 t/gtube.t
 t/hashcash.t
 t/html_colors.t
@@ -388,6 +389,7 @@ t/ifversion.t
 t/ip_addrs.t
 t/lang_lint.t
 t/lang_pl_tests.t
+t/lint_nocreate_prefs.t
 t/memory_cycles.t
 t/meta.t
 t/metadata.t
@@ -408,6 +410,7 @@ t/report_safe.t
 t/reportheader.t
 t/reportheader_8bit.t
 t/rule_names.t
+t/rule_tests.t
 t/rule_types.t
 t/sha1.t
 t/spam.t

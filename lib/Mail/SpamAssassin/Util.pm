@@ -209,7 +209,7 @@ sub untaint_file_path {
 
   # Barry Jaspan: allow ~ and spaces, good for Windows.  Also return ''
   # if input is '', as it is a safe path.
-  my $chars = '-_A-Za-z\xA0-\xFF0-9\.\@\=\+\,\/\\\:';
+  my $chars = '-_A-Za-z\xA0-\xFF0-9\.\%\@\=\+\,\/\\\:';
   my $re = qr/^\s*([$chars][${chars}~ ]*)$/o;
 
   if ($path =~ $re) {
@@ -416,12 +416,38 @@ sub parse_rfc822_date {
   # Time::Local (v1.10 at least) throws warnings when the dates cause
   # a 32-bit overflow.  So force a min/max for year.
   if ($yyyy > 2037) {
-    dbg("util: date after supported range, forcing year to 2037: $date");
+    dbg("util: year after supported range, forcing year to 2037: $date");
     $yyyy = 2037;
   }
   elsif ($yyyy < 1970) {
-    dbg("util: date before supported range, forcing year to 1970: $date");
+    dbg("util: year before supported range, forcing year to 1970: $date");
     $yyyy = 1971;
+  }
+
+  # Fudge invalid times so that we get a usable date.
+  if ($ss > 59) { 
+    dbg("util: second after supported range, forcing second to 59: $date");  
+    $ss = 59;
+  } 
+  elsif ($ss < 0) {
+    dbg("util: second before supported range, forcing second to 00: $date");
+    $ss = "00";
+  }
+  if ($mm > 59) { 
+    dbg("util: minute after supported range, forcing minute to 59: $date");
+    $mm = 59;
+  }
+  elsif ($mm < 0) {   
+    dbg("util: minute before supported range, forcing minute to 00: $date");
+    $mm = "00";
+  }
+  if ($hh > 23) { 
+    dbg("util: hour after supported range, forcing hour to 23: $date"); 
+    $hh = 23;
+  }
+  elsif ($hh < 0) {
+    dbg("util: hour before supported range, forcing hour to 00: $date"); 
+    $hh = "00";
   }
 
   my $time;
@@ -899,6 +925,61 @@ sub secure_tmpfile {
   return ($reportfile, $tmpfile);
 }
 
+=item my ($dirpath) = secure_tmpdir();
+
+Generates a directory for temporary files.  Creates it securely and
+returns the path to the directory.
+
+If it cannot create a directory after 20 tries, it returns C<undef>.
+
+=cut
+
+# stolen from secure_tmpfile()
+sub secure_tmpdir {
+  my $tmpdir = Mail::SpamAssassin::Util::untaint_file_path(File::Spec->tmpdir());
+
+  if (!$tmpdir) {
+    # Note: we would prefer to keep this fatal, as not being able to
+    # find a writable tmpdir is a big deal for the calling code too.
+    # That would be quite a psychotic case, also.
+    warn "util: cannot find a temporary directory, set TMP or TMPDIR in environment";
+    return;
+  }
+
+  my ($reportpath, $tmppath);
+  my $umask = umask 077;
+
+  for (my $retries = 20; $retries > 0; $retries--) {
+    # we do not rely on the obscurity of this name for security,
+    # we use a average-quality PRG since this is all we need
+    my $suffix = join('', (0..9,'A'..'Z','a'..'z')[rand 62, rand 62, rand 62,
+						   rand 62, rand 62, rand 62]);
+    $reportpath = File::Spec->catfile($tmpdir,".spamassassin${$}${suffix}tmp");
+
+    # instead, we require O_EXCL|O_CREAT to guarantee us proper
+    # ownership of our file, read the open(2) man page
+    if (mkdir $reportpath, 0700) {
+      $tmppath = $reportpath;
+      last;
+    }
+
+    if ($!{EEXIST}) {
+      # it is acceptable if $reportpath already exists, try another
+      next;
+    }
+    
+    # error, maybe "out of quota" or "too many open files" (bug 4017)
+    warn "util: secure_tmpdir failed to create file '$reportpath': $!\n";
+  }
+
+  umask $umask;
+
+  warn "util: secure_tmpdir failed to create a directory, giving up" if (!$tmppath);
+
+  return $tmppath;
+}
+
+
 ###########################################################################
 
 sub uri_to_domain {
@@ -999,7 +1080,7 @@ sub uri_list_canonify {
     }
 
     # deal with wierd hostname parts, remove user/pass, etc.
-    if ($nuri =~ m{^(https?://)([^/]+)(\/.*)?$}i) {
+    if ($nuri =~ m{^(https?://)([^/]+?)((?::\d*)?\/.*)?$}i) {
       my($proto, $host, $rest) = ($1,$2,$3);
 
       # not required
@@ -1201,7 +1282,7 @@ sub helper_app_pipe_open_windows {
 
   # use a traditional open(FOO, "cmd |")
   my $cmd = join(' ', @cmdline);
-  if ($stdinfile) { $cmd .= " < '$stdinfile'"; }
+  if ($stdinfile) { $cmd .= qq/ < "$stdinfile"/; }
   if ($duperr2out) { $cmd .= " 2>&1"; }
   return open ($fh, $cmd.'|');
 }

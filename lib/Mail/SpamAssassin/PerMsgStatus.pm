@@ -51,7 +51,6 @@ package Mail::SpamAssassin::PerMsgStatus;
 use strict;
 use warnings;
 use bytes;
-use Carp;
 
 use Mail::SpamAssassin::Constants qw(:sa);
 use Mail::SpamAssassin::EvalTests;
@@ -1071,6 +1070,7 @@ sub bayes_report_make_list {
 ###########################################################################
 
 # public API for plugins
+
 =item $status->set_tag($tagname, $value)
 
 Set a template tag, as used in C<add_header>, report templates, etc. This API
@@ -1101,6 +1101,7 @@ sub set_tag {
 }
 
 # public API for plugins
+
 =item $string = $status->get_tag($tagname)
 
 Get the current value of a template tag, as used in C<add_header>, report
@@ -1138,8 +1139,7 @@ sub _get_tag_value_for_score {
     $score = (substr($pad, 0, $count) . $score) if $count > 0;
   }
 
-  # Do some rounding tricks to avoid the 5.0!=5.0-phenomenon,
-  # see <http://bugzilla.spamassassin.org/show_bug.cgi?id=2607>
+  # bug 2607: Do some rounding tricks to avoid the 5.0!=5.0-phenomenon,
   return $score if $self->{is_spam} or $score < $rscore;
   return $rscore - 0.1;
 }
@@ -1266,7 +1266,8 @@ sub _get_tag {
       $data = $data->(@_);
     }
   }
-  else {
+  # known valid tags that might not get defined in some circumstances
+  elsif ($tag !~ /^(?:BAYESTC(?:|LEARNED|SPAMMY|HAMMY)|RBL)$/) {
     return;
   }
   $data = "" unless defined $data;
@@ -1554,10 +1555,13 @@ sub _get {
       # Foo Blah <jm@foo>
       # "Foo Blah" <jm@foo>
       # "'Foo Blah'" <jm@foo>
+      # "_$B!z8=6b$=$N>l$GEv$?$j!*!zEv_(B_$B$?$k!*!)$/$8!z7|>^%\%s%P!<!z_(B" <jm@foo>  (bug 3979)
       #
       # strip out the (comments)
       $result =~ s/\s*\(.*?\)//g;
-      # "Foo Blah" <jm@xxx> or <jm@xxx>
+      # strip out the "quoted text"
+      $result =~ s/(?<!<)"[^"]*"(?!@)//g;
+      # Foo Blah <jm@xxx> or <jm@xxx>
       $result =~ s/^[^<]*?<(.*?)>.*$/$1/;
       # multiple addresses on one line? remove all but first
       $result =~ s/,.*$//;
@@ -2478,6 +2482,13 @@ sub do_meta_tests {
         $meta{$rulename} .= "\$self->{'tests_already_hit'}->{'$token'} ";
         $setup_rules{$token}=1;
 
+        if (!exists $self->{conf}->{scores}->{$token}) {
+          info("rules: meta test $rulename has undefined dependency '$token'");
+        }
+        elsif ($self->{conf}->{scores}->{$token} == 0) {
+          info("rules: meta test $rulename has dependency '$token' with a zero score");
+        }
+
         # If the token is another meta rule, add it as a dependency
         push (@{ $rule_deps{$rulename} }, $token)
           if (exists $self->{conf}{meta_tests}->{$priority}->{$token});
@@ -2817,11 +2828,11 @@ sub _test_log_line {
 sub get_envelope_from {
   my ($self) = @_;
   
+  # bug 2142:
   # Get the SMTP MAIL FROM:, aka. the "envelope sender", if our
   # calling app has helpfully marked up the source message
   # with it.  Various MTAs and calling apps each have their
   # own idea of what header to use for this!   see
-  # http://bugzilla.spamassassin.org/show_bug.cgi?id=2142 .
 
   my $envf;
 

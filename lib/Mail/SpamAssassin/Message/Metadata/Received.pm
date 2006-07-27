@@ -384,7 +384,8 @@ sub parse_received_line {
   # Received: (qmail 84907 invoked from network); 13 Feb 2003 20:59:28 -0000
   # Received: (ofmipd 208.31.42.38); 17 Mar 2003 04:09:01 -0000
   # we don't care about this kind of gateway noise
-  if (/^\(/) { return; }
+  # Bug 4943: give /^(from/ a chance to be parsed
+  if (/^\((?!from)/) { return; }
 
   # OK -- given knowledge of most Received header formats,
   # break them down.  We have to do something like this, because
@@ -415,6 +416,10 @@ sub parse_received_line {
   # Critical Path Messaging Server
   elsif (/\) by .+ \(\d{1,2}\.\d\.\d{3}(?:\.\d{1,3})?\) \(authenticated as .+\) id /) {
     $auth = 'CriticalPath';
+  }
+  # Postfix 2.3 and later with "smtpd_sasl_authenticated_header yes"
+  elsif (/\)\s+\(Authenticated sender:\s+\S+\)\s+by\s+\S+\s+\(Postfix\)\s+with\s+/) {
+    $auth = 'Postfix';
   }
 
   if (/^from /) {
@@ -774,7 +779,7 @@ sub parse_received_line {
     }
 
     # Let's try to support a few qmailish formats in one;
-    # http://bugzilla.spamassassin.org/show_bug.cgi?id=2744#c14 :
+    # http://issues.apache.org/SpamAssassin/show_bug.cgi?id=2744#c14 :
     # Received: from unknown (HELO feux01a-isp) (213.199.4.210) by totor.bouissou.net with SMTP; 1 Nov 2003 07:05:19 -0000 
     # Received: from adsl-207-213-27-129.dsl.lsan03.pacbell.net (HELO merlin.net.au) (Owner50@207.213.27.129) by totor.bouissou.net with SMTP; 10 Nov 2003 06:30:34 -0000 
     if (/^from (\S+) \((?:HELO|EHLO) ([^\)]*)\) \((\S*@)?\[?(${IP_ADDRESS})\]?\).* by (\S+) /)
@@ -790,8 +795,7 @@ sub parse_received_line {
     if (/^from (\S+) \((\S*@)?\[?(${IP_ADDRESS})\]?\).* by (\S+) /)
     {
       $mta_looked_up_dns = 1;
-      # http://bugzilla.spamassassin.org/show_bug.cgi?id=2744 notes that
-      # if HELO == rDNS, qmail drops it.
+      # bug 2744 notes that if HELO == rDNS, qmail drops it.
       $rdns = $1; $helo = $rdns; $ident = (defined $2) ? $2 : '';
       $ip = $3; $by = $4;
       if ($ident) { $ident =~ s/\@$//; }
@@ -1007,6 +1011,15 @@ sub parse_received_line {
       $helo = $1; $rdns = $2; $ip = $3; $by = $4;
       $id = $5 if (defined $5);
       goto enough;
+  }
+
+  # Norton AntiVirus Gateway
+  # Received: (from localhost [24.180.47.240])
+  #  by host.name (NAVGW 2.5.2.12) with SMTP id M2006060503484615455
+  #  for <user@domain.co.uk>; Mon, 05 Jun 2006 03:48:47 +0100
+  if (/^\(from (\S*) \[(${IP_ADDRESS})\]\) by (\S+) \(NAVGW .*?\) with /) {
+    $helo = $1; $ip = $2; $by = $3;
+    goto enough;
   }
 
   # ------------------------------------------------------------------------
