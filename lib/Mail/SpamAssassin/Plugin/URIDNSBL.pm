@@ -1,9 +1,10 @@
 # <@LICENSE>
-# Copyright 2004 Apache Software Foundation
-# 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to you under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at:
 # 
 #     http://www.apache.org/licenses/LICENSE-2.0
 # 
@@ -75,10 +76,9 @@ name of the rule to be used, C<rhsbl_zone> is the zone to look up domain names
 in, and C<lookuptype> is the type of lookup (B<TXT> or B<A>).
 
 C<subtest> is the sub-test to run against the returned data.  The sub-test may
-either be an IPv4 dotted address for RHSBLs that return multiple A records, a
+either be an IPv4 dotted address for RHSBLs that return multiple A records or a
 non-negative decimal number to specify a bitmask for RHSBLs that return a
-single A record containing a bitmask of results, or (if none of the preceding
-options seem to fit) a regular expression.
+single A record containing a bitmask of results.
 
 Note that, as with C<urirhsbl>, you must also define a body-eval rule calling
 C<check_uridnsbl()> to use this.
@@ -344,7 +344,7 @@ sub set_config {
     setting => 'urirhssub',
     code => sub {
       my ($self, $key, $value, $line) = @_;
-      if ($value =~ /^(\S+)\s+(\S+)\s+(\S+)\s+(\S+)$/) {
+      if ($value =~ /^(\S+)\s+(\S+)\s+(\S+)\s+(\d{1,10}|\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/) {
         my $rulename = $1;
         my $zone = $2;
         my $type = $3;
@@ -610,8 +610,6 @@ sub complete_dnsbl_lookup {
   my @answer = $packet->answer;
 
   my $uridnsbl_subs = $conf->{uridnsbl_subs}->{$ent->{zone}};
-  my $uridnsbl_subs_bits = 0;
-  $uridnsbl_subs_bits |= $_ for keys %{$uridnsbl_subs};
   foreach my $rr (@answer)
   {
     next if ($rr->type ne 'A' && $rr->type ne 'TXT');
@@ -630,15 +628,6 @@ sub complete_dnsbl_lookup {
       $self->got_dnsbl_hit($scanstate, $ent, $rdatastr, $dom, $rulename);
     }
     else {
-      # skip any A record that isn't on 127/8 if we're not looking for
-      # any bits in the first octet, this is a workaround for bug 3997
-      if ($rr->type eq 'A' && $rr->rdatastr !~ /^127\./ &&
-	  !($uridnsbl_subs_bits & 0xff000000))
-      {
-	warn("uridnsbl: bogus rr: domain=$dom, zone=$ent->{zone}, id=" .
-            $packet->header->id." rr=".$rr->string);
-	next;
-      }
       foreach my $subtest (keys (%{$uridnsbl_subs}))
       {
         my $subrulename = $uridnsbl_subs->{$subtest}->{rulename};
@@ -648,15 +637,9 @@ sub complete_dnsbl_lookup {
         }
         # bitmask
         elsif ($subtest =~ /^\d+$/) {
-          if ($rdatastr =~ m/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/ &&
-              Mail::SpamAssassin::Util::my_inet_aton($rdatastr) & $subtest)
+	  if ($rdatastr =~ m/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/ &&
+	      Mail::SpamAssassin::Util::my_inet_aton($rdatastr) & $subtest)
           {
-            $self->got_dnsbl_hit($scanstate, $ent, $rdatastr, $dom, $subrulename);
-          }
-        }
-        # regular expression
-        else {
-          if ($rdatastr =~ /${subtest}/) {
             $self->got_dnsbl_hit($scanstate, $ent, $rdatastr, $dom, $subrulename);
           }
         }

@@ -1,11 +1,12 @@
 #!/usr/bin/perl -w -T
 
 # <@LICENSE>
-# Copyright 2004 Apache Software Foundation
-# 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to you under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at:
 # 
 #     http://www.apache.org/licenses/LICENSE-2.0
 # 
@@ -17,7 +18,7 @@
 # </@LICENSE>
 
 my $VERSION = 'svn' . (split(/\s+/,
-	'$Id: sa-update.raw 425085 2006-07-24 15:12:12Z felicity $'))[2];
+	'$Id: sa-update.raw 437498 2006-08-28 01:23:51Z felicity $'))[2];
 
 my $PREFIX          = '@@PREFIX@@';             # substituted at 'make' time
 my $DEF_RULES_DIR   = '@@DEF_RULES_DIR@@';      # substituted at 'make' time
@@ -210,7 +211,7 @@ if (defined $opt{'updatedir'}) {
   $opt{'updatedir'} = Mail::SpamAssassin::Util::untaint_file_path($opt{'updatedir'});
 }
 else {
-  $opt{'updatedir'} = $SA->sed_path('__local_state_dir__/spamassassin/__version__');
+  $opt{'updatedir'} = $SA->sed_path('__local_state_dir__/__version__');
 }
 
 dbg("generic: sa-update version $VERSION");
@@ -258,6 +259,13 @@ if (defined $opt{'gpgkeyfile'}) {
 
   dbg("gpg: reading in gpgfile ".$opt{'gpgkeyfile'});
   while(my $key = <GPG>) {
+    chomp $key;
+
+    $key =~ s/#.*$//;   # remove comments
+    $key =~ s/^\s+//;   # remove leading whitespace
+    $key =~ s/\s+$//;   # remove tailing whitespace
+    next unless ($key); # skip empty lines
+
     unless (is_valid_gpg_key_id($key)) {
       dbg("gpg: invalid key id $key");
       next;
@@ -279,6 +287,13 @@ if ($GPG_ENABLED || $opt{'import'}) {
 
   if ($GPGPath = Mail::SpamAssassin::Util::find_executable_in_env_path($GPGPath)) {
     dbg("gpg: found $GPGPath");
+
+    # bug 5030: if GPGPath has a space, put it in quotes
+    if ($GPGPath =~ / /) {
+      $GPGPath =~ s/"/\\"/g;
+      $GPGPath = qq/"$GPGPath"/;
+      dbg("gpg: path changed to $GPGPath");
+    }
   }
   else {
     die "error: gpg required but not found!\n";
@@ -321,6 +336,12 @@ if (defined $opt{'channelfile'}) {
   @channels = ();
   while(my $chan = <CHAN>) {
     chomp $chan;
+
+    $chan =~ s/#.*$//;   # remove comments
+    $chan =~ s/^\s+//;   # remove leading whitespace
+    $chan =~ s/\s+$//;   # remove tailing whitespace
+    next unless ($chan); # skip empty lines
+
     $chan = lc $chan;
     dbg("channel: adding $chan");
     push(@channels, $chan);
@@ -330,18 +351,21 @@ if (defined $opt{'channelfile'}) {
 
 # untaint the channel listing
 for(my $ind = 0; $ind < @channels; $ind++) {
+  local ($1); # bug 5061: prevent random taint flagging of $1
   if ($channels[$ind] =~ /^([a-zA-Z0-9._-]+)$/) {
     $channels[$ind] = $1;
   }
   else {
+    dbg("channel: skipping invalid channel: $channels[$ind]");
     splice @channels, $ind, 1;
+    $ind--; # the next element takes the place of the deleted one
   }
 }
 
 my $res = Net::DNS::Resolver->new();
 
 my $ua = LWP::UserAgent->new();
-$ua->agent("sa-update/$VERSION");
+$ua->agent("sa-update/$VERSION/$SAVersion");
 $ua->timeout(60);      # a good long timeout; 10 is too short for Coral!
 $ua->env_proxy;
 
@@ -450,7 +474,12 @@ foreach my $channel (@channels) {
   my %mirrors = ();
   my @mirrors = split(/^/, $mirby);
   while(my $mirror = shift @mirrors) {
-    next if ($mirror =~ /^#/);  # explicitly skip comments
+    chomp $mirror;
+
+    $mirror =~ s/#.*$//;   # remove comments
+    $mirror =~ s/^\s+//;   # remove leading whitespace
+    $mirror =~ s/\s+$//;   # remove tailing whitespace
+    next unless ($mirror); # skip empty lines
 
     # We only support HTTP right now
     if ($mirror !~ m@^http://@i) {
@@ -458,7 +487,6 @@ foreach my $channel (@channels) {
       next;
     }
 
-    chomp $mirror;
     my @data;
 
     dbg("channel: found mirror $mirror");
@@ -686,11 +714,11 @@ ENDOFVALIDATIONERR
     # blown away the old ruleset.
     dbg("channel: point of no return for existing $UPDDir");
 
-    # clean out the previous channel files
-    if (! unlink $PREFile ) {
+    # clean out the previous channel files, if they exist
+    if (-f $PREFile && ! unlink $PREFile ) {
       warn("channel: attempt to rm channel pre file failed, attempting to continue anyway");
     }
-    if (! unlink $CFFile ) {
+    if (-f $CFFile && ! unlink $CFFile ) {
       warn("channel: attempt to rm channel cf file failed, attempting to continue anyway");
     }
     if (!clean_update_dir($UPDDir)) {
@@ -1106,7 +1134,7 @@ sub import_default_keyring {
     return;
   }
 
-  dbg("gpg: importing default keyring to '".$opt{gpghomedir});
+  dbg("gpg: importing default keyring to ".$opt{gpghomedir});
   unless (-d $opt{gpghomedir}) {
     # use 0700 to avoid "unsafe permissions" warning
     mkpath([$opt{'gpghomedir'}], 0, 0700) or die "cannot mkpath $opt{gpghomedir}: $!";
@@ -1127,8 +1155,8 @@ sub clean_update_dir {
   my $dir = shift;
 
   unless (opendir(DIR, $dir)) {
-    warn "error: can't readdir $dir: $!\n";
-    dbg("generic: attempt to readdir ($dir) failed");
+    warn "error: can't opendir $dir: $!\n";
+    dbg("generic: attempt to opendir ($dir) failed");
     return;
   }
   while(my $file = readdir(DIR)) {
@@ -1211,6 +1239,8 @@ Options:
   --gpg and --nogpg		Use (or do not use) GPG to verify updates
   				(--gpg is assumed by use of the above
 				--gpgkey and --gpgkeyfile options)
+  --import file			Import GPG key(s) from file into sa-update's
+				keyring. Use multiple times for multiple files
 
   -D, --debug [area=n,...]	Print debugging messages
   -V, --version			Print version
@@ -1277,7 +1307,9 @@ prevents third parties from manipulating the files on a mirror, for instance,
 and signing with their own key.
 
 By default, sa-update trusts key id C<265FA05B>, which is the standard
-SpamAssassin release key.  Use this option to add more trusted keys.
+SpamAssassin release key.  Use this option to trust additional keys.  See the
+B<--import> option for how to add keys to sa-update's keyring.  For sa-update
+to use a key it must be in sa-update's keyring and trusted.
 
 For multiple keys, use the option multiple times.  i.e.:
 
@@ -1297,6 +1329,20 @@ Specify a directory path to use as a storage area for the C<sa-update> GPG
 keyring.  By default, this is
 
         @@LOCAL_RULES_DIR@@/sa-update-keys
+
+=item B<--import>
+
+Use to import GPG key(s) from a file into the sa-update keyring which is
+located in the directory specified by B<--gpghomedir>.  Before using channels
+from third party sources, you should use this option to import the GPG key(s)
+used by those channels.  You must still use the B<--gpgkey> or B<--gpgkeyfile>
+options above to get sa-update to trust imported keys.
+
+To import multiple keys, use the option multiple times.  i.e.:
+
+	sa-update --import channel1-GPG.KEY --import channel2-GPG.KEY
+
+Note: use of this option automatically enables GPG verification.
 
 =item B<-D> [I<area,...>], B<--debug> [I<area,...>]
 

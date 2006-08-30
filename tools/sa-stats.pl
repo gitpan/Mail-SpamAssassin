@@ -5,11 +5,12 @@
 #             : Duncan Findlay <duncf@debian.org>
 #
 # <@LICENSE>
-# Copyright 2004 Apache Software Foundation
-# 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to you under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at:
 # 
 #     http://www.apache.org/licenses/LICENSE-2.0
 # 
@@ -38,7 +39,7 @@ $diag .= "Default options:\n" . join('', map { "opt{$_} => " . ($opt{$_} || '<un
 ############# Nothing to edit below here #################
 ##########################################################
 
-my $VERSION = '$Id: sa-stats.pl 178306 2005-05-24 22:45:55Z felicity $';
+my $VERSION = '$Id: sa-stats.pl 431795 2006-08-16 04:24:15Z felicity $';
 my ($VER_NUM) = '$Revision: 6256 $' =~ m#\$Revision:\s+(\S+)#o;
 
 # internal modules (part of core perl distribution)

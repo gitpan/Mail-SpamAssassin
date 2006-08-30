@@ -1,4 +1,4 @@
-# SpamAssassin rules file: default DKIM whitelists
+# SpamAssassin rules file: default DK whitelists
 #
 # Please don't modify this file as your changes will be overwritten with
 # the next update. Use @@LOCAL_RULES_DIR@@/local.cf instead.
@@ -22,21 +22,21 @@
 # </@LICENSE>
 
 ###########################################################################
-# DKIM whitelist rules
+# DK whitelist rules
 
-ifplugin Mail::SpamAssassin::Plugin::DKIM
+ifplugin Mail::SpamAssassin::Plugin::DomainKeys
 
-header USER_IN_DKIM_WHITELIST	eval:check_for_dkim_whitelist_from()
-describe USER_IN_DKIM_WHITELIST	From: address is in the user's DKIM whitelist
-tflags USER_IN_DKIM_WHITELIST	userconf nice noautolearn net
+header USER_IN_DK_WHITELIST	eval:check_for_dk_whitelist_from()
+describe USER_IN_DK_WHITELIST	From: address is in the user's DK whitelist
+tflags USER_IN_DK_WHITELIST	userconf nice noautolearn net
 
-header USER_IN_DEF_DKIM_WL	eval:check_for_def_dkim_whitelist_from()
-describe USER_IN_DEF_DKIM_WL	From: address is in the default DKIM white-list
-tflags USER_IN_DEF_DKIM_WL	userconf nice noautolearn net
+header USER_IN_DEF_DK_WL	eval:check_for_def_dk_whitelist_from()
+describe USER_IN_DEF_DK_WL	From: address is in the default DK white-list
+tflags USER_IN_DEF_DK_WL	userconf nice noautolearn net
 
-meta ENV_AND_HDR_DKIM_MATCH	(USER_IN_DEF_DKIM_WL && __ENV_AND_HDR_FROM_MATCH)
-describe ENV_AND_HDR_DKIM_MATCH	Env and Hdr From used in default DKIM WL Match
-tflags ENV_AND_HDR_DKIM_MATCH	userconf nice noautolearn net
+meta ENV_AND_HDR_DK_MATCH	(USER_IN_DEF_DK_WL && __ENV_AND_HDR_FROM_MATCH)
+describe ENV_AND_HDR_DK_MATCH	Env and Hdr From used in default DK WL Match
+tflags ENV_AND_HDR_DK_MATCH	userconf nice noautolearn net
 
 ###########################################################################
 # Default whitelists.  These should be addresses which send mail that is often
@@ -51,7 +51,7 @@ tflags ENV_AND_HDR_DKIM_MATCH	userconf nice noautolearn net
 # too easily abused by spammers.
 
 
-# add whitelisted by default domains using DKIM here
+# add whitelisted by default domains using DK here
 
 
-endif # Mail::SpamAssassin::Plugin::DKIM
+endif # Mail::SpamAssassin::Plugin::DomainKeys

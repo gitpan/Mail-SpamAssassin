@@ -1,10 +1,11 @@
 # NOTE: This interface is alpha at best, and almost guaranteed to change
 # <@LICENSE>
-# Copyright 2004 Apache Software Foundation
-# 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to you under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at:
 # 
 #     http://www.apache.org/licenses/LICENSE-2.0
 # 
@@ -142,11 +143,7 @@ sub process {
 
   return undef unless ($resp_code == 0);
 
-  my $found_blank_line_p = 0;
-
-  while (!$found_blank_line_p) {
-    $line = <$remote>;
-
+  while ($line = <$remote>) {
     if ($line =~ /Content-length: (\d+)/) {
       $data{content_length} = $1;
     }
@@ -155,8 +152,8 @@ sub process {
       $data{score} = $2 + 0;
       $data{threshold} = $3 + 0;
     }
-    elsif ($line =~ /$EOL/) {
-      $found_blank_line_p = 1;
+    elsif ($line =~ /^${EOL}$/) {
+      last;
     }
   }
 
@@ -252,22 +249,18 @@ sub learn {
 
   return undef unless ($resp_code == 0);
 
-  my $found_blank_line_p = 0;
-
   my $did_set;
   my $did_remove;
 
-  while (!$found_blank_line_p) {
-    $line = <$remote>;
-
+  while ($line = <$remote>) {
     if ($line =~ /DidSet: (.*)/i) {
       $did_set = $1;
     }
     elsif ($line =~ /DidRemove: (.*)/i) {
       $did_remove = $1;
     }
-    elsif ($line =~ /$EOL/) {
-      $found_blank_line_p = 1;
+    elsif ($line =~ /^${EOL}$/) {
+      last;
     }
   }
 
@@ -320,16 +313,14 @@ sub report {
   return undef unless ($resp_code == 0);
 
   my $reported_p = 0;
-  my $found_blank_line_p = 0;
 
-  while (!$reported_p && !$found_blank_line_p) {
-    $line = <$remote>;
-
+  while (($line = <$remote>)) {
     if ($line =~ /DidSet:\s+.*remote/i) {
       $reported_p = 1;
+      last;
     }
-    elsif ($line =~ /^$EOL$/) {
-      $found_blank_line_p = 1;
+    elsif ($line =~ /^${EOL}$/) {
+      last;
     }
   }
 
@@ -378,16 +369,14 @@ sub revoke {
   return undef unless ($resp_code == 0);
 
   my $revoked_p = 0;
-  my $found_blank_line_p = 0;
 
-  while (!$revoked_p && !$found_blank_line_p) {
-    $line = <$remote>;
-
+  while (!$revoked_p && ($line = <$remote>)) {
     if ($line =~ /DidRemove:\s+remote/i) {
       $revoked_p = 1;
+      last;
     }
-    elsif ($line =~ /^$EOL$/) {
-      $found_blank_line_p = 1;
+    elsif ($line =~ /^${EOL}$/) {
+      last;
     }
   }
 

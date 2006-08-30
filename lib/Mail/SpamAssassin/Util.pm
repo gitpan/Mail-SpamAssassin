@@ -1,9 +1,10 @@
 # <@LICENSE>
-# Copyright 2004 Apache Software Foundation
-# 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to you under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at:
 # 
 #     http://www.apache.org/licenses/LICENSE-2.0
 # 
@@ -429,25 +430,15 @@ sub parse_rfc822_date {
     dbg("util: second after supported range, forcing second to 59: $date");  
     $ss = 59;
   } 
-  elsif ($ss < 0) {
-    dbg("util: second before supported range, forcing second to 00: $date");
-    $ss = "00";
-  }
+
   if ($mm > 59) { 
     dbg("util: minute after supported range, forcing minute to 59: $date");
     $mm = 59;
   }
-  elsif ($mm < 0) {   
-    dbg("util: minute before supported range, forcing minute to 00: $date");
-    $mm = "00";
-  }
+
   if ($hh > 23) { 
     dbg("util: hour after supported range, forcing hour to 23: $date"); 
     $hh = 23;
-  }
-  elsif ($hh < 0) {
-    dbg("util: hour before supported range, forcing hour to 00: $date"); 
-    $hh = "00";
   }
 
   my $time;
@@ -864,7 +855,7 @@ sub first_available_module {
 
 ###########################################################################
 
-=item my ($filehandle, $filepath) = secure_tmpfile();
+=item my ($filepath, $filehandle) = secure_tmpfile();
 
 Generates a filename for a temporary file, opens it exclusively and
 securely, and returns a filehandle to the open file (opened O_RDWR).
@@ -1136,11 +1127,22 @@ sub uri_list_canonify {
 
       ########################
 
-      # deal with 'http://213.172.0x1f.13/', decode encoded octets
-      if ($host =~ /^([0-9a-fx]*\.)([0-9a-fx]*\.)([0-9a-fx]*\.)([0-9a-fx]*)$/ix) {
-        my (@chunk) = ($1,$2,$3,$4);
-        for my $octet (0 .. 3) {
-          $chunk[$octet] =~ s/^0x([0-9a-f][0-9a-f])/sprintf "%d",hex($1)/gei;
+      # deal with hosts which are IPs
+      # also handle things like:
+      # http://89.0x00000000000000000000068.0000000000000000000000160.0x00000000000011
+      #    both hex (0x) and oct (0+) encoded octets, etc.
+
+      if ($host =~ /^
+        ((?:0x[0-9a-f]{2,}|\d+)\.)
+	((?:0x[0-9a-f]{2,}|\d+)\.)
+	((?:0x[0-9a-f]{2,}|\d+)\.)
+	(0x[0-9a-f]{2,}|\d+)
+	$/ix) {
+        my @chunk = ($1,$2,$3,$4);
+        foreach my $octet (@chunk) {
+          $octet =~ s/^0x0*([0-9a-f][0-9a-f])/sprintf "%d",hex($1)/gei;
+          $octet =~ s/^0+([1-3][0-7]{0,2}|[4-7][0-7]?)\b/sprintf "%d",oct($1)/ge;
+	  $octet =~ s/^0+//;
         }
         push(@nuris, join ('', $proto, @chunk, $rest));
       }

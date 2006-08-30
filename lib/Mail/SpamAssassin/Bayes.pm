@@ -1,9 +1,10 @@
 # <@LICENSE>
-# Copyright 2004 Apache Software Foundation
-# 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to you under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at:
 # 
 #     http://www.apache.org/licenses/LICENSE-2.0
 # 
@@ -468,7 +469,7 @@ sub tokenize_headers {
   my %parsed = ();
 
   my %user_ignore;
-  $user_ignore{$_} = 1 for @{$self->{main}->{conf}->{bayes_ignore_headers}};
+  $user_ignore{lc $_} = 1 for @{$self->{main}->{conf}->{bayes_ignore_headers}};
 
   # get headers in array context
   my @hdrs;
@@ -497,7 +498,7 @@ sub tokenize_headers {
 
     # remove user-specified headers here, after Received, in case they
     # want to ignore that too
-    next if exists $user_ignore{$hdr};
+    next if exists $user_ignore{lc $hdr};
 
     # Prep the header value
     $val ||= '';

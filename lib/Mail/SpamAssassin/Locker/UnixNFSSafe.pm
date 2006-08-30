@@ -1,9 +1,10 @@
 # <@LICENSE>
-# Copyright 2004 Apache Software Foundation
-# 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to you under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at:
 # 
 #     http://www.apache.org/licenses/LICENSE-2.0
 # 
@@ -158,7 +159,8 @@ sub safe_unlock {
   close LTMP; unlink $lock_tmp;
 
   # 2. If the ctime hasn't been modified, unlink the file and return. If the
-  # lock has expired, sleep the usual random interval before returning. If we # didn't sleep, there could be a race if the caller immediately tries to
+  # lock has expired, sleep the usual random interval before returning. If we
+  # didn't sleep, there could be a race if the caller immediately tries to
   # relock the file.
 
   my $lock_ctime = $self->{lock_ctimes}->{$path};

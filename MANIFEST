@@ -17,7 +17,9 @@ USAGE
 build/check_dependencies
 build/convert_pods_to_doc
 build/get_version
+build/md5sum.pl
 build/preprocessor
+build/sha1sum.pl
 contrib/mbox-to-check
 contrib/run-corpora
 contrib/run-masses
@@ -26,6 +28,7 @@ ldap/README.testing
 ldap/sa_test.ldif
 lib/Mail/SpamAssassin.pm
 lib/Mail/SpamAssassin/ArchiveIterator.pm
+lib/Mail/SpamAssassin/AICache.pm
 lib/Mail/SpamAssassin/AutoWhitelist.pm
 lib/Mail/SpamAssassin/Bayes.pm
 lib/Mail/SpamAssassin/Bayes/CombineChi.pm
@@ -148,8 +151,10 @@ masses/rule-qa/corpus-hourly
 masses/rule-qa/corpus-nightly
 masses/rule-qa/corpus-tagtime
 masses/rule-qa/corpus.example
+masses/rule-qa/get-rulemetadata-for-revision
 masses/rule-qa/markup-rules-file-with-freqs
 masses/rule-qa/post-bugs-for-retired-tests
+masses/rule-qa/rule-hits-over-time
 masses/runGA
 masses/score-ranges-from-freqs
 masses/tenpass/10pass-compute-tcr
@@ -200,6 +205,7 @@ rules/30_text_pt_br.cf
 rules/50_scores.cf
 rules/60_awl.cf
 rules/60_whitelist.cf
+rules/60_whitelist_dk.cf
 rules/60_whitelist_dkim.cf
 rules/60_whitelist_spf.cf
 rules/60_whitelist_subject.cf
