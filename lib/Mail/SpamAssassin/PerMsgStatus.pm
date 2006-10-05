@@ -766,7 +766,7 @@ sub rewrite_report_safe {
 
   foreach my $header (keys %{$self->{conf}->{headers_spam}}) {
     my $data = $self->{conf}->{headers_spam}->{$header};
-    my $line = $self->_process_header($header,$data) || "";
+    my $line = $self->_process_header($header,$data);
     $line = $self->qp_encode_header($line);
     $newmsg .= "X-Spam-$header: $line\n" # add even if empty
   }
@@ -946,7 +946,7 @@ sub rewrite_no_report_safe {
   # use string appends to put this back together -- I finally benchmarked it.
   # join() is 56% of the speed of just using string appends. ;)
   while (my ($header, $data) = each %{$self->{conf}->{$addition}}) {
-    my $line = $self->_process_header($header,$data) || "";
+    my $line = $self->_process_header($header,$data);
     $line = $self->qp_encode_header($line);
     $new_hdrs_pre .= "X-Spam-$header: $line\n";
   }
@@ -2487,7 +2487,19 @@ sub do_meta_tests {
           info("rules: meta test $rulename has undefined dependency '$token'");
         }
         elsif ($self->{conf}->{scores}->{$token} == 0) {
-          info("rules: meta test $rulename has dependency '$token' with a zero score");
+          my $conf = $self->{conf};
+          my $dowarn = 1;
+
+          # there are some cases where this is expected; don't warn
+          # in those cases.
+          if ((($self->{conf}->get_score_set()) & 1) == 0 &&
+              $conf->{tflags}->{$token} &&
+              $conf->{tflags}->{$token} =~ /\bnet\b/)
+          {
+            $dowarn = 0;    # bug 5040: net rules in a non-net scoreset
+          }
+
+          $dowarn and info("rules: meta test $rulename has dependency '$token' with a zero score");
         }
 
         # If the token is another meta rule, add it as a dependency

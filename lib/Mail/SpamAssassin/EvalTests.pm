@@ -587,9 +587,14 @@ sub check_for_forged_juno_received_headers {
         && $rcvd !~ / cookie\.(?:juno|untd)\.com /) { return 1; }
     if($xmailer !~ /Juno /) { return 1; }
   } else {
-    if($rcvd !~ /from.*\bmail\.com.*\[$IP_ADDRESS\].*by/) { return 1; }
+    if($rcvd =~ /from.*\bmail\.com.*\[$IP_ADDRESS\].*by/) {
+      if($xmailer !~ /\bmail\.com/) { return 1; }
+    } elsif($rcvd =~ /from (webmail\S+\.untd\.com) \(\1 \[$IP_ADDRESS\]\) by/) {
+      if($xmailer !~ /^Webmail Version \d/) { return 1; }
+    } else {
+      return 1;
+    }
     if($xorig !~ /$IP_ADDRESS/) { return 1; }
-    if($xmailer !~ /\bmail\.com/) { return 1; }
   }
 
   return 0;   
@@ -1832,13 +1837,15 @@ sub _get_date_header_time {
 
   my $time;
   # a Resent-Date: header takes precedence over any Date: header
-  for my $header ('Resent-Date', 'Date') {
-    my $date = $self->get($header);
-    if (defined($date) && length($date)) {
-      chomp($date);
-      $time = Mail::SpamAssassin::Util::parse_rfc822_date($date);
+  DATE: for my $header ('Resent-Date', 'Date') {
+    my @dates = $self->{msg}->get_header($header);
+    for my $date (@dates) {
+      if (defined($date) && length($date)) {
+        chomp($date);
+        $time = Mail::SpamAssassin::Util::parse_rfc822_date($date);
+      }
+      last DATE if defined($time);
     }
-    last if defined($time);
   }
   if (defined($time)) {
     $self->{date_header_time} = $time;
@@ -3044,12 +3051,10 @@ sub check_for_illegal_ip {
   foreach my $rcvd ( @{$self->{relays_untrusted}} ) {
     # (note this might miss some hits if the Received.pm skips any invalid IPs)
     foreach my $check ( $rcvd->{ip}, $rcvd->{by} ) {
-      return 1 if ($check =~ /^(?:
-    	(?:[01257]|22[3-9]|23[0-9]|24[0-9]|25[0-5])\.\d+\.\d+\.\d+|
-	127\.[1-9]\.\d+\.\d+|
-	127\.0\.[1-9]\.\d+|
-	127\.0\.0\.(?:\d\d+|[2-9])
-	)$/x);
+      next if ($check eq '127.0.0.1');
+      return 1 if ($check =~ /^
+	(?:[01257]|127|22[3-9]|23[0-9]|24[0-9]|25[0-5])\.\d+\.\d+\.\d+
+	$/x);
     }
   }
   return 0;
