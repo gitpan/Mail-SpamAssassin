@@ -18,7 +18,7 @@ if (-e 'test_dir') {            # running from test directory, not ..
 
 use lib '.'; use lib 't';
 use SATest; sa_t_init("rcvd_parser");
-use Test; BEGIN { plan tests => 53 };
+use Test; BEGIN { plan tests => 57 };
 
 
 use strict;
@@ -262,7 +262,6 @@ Received: from adsl-207-213-27-129.dsl.lsan03.pacbell.net (HELO merlin.net.au) (
 },
 q{
 
-
 Received: from imo-m01.mx.aol.com ([64.12.136.4] verified)
   by xxx.com (CommuniGate Pro SMTP 4.1.8)
   with ESMTP id 875522 for yyy@xxx.com; Tue, 03 Feb 2004 08:37:38 -0800
@@ -273,6 +272,39 @@ Received: from Dwsf@aol.com
 } => q{
 
 [ ip=64.12.136.4 rdns= helo=imo-m01.mx.aol.com by=xxx.com ident= envfrom= id=875522 auth= ]
+
+},
+q{
+
+Received: from [65.17.198.50] (HELO 123greetings.info)
+  by mail.wcg.org (CommuniGate Pro SMTP 5.1.3)
+  with SMTP id 19467966 for xxxx@wcg.org; Fri, 08 Dec 2006 08:40:46 -0800
+
+} => q{
+
+[ ip=65.17.198.50 rdns= helo=123greetings.info by=mail.wcg.org ident= envfrom= id=19467966 auth= ]
+
+},
+q{
+
+Received: from [128.114.2.223] (account user@example.edu HELO [10.10.10.10])
+  by silver.ucsc.edu (CommuniGate Pro SMTP 4.3.7)
+  with ESMTPSA id 88402416 for user@example.edu; Mon, 04 Dec 2006 13:15:07 -0800
+
+} => q{
+
+[ ip=128.114.2.223 rdns= helo=!10.10.10.10! by=silver.ucsc.edu ident= envfrom= id=88402416 auth=ESMTPSA ]
+
+},
+q{
+
+Received: from [128.114.2.223] (account user@example.edu)
+  by tin.ucsc.edu (CommuniGate Pro WebUser 4.3.7)
+  with HTTP id 109780632 for user@example.edu; Tue, 05 Dec 2006 11:17:51 -0800
+
+} => q{
+
+[ ip=128.114.2.223 rdns= helo= by=tin.ucsc.edu ident= envfrom= id=109780632 auth=HTTP ]
 
 },
 q{
@@ -577,6 +609,15 @@ Received: from dsl-082-082-143-115.arcor-ip.net (dsl-082-083-139-045.arcor-ip.ne
  
   [ ip=81.64.155.54 rdns=rousalka.dyndns.org helo=rousalka.dyndns.org by=mx.laposte.net ident= envfrom= id=413489B100C9C1FD auth=CriticalPath ] [ ip=82.68.189.22 rdns=82-68-189-22.dsl.in-addr.zen.co.uk helo=!10.0.0.253! by=ensim.rackshack.net ident= envfrom= id=i8TAFAI25021 auth=Sendmail ] [ ip=213.174.165.187 rdns=!213.174.165.187! helo=!213.174.165.187! by=vsmtp1.tin.it ident= envfrom= id=416A525B0000A53B auth=CriticalPath ] [ ip=66.250.6.18 rdns=Collation_Software.demarc.cogentco.com helo=!10.10.10.215! by=waste.org ident= envfrom= id=i46MehGO005108 auth=Sendmail ] [ ip=82.83.139.45 rdns=dsl-082-083-139-045.arcor-ip.net helo=dsl-082-082-143-115.arcor-ip.net by=postman.arcor.de ident= envfrom= id=i2U75jD1003350 auth=Sendmail ]
   
+},
+q{
+
+Received: from MARISELA (dsl-189-149-70-163.prod-infinitum.com.mx [189.149.70.163] (may be forged)) (authenticated bits=0) by mail.legosoft.com.mx (8.13.8/8.13.8) with ESMTP id kB3G26P6019032 for <rberber@cactus-soft.dyndns.org>; Sun, 3 Dec 2006 10:02:16 -0600 (CST)
+
+} => q{
+
+  [ ip=189.149.70.163 rdns=dsl-189-149-70-163.prod-infinitum.com.mx helo=MARISELA by=mail.legosoft.com.mx ident= envfrom= id=kB3G26P6019032 auth=Sendmail ]
+
 },
 q{
 

@@ -368,29 +368,44 @@ eval {
     close(F);
   }
 
-  # add leftover args as targets
-  foreach (@ARGV) { target($_); }
+  ###########################################################################
+  # Deal with the target listing, and STDIN -> tempfile
 
-  #No arguments means they want stdin:
-  if ( $#targets < 0 ) {
-    target('-');
+  my $tempfile; # will be defined if stdin -> tempfile
+  push(@targets, @ARGV);
+  @targets = ('-') unless @targets;
+
+  for(my $elem = 0; $elem <= $#targets; $elem++) {
+    # ArchiveIterator doesn't really like STDIN, so if "-" is specified
+    # as a target, make it a temp file instead.
+    if ( $targets[$elem] =~ /(?:^|:)-$/ ) {
+      if (defined $tempfile) {
+        # uh-oh, stdin specified multiple times?
+        warn "skipping extra stdin target (".$targets[$elem].")\n";
+        splice @targets, $elem, 1;
+        $elem--; # go back to this element again
+        next;
+      }
+      else {
+        my $handle;
+
+        local $/ = undef;    # go into slurp mode
+        ( $tempfile, $handle ) = Mail::SpamAssassin::Util::secure_tmpfile();
+        print {$handle} <STDIN>;
+        close $handle;
+
+        # re-aim the targets at the tempfile instead of STDIN
+        $targets[$elem] =~ s/-$/$tempfile/;
+      }
+    }
+
+    # make sure the target list is in the normal AI format
+    if ($targets[$elem] !~ /^[^:]*:[a-z]+:/) {
+      $targets[$elem] = target($targets[$elem]);
+    }
   }
 
-  # mbox and mbx doesn't deal with STDIN, so make a temp file if they want STDIN.
-  # do it here since they may specify "-" on the commandline
-  #
-  my $tempfile;
-  if ( $targets[0] =~ /:mbo?x:-$/ ) {
-    my $handle;
-
-    local $/ = undef;    # go into slurp mode
-    ( $tempfile, $handle ) = Mail::SpamAssassin::Util::secure_tmpfile();
-    print {$handle} <STDIN>;
-    close $handle;
-
-    # re-aim the targets at the tempfile instead of STDIN
-    $targets[0] =~ s/:-$/:$tempfile/;
-  }
+  ###########################################################################
 
   my $iter = new Mail::SpamAssassin::ArchiveIterator(
     {
@@ -545,41 +560,45 @@ B<sa-learn> [options] --dump [ all | data | magic ]
 
 Options:
 
- --ham                             Learn messages as ham (non-spam)
- --spam                            Learn messages as spam
- --forget                          Forget a message
- --use-ignores                     Use bayes_ignore_from and bayes_ignore_to
- --sync                            Syncronize the database and the journal if needed
- --force-expire                    Force a database sync and expiry run
- --dbpath <path>                   Allows commandline override (in bayes_path form)
-                                   for where to read the Bayes DB from
- --dump [all|data|magic]           Display the contents of the Bayes database
-                                   Takes optional argument for what to display
-  --regexp <re>                    For dump only, specifies which tokens to
-                                   dump based on a regular expression.
- -f file, --folders=file           Read list of files/directories from file
- --dir                             Ignored; historical compatibility
- --file                            Ignored; historical compatibility
- --mbox                            Input sources are in mbox format
- --mbx                             Input sources are in mbx format
- --showdots                        Show progress using dots
- --progress                        Show progress using progress bar
- --no-sync                         Skip synchronizing the database and journal
-                                   after learning
- -L, --local                       Operate locally, no network accesses
- --import                          Migrate data from older version/non DB_File
-                                   based databases
- --clear                           Wipe out existing database
- --backup                          Backup, to STDOUT, existing database
- --restore <filename>              Restore a database from filename
-
- -u username, --username=username  Override username taken from the runtime environment
- -C path, --configpath=path, --config-file=path   Path to standard configuration dir
- -p prefs, --prefspath=file, --prefs-file=file    Set user preferences file
- --siteconfigpath=path             Path for site configs (def: /etc/mail/spamassassin)
- -D, --debug-level                 Print debugging messages
- -V, --version                     Print version
- -h, --help                        Print usage message
+ --ham                 Learn messages as ham (non-spam)
+ --spam                Learn messages as spam
+ --forget              Forget a message
+ --use-ignores         Use bayes_ignore_from and bayes_ignore_to
+ --sync                Syncronize the database and the journal if needed
+ --force-expire        Force a database sync and expiry run
+ --dbpath <path>       Allows commandline override (in bayes_path form)
+                       for where to read the Bayes DB from
+ --dump [all|data|magic]  Display the contents of the Bayes database
+                          Takes optional argument for what to display
+  --regexp <re>        For dump only, specifies which tokens to dump
+                       based on a regular expression.
+ -f file, --folders=file  Read list of files/directories from file
+ --dir                 Ignored; historical compatibility
+ --file                Ignored; historical compatibility
+ --mbox                Input sources are in mbox format
+ --mbx                 Input sources are in mbx format
+ --showdots            Show progress using dots
+ --progress            Show progress using progress bar
+ --no-sync             Skip synchronizing the database and journal after
+                       learning
+ -L, --local           Operate locally, no network accesses
+ --import              Migrate data from older version/non DB_File based
+                       databases
+ --clear               Wipe out existing database
+ --backup              Backup, to STDOUT, existing database
+ --restore <filename>  Restore a database from filename
+ -u username, --username=username
+                       Override username taken from the runtime
+                       environment
+ -C path, --configpath=path, --config-file=path
+                       Path to standard configuration dir
+ -p prefs, --prefspath=file, --prefs-file=file
+                       Set user preferences file
+ --siteconfigpath=path Path for site configs
+                       (default: /etc/mail/spamassassin)
+ -D, --debug-level     Print debugging messages
+ -V, --version         Print version
+ -h, --help            Print usage message
 
 =head1 DESCRIPTION
 

@@ -18,7 +18,7 @@
 # </@LICENSE>
 
 my $VERSION = 'svn' . (split(/\s+/,
-	'$Id: sa-update.raw 454083 2006-10-08 05:55:22Z dos $'))[2];
+	'$Id: sa-update.raw 507100 2007-02-13 17:02:35Z felicity $'))[2];
 
 my $PREFIX          = '@@PREFIX@@';             # substituted at 'make' time
 my $DEF_RULES_DIR   = '@@DEF_RULES_DIR@@';      # substituted at 'make' time
@@ -146,6 +146,8 @@ GetOptions(
   'debug|D:s'                           => \$opt{'debug'},
   'version|V'                           => \$opt{'version'},
   'help|h|?'                            => \$opt{'help'},
+  'checkonly'                           => \$opt{'checkonly'},
+  'allowplugins'                        => \$opt{'allowplugins'},
 
   # allow multiple of these on the commandline
   'gpgkey=s'				=> $opt{'gpgkey'},
@@ -382,6 +384,9 @@ my $exit = 1;
 # Use a temporary directory for all update channels
 my $UPDTmp;
 
+# we only need to lint the site pre files once
+my $site_pre_linted = 0;
+
 # Go ahead and loop through all of the channels
 foreach my $channel (@channels) {
   dbg("channel: attempting channel $channel");
@@ -440,6 +445,37 @@ foreach my $channel (@channels) {
   if ($currentV >= $newV) {
     dbg("channel: current version is $currentV, new version is $newV, skipping channel");
     next;
+  }
+
+  # If we are only checking for update availability, exit now
+  if ( defined $opt{'checkonly'} ) {            
+    dbg("channel: $channel: update available, not downloading in checkonly mode");
+    $exit = 0;
+    next;
+  }
+
+  # we need a directory we control that we can use to aviod loading any rules
+  # when we lint the site pre files, we might as well use the channel temp dir
+  dbg("channel: preparing temp directory for new channel");
+  if (!$UPDTmp) {
+    $UPDTmp = Mail::SpamAssassin::Util::secure_tmpdir();
+    dbg("generic: update tmp directory $UPDTmp");
+  }
+  elsif (!clean_update_dir($UPDTmp)) {
+    die "channel: attempt to clean update dir failed, aborting";
+  }
+
+  # lint the site pre files (that will be used when lint checking the channel)
+  # before downloading the channel update
+  unless ($site_pre_linted) {
+    dbg("generic: lint checking site pre files once before attempting channel updates");
+    unless (lint_check_dir(File::Spec->catfile($UPDTmp, "doesnotexist"))) {
+      dbg("generic: lint of site pre files failed, cannot continue"); 
+      $exit = 2;
+      last;
+    }
+    dbg("generic: lint check of site pre files succeeded, continuing with channel updates");
+    $site_pre_linted = 1;
   }
 
   # Read in the MIRRORED.BY file if it exists
@@ -663,7 +699,7 @@ key.  Instead, it was signed with the following keys:
 Perhaps you need to import the channel's GPG key?  For example:
 
     wget http://spamassassin.apache.org/updates/GPG.KEY
-    gpg --import GPG.KEY
+    sa-update --import GPG.KEY
 
 ENDOFVALIDATIONERR
 
@@ -683,15 +719,6 @@ ENDOFVALIDATIONERR
 
   # OK, we're all validated at this point, install the new version
   dbg("channel: file verification passed, testing update");
-
-  dbg("channel: preparing temp directory for new channel");
-  if (!$UPDTmp) {
-    $UPDTmp = Mail::SpamAssassin::Util::secure_tmpdir();
-    dbg("generic: update tmp directory $UPDTmp");
-  }
-  elsif (!clean_update_dir($UPDTmp)) {
-    die "channel: attempt to clean update dir failed, aborting";
-  }
 
   dbg("channel: extracting archive");
   if (!taint_safe_archive_extract($UPDTmp, $content_file)) {
@@ -783,6 +810,7 @@ ENDOFVALIDATIONERR
     die "fatal: can't access $UPDDir: $!\n";
   }
   while(my $file = readdir(DIR)) {
+    local ($1);	# avoid random taint flagging of $1
     $file =~ /^(.+)$/;       # untaint
     $file = $1;
     my $path = File::Spec->catfile($UPDDir, $file);
@@ -902,9 +930,16 @@ sub taint_safe_archive_extract {
     if (open OUT, ">".$outfname) {
       my $content = $tar->get_content($file);
 
-      # replace macros in the update files if it's a .pre or .cf
       if ($outfname =~ /\.(?:pre|cf)$/) {
+        # replace macros in the update files if it's a .pre or .cf
         $content =~ s/\@\@([^\@]+)\@\@/$MACRO_VALUES{$1} || "\@\@$1\@\@"/ge;
+
+        # also, if --allowplugins is not specified, comment out
+        # all loadplugin or tryplugin lines
+        if ( !$opt{'allowplugins'} ) {
+          $content =~ s{^\s*((?:load|try)plugin|bayes_store_module|auto_whitelist_factory)\b}
+            {#(commented by sa-update, no --allowplugins switch specified)# $1}gmx;
+        }
       }
 
       print OUT $content;
@@ -1160,6 +1195,7 @@ sub clean_update_dir {
     return;
   }
   while(my $file = readdir(DIR)) {
+    local ($1); # bug 5216: prevent random taint flagging of $1
     $file =~ /^(.+)$/;       # untaint
     $file = $1;
 
@@ -1186,17 +1222,18 @@ sub lint_check_dir {
   # Logger setup), we can't change the debug level here to only include
   # "config" or otherwise be more terse. :(
   my $spamtest = new Mail::SpamAssassin( {
-    rules_filename      => $dir,
-    site_rules_filename => File::Spec->catfile($dir, "doesnotexist"),
-    userprefs_filename  => File::Spec->catfile($dir, "doesnotexist"),
+    rules_filename       => $dir,
+    site_rules_filename  => $LOCAL_RULES_DIR,
+    ignore_site_cf_files => 1,
+    userprefs_filename   => File::Spec->catfile($dir, "doesnotexist"),
 
-    local_tests_only    => 1,
-    dont_copy_prefs     => 1,
+    local_tests_only     => 1,
+    dont_copy_prefs      => 1,
 
-    PREFIX              => $PREFIX,
-    DEF_RULES_DIR       => $DEF_RULES_DIR,
-    LOCAL_RULES_DIR     => $LOCAL_RULES_DIR,
-    LOCAL_STATE_DIR     => $LOCAL_STATE_DIR,
+    PREFIX               => $PREFIX,
+    DEF_RULES_DIR        => $DEF_RULES_DIR,
+    LOCAL_RULES_DIR      => $LOCAL_RULES_DIR,
+    LOCAL_STATE_DIR      => $LOCAL_STATE_DIR,
   });
 
   # need to kluge disabling bayes since it may try to expire the DB, and
@@ -1223,28 +1260,26 @@ B<sa-update> [options]
 
 Options:
 
-  --updatedir path		Directory to place updates, defaults to the
-				SpamAssassin site rules directory (def:
-				/var/lib/spamassassin/<version>)
-
-  --channel channel		Retrieve updates from this channel
-  				Use multiple times for multiple channels
-  --channelfile file		Retrieve updates from the channels in the file
-
-
-  --gpgkey key			Trust the key id to sign releases
-  				Use multiple times for multiple keys
-  --gpgkeyfile file		Trust the key ids in the file to sign releases
-  --gpghomedir path             Store the GPG keyring in this directory
-  --gpg and --nogpg		Use (or do not use) GPG to verify updates
-  				(--gpg is assumed by use of the above
-				--gpgkey and --gpgkeyfile options)
-  --import file			Import GPG key(s) from file into sa-update's
-				keyring. Use multiple times for multiple files
-
-  -D, --debug [area=n,...]	Print debugging messages
-  -V, --version			Print version
-  -h, --help			Print usage message
+  --updatedir path        Directory to place updates, defaults to the
+                          SpamAssassin site rules directory
+                          (default: /var/lib/spamassassin/<version>)
+  --channel channel       Retrieve updates from this channel
+                          Use multiple times for multiple channels
+  --channelfile file      Retrieve updates from the channels in the file
+  --checkonly             Check for update availability, do not install
+  --allowplugins          Allow updates to load plugin code
+  --gpgkey key            Trust the key id to sign releases
+                          Use multiple times for multiple keys
+  --gpgkeyfile file       Trust the key ids in the file to sign releases
+  --gpghomedir path       Store the GPG keyring in this directory
+  --gpg and --nogpg       Use (or do not use) GPG to verify updates
+                          (--gpg is assumed by use of the above
+                          --gpgkey and --gpgkeyfile options)
+  --import file           Import GPG key(s) from file into sa-update's
+                          keyring. Use multiple times for multiple files
+  -D, --debug [area=n,...]  Print debugging messages
+  -V, --version           Print version
+  -h, --help              Print usage message
 
 =head1 DESCRIPTION
 
@@ -1281,6 +1316,17 @@ multiple times, once per channel.  i.e.:
 Similar to the B<--channel> option, except specify the additional channels in a
 file instead of on the commandline.  This is extremely useful when there are a
 lot of additional channels.
+
+=item B<--checkonly>
+
+Only check if an update is available, don't actually download and install it.
+The exit code will be C<0> or C<1> as described below.
+
+=item B<--allowplugins>
+
+Allow downloaded updates to activate plugins.  The default is not to
+activate plugins; any C<loadplugin> or C<tryplugin> lines will be commented
+in the downloaded update rules files.
 
 =item B<--gpg>, B<--nogpg>
 
@@ -1371,9 +1417,13 @@ Print sa-update version and exit.
 =head1 EXIT CODES
 
 An exit code of C<0> means an update was available, and was downloaded and
-installed successfully.
+installed successfully if --checkonly was not specified.
 
 An exit code of C<1> means no fresh updates were available.
+
+An exit code of C<2> means that at least one update is available but that a
+lint check of the site pre files failed.  The site pre files must pass a lint
+check before any updates are attempted.
 
 An exit code of C<4> or higher, indicates that errors occurred while
 attempting to download and extract updates.
