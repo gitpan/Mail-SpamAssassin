@@ -28,6 +28,7 @@ sub new {
 
   # the important bit!
   $self->register_eval_rule ("check_test_plugin");
+  $self->register_eval_rule ("check_return_2");
   $self->register_eval_rule ("sleep_based_on_header");
 
   print "registered myTestPlugin: $self\n";
@@ -38,6 +39,10 @@ sub new {
 sub check_test_plugin {
   my ($self, $permsgstatus) = @_;
   print "myTestPlugin eval test called: $self\n";
+
+  print "test: plugins loaded: ".
+        join(" ", sort $self->{main}->get_loaded_plugins_list()).
+        "\n";
 
   my $file = $ENV{'SPAMD_PLUGIN_COUNTER_FILE'};
   if ($file) {
@@ -66,6 +71,10 @@ sub sleep_based_on_header {
   }
 
   return 1;
+}
+
+sub check_return_2 {
+  return 2;
 }
 
 sub extract_metadata {

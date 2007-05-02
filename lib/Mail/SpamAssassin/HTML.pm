@@ -20,11 +20,10 @@
 
 use strict;
 use warnings;
-use bytes;
 
 package Mail::SpamAssassin::HTML;
 
-use HTML::Parser 3.24 ();
+use HTML::Parser 3.43 ();
 use Mail::SpamAssassin::Logger;
 use Mail::SpamAssassin::Constants qw(:sa);
 
@@ -52,14 +51,6 @@ my %tricks = map {; $_ => 1 }
   qw( bgsound embed listing plaintext xmp ),
   # other non-standard tags handled in popfile
   #   blink ilayer multicol noembed nolayer spacer wbr
-;
-
-# attributes
-my %attributes = map {; $_ => 1 }
-  # HTML 4.01 deprecated, loose DTD, frameset DTD
-  qw( abbr accept-charset accept accesskey action align alink alt archive axis background bgcolor border cellpadding cellspacing char charoff charset checked cite class classid clear code codebase codetype color cols colspan compact content coords data datetime declare defer dir disabled enctype face for frame frameborder headers height href hreflang hspace http-equiv id ismap label lang language link longdesc marginheight marginwidth maxlength media method multiple name nohref noresize noshade nowrap object onblur onchange onclick ondblclick onfocus onkeydown onkeypress onkeyup onload onmousedown onmousemove onmouseout onmouseover onmouseup onreset onselect onsubmit onunload profile prompt readonly rel rev rows rowspan rules scheme scope scrolling selected shape size span src standby start style summary tabindex target text title type usemap valign value valuetype version vlink vspace width ),
-  # attributes: additional attributes we accept
-  qw( family wrap / ),
 ;
 
 # elements that change text style
@@ -148,7 +139,6 @@ sub html_end {
 
   # final results scalars
   $self->put_results(image_area => $self->{image_area});
-  $self->put_results(max_shouting => $self->{max_shouting});
   $self->put_results(length => $self->{length});
   $self->put_results(min_size => $self->{min_size});
   $self->put_results(max_size => $self->{max_size});
@@ -181,13 +171,6 @@ sub html_end {
   if (exists $self->{tags} && exists $self->{obfuscation}) {
     $self->put_results(obfuscation_ratio =>
 		       $self->{obfuscation} / $self->{tags});
-  }
-  if (exists $self->{attr_bad} && exists $self->{attr_all}) {
-    $self->put_results(attr_bad => $self->{attr_bad} / $self->{attr_all});
-  }
-  if (exists $self->{attr_unique_bad} && exists $self->{attr_unique_all}) {
-    $self->put_results(attr_unique_bad =>
-		       $self->{attr_unique_bad} / $self->{attr_unique_all});
   }
 }
 
@@ -233,7 +216,6 @@ sub parse {
   my ($self, $text) = @_;
 
   $self->{image_area} = 0;
-  $self->{max_shouting} = 0;
   $self->{title_index} = -1;
   $self->{max_size} = 3;	# start at default size
   $self->{min_size} = 3;	# start at default size
@@ -251,23 +233,6 @@ sub parse {
   # NOTE: HTML::Parser can cope with: <?xml pis>, <? with space>, so we
   # don't need to fix them here.
 
-  # bug #1551: HTML declarations, like <!foo>, are being used by spammers
-  # for obfuscation, and they aren't stripped out by HTML::Parser prior to
-  # version 3.28.  We have to modify these out *before* the parser is
-  # invoked, because otherwise a spammer could do "&lt;! body of message
-  # &gt;", which would get turned into "<! body of message >" by the
-  # parser, and then the whole body message would be stripped.
-
-  # convert <!foo> to <!--foo-->
-  if ($HTML::Parser::VERSION < 3.28) {
-    $text =~ s/<!((?!--|doctype)[^>]*)>/<!--$1-->/gsi;
-  }
-
-  # remove empty close tags: </>, </ >, </ foo>
-  if ($HTML::Parser::VERSION < 3.29) {
-    $text =~ s/<\/(?:\s.*?)?>//gs;
-  }
-
   # HTML::Parser converts &nbsp; into a question mark ("?") for some
   # reason, so convert them to spaces.  Confirmed in 3.31, at least.
   $text =~ s/&nbsp;/ /g;
@@ -276,16 +241,14 @@ sub parse {
   # the HTML::Parser API won't do it for us
   $text =~ s/<(\w+)\s*\/>/<$1>/gi;
 
-  # ALWAYS pack it into byte-representation, even if we're using 'use bytes',
-  # since the HTML::Parser object may use Unicode internally. (bug 1417,
-  # maybe).  Also, ignore stupid warning that can't be suppressed: 'Parsing of
+  # Ignore stupid warning that can't be suppressed: 'Parsing of
   # undecoded UTF-8 will give garbage when decoding entities at ..' (bug 4046)
   {
     local $SIG{__WARN__} = sub {
       warn @_ unless (defined $_[0] && $_[0] =~ /^Parsing of undecoded UTF-/);
     };
 
-    $self->SUPER::parse(pack('C0A*', $text));
+    $self->SUPER::parse($text);
   }
 
   $self->SUPER::eof;
@@ -312,24 +275,15 @@ sub html_tag {
 
   return if $maybe_namespace;
 
-  # check attributes
-  for my $name (keys %$attr) {
-    if (!exists $attributes{$name}) {
-      $self->{attr_bad}++;
-      $self->{attr_unique_bad}++ if !exists $self->{"attr_seen_$name"};
-    }
-    $self->{attr_all}++;
-    $self->{attr_unique_all}++ if !exists $self->{"attr_seen_$name"};
-    $self->{"attr_seen_$name"} = 1;
-  }
-
   # ignore non-elements
   if (exists $elements{$tag} || exists $tricks{$tag}) {
     text_style(@_) if exists $elements_text_style{$tag};
 
+    # bug 5009: things like <p> and </p> both need dealing with
+    html_whitespace(@_) if exists $elements_whitespace{$tag};
+
     # start tags
     if ($num == 1) {
-      html_whitespace(@_) if exists $elements_whitespace{$tag};
       html_uri(@_) if exists $elements_uri{$tag};
       html_tests(@_);
     }
@@ -517,15 +471,21 @@ sub text_style {
 	# two different names for text color
 	$new{fgcolor} = name_to_rgb($attr->{$name});
       }
-      elsif ($name eq "size" && $attr->{size} =~ /^\s*([+-]\d+)/) {
-	# relative font size
-	$new{size} = $self->{basefont} + $1;
+      elsif ($name eq "size") {
+	if ($attr->{size} =~ /^\s*([+-]\d+)/) {
+	  # relative font size
+	  $new{size} = $self->{basefont} + $1;
+	}
+	elsif ($attr->{size} =~ /^\s*(\d+)/) {
+	  # absolute font size
+	  $new{size} = $1;
+        }
       }
-      elsif ($tag eq "span" && $name eq "style") {
-        my $style = $new{style} = $attr->{style};
-	my @parts = split(/;/, $style);
+      elsif ($name eq 'style') {
+        $new{style} = $attr->{style};
+	my @parts = split(/;/, $new{style});
 	foreach (@parts) {
-	  if (/\s*(background-)?color:\s*([^;]+)\s*/i) {
+	  if (/^\s*(background-)?color:\s*(.+)\s*$/i) {
 	    my $whcolor = $1 ? 'bgcolor' : 'fgcolor';
 	    my $value = lc $2;
 
@@ -548,25 +508,21 @@ sub text_style {
 	      $new{$whcolor} = name_to_rgb($value);
 	    }
 	  }
-	  elsif (/\s*display:\s*none\b/i) {
-	    $new{display} = 'none';
-	    $self->put_results(span_invisible => 1);
+	  elsif (/^\s*([a-z_-]+)\s*:\s*(\S.*?)\s*$/i) {
+	    # "display: none", "visibility: hidden", etc.
+	    $new{'style_'.$1} = $2;
 	  }
 	}
       }
-      else {
-	if ($name eq "bgcolor") {
-	  # overwrite with hex value, $new{bgcolor} is set below
-	  $attr->{bgcolor} = name_to_rgb($attr->{bgcolor});
-	}
-	if ($name eq "size" && $attr->{size} !~ /^\s*([+-])(\d+)/) {
-	  # attribute is malformed
-	}
-	else {
-	  # attribute is probably okay
-	  $new{$name} = $attr->{$name};
-	}
+      elsif ($name eq "bgcolor") {
+	# overwrite with hex value, $new{bgcolor} is set below
+        $attr->{bgcolor} = name_to_rgb($attr->{bgcolor});
       }
+      else {
+        # attribute is probably okay
+	$new{$name} = $attr->{$name};
+      }
+
       if ($new{size} > $self->{max_size}) {
 	$self->{max_size} = $new{size};
       }
@@ -590,11 +546,12 @@ sub html_font_invisible {
 
   my $fg = $self->{text_style}[-1]->{fgcolor};
   my $bg = $self->{text_style}[-1]->{bgcolor};
-  my $display = $self->{text_style}[-1]->{display};
+  my $size = $self->{text_style}[-1]->{size};
+  my $display = $self->{text_style}[-1]->{style_display};
+  my $visibility = $self->{text_style}[-1]->{style_visibility};
 
   # invisibility
   if (substr($fg,-6) eq substr($bg,-6)) {
-    $self->put_results(font_invisible => 1);
     return 1;
   }
   # near-invisibility
@@ -623,8 +580,17 @@ sub html_font_invisible {
     }
   }
 
+  # size too small
+  if ($size <= 1) {
+    return 1;
+  }
+
   # <span style="display: none">
   if ($display && lc $display eq 'none') {
+    return 1;
+  }
+
+  if ($visibility && lc $visibility eq 'hidden') {
     return 1;
   }
 
@@ -634,42 +600,9 @@ sub html_font_invisible {
 sub html_tests {
   my ($self, $tag, $attr, $num) = @_;
 
-  # HTML shouting
-  if ($tag =~ /^(?:b|i|u|strong|em|big|center|h[1-6])$/) {
-    my $level = 0;
-    for my $shout (qw( b i u strong em big center h1 h2 h3 h4 h5 h6 )) {
-      next unless exists $self->{inside}{$shout};
-      $level += $self->{inside}{$shout};
-    }
-    $self->{max_shouting} = $level if $level > $self->{max_shouting};
-  }      
-  if ($tag =~ /^(?:a|body|div|input|form|td|layer|area|img)$/i) {
-    for my $key (keys %$attr) {
-      if ($key =~ /\bon(?:contextmenu|load|resize|submit|unload)\b/i &&
-	  $attr->{$key})
-      {
-	$self->put_results(html_event_unsafe => 1);
-      }
-    }
-  }
-  if ($tag eq "font" && exists $attr->{size}) {
-    my $size = $attr->{size};
-    $self->put_results(tiny_font => 1) if (($size =~ /^\s*(\d+)/ && $1 < 1) ||
-					   ($size =~ /\-(\d+)/ && $1 >= 3));
-    $self->put_results(big_font => 1) if (($size =~ /^\s*(\d+)/ && $1 > 3) ||
-					  ($size =~ /\+(\d+)/ && $1 >= 1));
-  }
   if ($tag eq "font" && exists $attr->{face}) {
-    if ($attr->{face} =~ /[A-Z]{3}/ && $attr->{face} !~ /M[ST][A-Z]|ITC/) {
-      $self->put_results(font_face_caps => 1);
-    }
     if ($attr->{face} !~ /^[a-z][a-z -]*[a-z](?:,\s*[a-z][a-z -]*[a-z])*$/i) {
       $self->put_results(font_face_bad => 1);
-    }
-  }
-  if (exists $attr->{style}) {
-    if ($attr->{style} =~ /font(?:-size)?:\s*(\d+(?:\.\d*)?|\.\d+)(p[tx])/i) {
-      $self->examine_text_style($1, $2);
     }
   }
   if ($tag eq "img" && exists $self->{inside}{a} && $self->{inside}{a} > 0) {
@@ -727,15 +660,6 @@ sub html_tests {
   }
 }
 
-sub examine_text_style {
-  my ($self, $size, $type) = @_;
-  $type = lc $type;
-  $self->put_results(tiny_font => 1) if ($type eq "pt" && $size < 4);
-  $self->put_results(tiny_font => 1) if ($type eq "px" && $size < 4);
-  $self->put_results(big_font => 1) if ($type eq "pt" && $size > 14);
-  $self->put_results(big_font => 1) if ($type eq "px" && $size > 18);
-}
-
 sub display_text {
   my $self = shift;
   my $text = shift;
@@ -767,33 +691,22 @@ sub display_text {
   }
   push @{ $self->{text} }, $text;
   while (my ($k, $v) = each %display) {
-    $self->{"text_$k"} ||= '';
-    vec($self->{"text_$k"}, $#{$self->{text}}, 1) = $v;
+    my $textvar = "text_".$k;
+    if (!exists $self->{$textvar}) { $self->{$textvar} = ''; }
+    vec($self->{$textvar}, $#{$self->{text}}, 1) = $v;
   }
 }
 
 sub html_text {
   my ($self, $text) = @_;
 
-  # note: this comes back from HTML::Parser as UTF-8-tainted.  Enforce byte
-  # mode by repacking the string in byte mode, to avoid 'Malformed UTF-8
-  # character (unexpected non-continuation byte)' warnings
-  $text = pack("C0A*", $text);
-
   # text that is not part of body
   if (exists $self->{inside}{script} && $self->{inside}{script} > 0)
   {
     push @{ $self->{script} }, $text;
-    if ($text =~ /\bon(?:blur|contextmenu|focus|load|resize|submit|unload)\b/i)
-    {
-      $self->put_results(html_event_unsafe => 1);
-    }
     return;
   }
   if (exists $self->{inside}{style} && $self->{inside}{style} > 0) {
-    if ($text =~ /font(?:-size)?:\s*(\d+(?:\.\d*)?|\.\d+)(p[tx])/i) {
-      $self->examine_text_style($1, $2);
-    }
     return;
   }
 
@@ -810,8 +723,6 @@ sub html_text {
   my $invisible_for_bayes = 0;
   if ($text =~ /[^ \t\n\r\f\x0b\xa0]/) {
     $invisible_for_bayes = $self->html_font_invisible($text);
-    $self->put_results(text_after_body => 1) if $self->{closed_body};
-    $self->put_results(text_after_html => 1) if $self->{closed_html};
   }
 
   if (exists $self->{text}->[-1]) {
@@ -846,21 +757,6 @@ sub html_comment {
   my ($self, $text) = @_;
 
   push @{ $self->{comment} }, $text;
-
-  if (exists $self->{inside}{script} && $self->{inside}{script} > 0)
-  {
-    if ($text =~ /\bon(?:blur|contextmenu|focus|load|resize|submit|unload)\b/i)
-    {
-      $self->put_results(html_event_unsafe => 1);
-    }
-    return;
-  }
-  if (exists $self->{inside}{style} && $self->{inside}{style} > 0) {
-    if ($text =~ /font(?:-size)?:\s*(\d+(?:\.\d*)?|\.\d+)(p[tx])/i) {
-      $self->examine_text_style($1, $2);
-    }
-    return;
-  }
 }
 
 sub html_declaration {
@@ -868,7 +764,6 @@ sub html_declaration {
 
   if ($text =~ /^<!doctype/i) {
     my $tag = "!doctype";
-
     $self->{elements}++;
     $self->{tags}++;
     $self->{inside}{$tag} = 0;

@@ -55,8 +55,8 @@ my @ATT_KEYS = (
   'LOCALRULESDIR',    # " "       "   'CONFDIR'.
 
   'LOCALSTATEDIR',    # normally determined based on $*PREFIX.
-  'PERLLOCALSTATEDIR',
-  'SITELOCALSTATEDIR',
+  'PERLLOCALSTATEDIR', 
+  'SITELOCALSTATEDIR', 
   'VENDORLOCALSTATEDIR',
 
   'PERL_BIN',         # Sets the Perl interpreter used by the scripts.
@@ -145,9 +145,13 @@ foreach my $key (@ATT_KEYS) {
 }
 
 
-# Gather the rules files in the range 00-69; we do this in perl because it's more portable
-my @datafiles = map { s,^rules/,,; $_ } (<rules/*.cf>);
-my $datafiles = join(' ', (grep { /^(?:[0-6][0-9]|72)_/ } @datafiles), qw(user_prefs.template triplets.txt languages sa-update-pubkey.txt));
+# Gather the rules files in the range 00-69; we do this in perl because
+# it's more portable.  Also, plugin .pm files.
+my @datafiles = map { s,^rules/,,; $_ }
+                grep { -f $_ } (<rules/*.cf>, <rules/*.pm>);
+my $datafiles = join(' ', (grep 
+                { /^(?:(?:[0-6][0-9]|72)_\S+\.cf|\S+\.pm)/ } @datafiles),
+                qw(user_prefs.template languages sa-update-pubkey.txt));
 
 
 # See lib/ExtUtils/MakeMaker.pm for details of how to influence
@@ -163,15 +167,21 @@ my %makefile = (
       'spamassassin.raw' => 'spamassassin',
       'sa-learn.raw'     => 'sa-learn',
       'sa-update.raw'    => 'sa-update',
+      'sa-compile.raw'    => 'sa-compile',
       'spamc/spamc.c'    => 'spamc/spamc$(EXE_EXT)',
       'spamd/spamd.raw'  => 'spamd/spamd',
     },
+
+    # TODO: the rule compilation is hooked into the build step for "sa-update"
+    # as the make target "build_rules".
+    # This is kludgy, and it'd be nice to find a cleaner way to do this.
 
     'MAN1PODS' => {
         'spamassassin'     => '$(INST_MAN1DIR)/spamassassin.$(MAN1EXT)',
         'lib/spamassassin-run.pod' => '$(INST_MAN1DIR)/spamassassin-run.$(MAN1EXT)',
         'sa-learn'         => '$(INST_MAN1DIR)/sa-learn.$(MAN1EXT)',
         'sa-update'        => '$(INST_MAN1DIR)/sa-update.$(MAN1EXT)',
+        'sa-compile'       => '$(INST_MAN1DIR)/sa-compile.$(MAN1EXT)',
         'spamc/spamc.pod'  => '$(INST_MAN1DIR)/spamc.$(MAN1EXT)',
         'spamd/spamd'      => '$(INST_MAN1DIR)/spamd.$(MAN1EXT)',
     },
@@ -197,7 +207,8 @@ my %makefile = (
         'File::Spec'    => 0.8,           # older versions lack some routines we need
         'File::Copy'    => 2.02,          # this version is shipped with 5.005_03, the oldest version known to work
         'Pod::Usage'    => 1.10,          # all versions prior to this do seem to be buggy
-        'HTML::Parser'  => 3.24,          # the HTML code is based on this parser
+        'HTML::Parser'  => 3.43,          # the HTML code is based on this parser, older versions have utf-8 bugs
+        'Net::DNS'      => (RUNNING_ON_WINDOWS ? 0.46 : 0.34), # bugs in older revs
         'Sys::Hostname' => 0,
         'Time::Local'   => 0,
         'Errno'         => 0,
@@ -213,7 +224,7 @@ my %makefile = (
     },
 
     'clean' => { FILES => join(' ' =>
-        'sa-learn', 'sa-update', 'spamassassin',
+        'sa-learn', 'sa-update', 'spamassassin', 'sa-compile',
         
         'spamd/spamd',
 
@@ -224,14 +235,25 @@ my %makefile = (
         'spamc/*.so',
         'spamc/Makefile',
         'spamc/config.h', 'spamc/version.h', 'spamc/spamc.h',
-        'spamc/config.status', 'spamc/config.cache', 'spamc/config.log', 'spamc/autom4te.cache',
+        'spamc/config.status', 'spamc/*.cache', 'spamc/config.log',
         'spamd/*spamc*', 'qmail',
 
-        'doc', 'pod2htm*',
+        'doc', 'pod2htm*', '*.cache',
 
 	'version.env',
 
         't/bayessql.cf', 't/do_net', 't/log', 't/sql_based_whitelist.cf',
+
+        'rules/*.pm',
+
+        # don't remove these. they are built from 'rulesrc' in SVN, but
+        # in a distribution tarball, they're not
+        # 'rules/70_sandbox.cf',
+        # 'rules/72_active.cf',
+
+        # this file is no longer built, or used
+        'rules/70_inactive.cf',
+
       )
 
     },
@@ -243,9 +265,19 @@ my %makefile = (
     # asking all questions twice after a 'make dist*'.
     'NORECURS' => 1,
 
+    # bug 5074: perl 5.6.1 (with ExtUtils::MakeMaker 5.45) attempts to
+    # recurse anyway unless this is explicitly specified
+    'DIR' => [ ],
+
     # Don't add META.yml to the MANIFEST for god's sake!
     'NO_META' => 1,
 );
+
+# rules/72_active.cf is built from "rulesrc", but *must* exist before
+# WriteMakefile() is called due to shortcomings in MakeMaker.
+my @FILES_THAT_MUST_EXIST = qw(
+        rules/72_active.cf
+    );
 
 # That META.yml stuff was introduced with Perl 6.06_03, see
 # <http://archive.develooper.com/makemaker@perl.org/msg00922.html>
@@ -299,8 +331,13 @@ DESTDIR_BUG
 }
 
 
-# All the $(*MAN1*) stuff is empty/zero if Perl was Configured with -Dman1dir=none
-unless($Config{installman1dir}) {
+# All the $(*MAN1*) stuff is empty/zero if Perl was Configured with -Dman1dir=none;
+# however, support site/vendor man1 dirs (bug 5338)
+unless($Config{installman1dir}
+    || $Config{installsiteman1dir}
+    || $Config{installvendorman1dir})
+{
+  warn "not installing man pages in man1; no man1 dir found";
   delete $makefile{MAN1PODS};
 }
 
@@ -352,6 +389,10 @@ if (Mail::SpamAssassin::Util::DependencyInfo::long_diagnostics() != 0) {
   exit 1;
 }
 
+foreach my $file (@FILES_THAT_MUST_EXIST) {
+  open (TOUCH, ">>$file") or die "cannot touch '$file'";
+  close TOUCH;
+}
 
 #######################################################################
 
@@ -643,7 +684,6 @@ sub _set_macro_LOCALSTATEDIR {
     macro_ref("${repository}PREFIX") . '/var/spamassassin'
   );
 }
-
 
 # This routine determines the correct INSTALLDATADIR (aka DEFRULESDIR)
 # to use for the given repository.
@@ -1074,15 +1114,15 @@ FIXVARS		= -Mvars \
 		  -DPREFIX="$(I_PREFIX)" \
 		  -DDEF_RULES_DIR="$(I_DATADIR)" \
 		  -DLOCAL_RULES_DIR="$(I_CONFDIR)" \
-                  -DLOCAL_STATE_DIR="$(I_LOCALSTATEDIR)" \
+		  -DLOCAL_STATE_DIR="$(I_LOCALSTATEDIR)" \
 		  -DINSTALLSITELIB="$(I_LIBDIR)" \
 		  -DCONTACT_ADDRESS="$(CONTACT_ADDRESS)"
 
 FIXBANG		= -Msharpbang \
+                  -Mconditional \
 		  -DPERL_BIN="$(PERL_BIN)" \
 		  -DPERL_WARN="$(PERL_WARN)" \
 		  -DPERL_TAINT="$(PERL_TAINT)"
-
 
 spamassassin: spamassassin.raw
 	$(PREPROCESS) $(FIXBYTES) $(FIXVARS) $(FIXBANG) -m$(PERM_RWX) -i$? -o$@
@@ -1090,12 +1130,17 @@ spamassassin: spamassassin.raw
 sa-learn: sa-learn.raw
 	$(PREPROCESS) $(FIXBYTES) $(FIXVARS) $(FIXBANG) -m$(PERM_RWX) -i$? -o$@
 
-sa-update: sa-update.raw
-	$(PREPROCESS) $(FIXBYTES) $(FIXVARS) $(FIXBANG) -m$(PERM_RWX) -i$? -o$@
+sa-update: sa-update.raw build_rules
+	$(PREPROCESS) $(FIXBYTES) $(FIXVARS) $(FIXBANG) -m$(PERM_RWX) -isa-update.raw -osa-update
+
+sa-compile: sa-compile.raw
+	$(PREPROCESS) $(FIXBYTES) $(FIXVARS) $(FIXBANG) -m$(PERM_RWX) -isa-compile.raw -osa-compile
 
 spamd/spamd: spamd/spamd.raw
 	$(PREPROCESS) $(FIXBYTES) $(FIXVARS) $(FIXBANG) -m$(PERM_RWX) -i$? -o$@
 
+build_rules: 
+	$(PERL) build/mkrules --exit_on_no_src --src rulesrc --out rules --manifest MANIFEST --manifestskip MANIFEST.SKIP
 
 SPAMC_MAKEFILE  = spamc/Makefile
 MAKE_SPAMC      = $(MAKE) -f $(SPAMC_MAKEFILE)
@@ -1153,6 +1198,7 @@ conf__install:
 	$(PERL) -MFile::Copy -e "copy(q{rules/init.pre}, q{$(B_CONFDIR)/init.pre}) unless -f q{$(B_CONFDIR)/init.pre}"
 	$(PERL) -MFile::Copy -e "copy(q{rules/v310.pre}, q{$(B_CONFDIR)/v310.pre}) unless -f q{$(B_CONFDIR)/v310.pre}"
 	$(PERL) -MFile::Copy -e "copy(q{rules/v312.pre}, q{$(B_CONFDIR)/v312.pre}) unless -f q{$(B_CONFDIR)/v312.pre}"
+	$(PERL) -MFile::Copy -e "copy(q{rules/v320.pre}, q{$(B_CONFDIR)/v320.pre}) unless -f q{$(B_CONFDIR)/v320.pre}"
 
 data__install:
 	-$(MKPATH) $(B_DATADIR)

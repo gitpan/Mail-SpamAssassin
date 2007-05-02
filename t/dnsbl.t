@@ -92,6 +92,12 @@ EOF
 );
 
 tstprefs("
+
+# we really do not want to timeout here. use a large value, as the
+# scaling code otherwise results in timing out after 7 seconds due
+# to the volume of lookups performed
+rbl_timeout 60
+
 add_header all RBL _RBL_
 add_header all Trusted _RELAYSTRUSTED_
 add_header all Untrusted _RELAYSUNTRUSTED_

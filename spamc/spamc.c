@@ -26,6 +26,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "getopt.h"
+
 #ifdef _WIN32
 #include <io.h>
 #include <fcntl.h>
@@ -77,13 +79,12 @@
      || (defined(hpux) || defined(__hpux)) /* HPUX */ \
      || (defined(__CYGWIN__))	/* CygWin, Win32 */
 
-extern int optind;
-extern char *optarg;
+extern int spamc_optind;
+extern char *spamc_optarg;
 
 #endif
 
 #ifdef _WIN32
-#include "replace/getopt.h"
 char *__progname = "spamc";
 #endif
 
@@ -135,53 +136,69 @@ print_usage(void)
     usg("\n");
     usg("Options:\n");
 
-    usg("  -d host[,host2]     Specify one or more hosts to connect to.\n"
+    usg("  -d, --dest host[,host2]\n"
+        "                      Specify one or more hosts to connect to.\n"
         "                      [default: localhost]\n");
-    usg("  -H                  Randomize IP addresses for the looked-up\n"
+    usg("  -H , --randomize    Randomize IP addresses for the looked-up\n"
         "                      hostname.\n");
-    usg("  -p port             Specify port for connection to spamd.\n"
+    usg("  -p, --port port     Specify port for connection to spamd.\n"
         "                      [default: 783]\n");
 #ifdef SPAMC_SSL
-    usg("  -S                  Use SSL to talk to spamd.\n");
+    usg("  -S, --ssl           Use SSL to talk to spamd.\n");
 #endif
 #ifndef _WIN32
-    usg("  -U path             Connect to spamd via UNIX domain sockets.\n");
+    usg("  -U, --socket path   Connect to spamd via UNIX domain sockets.\n");
 #endif
-    usg("  -F path             Use this configuration file.\n");
-    usg("  -t timeout          Timeout in seconds for communications to\n"
+    usg("  -F, --config path   Use this configuration file.\n");
+    usg("  -t, --timeout timeout\n"
+        "                      Timeout in seconds for communications to\n"
         "                      spamd. [default: 600]\n");
-    usg("  -s size             Specify maximum message size, in bytes.\n"
-        "                      [default: 250k]\n");
-    usg("  -u username         User for spamd to process this message under.\n"
+    usg("  --connect-retries retries\n"
+        "                      Try connecting to spamd this many times\n"
+        "                      [default: 3]\n");
+    usg("  --retry-sleep sleep Sleep for this time between attempts to\n"
+        "                      connect to spamd, in seconds [default: 1]\n");
+    usg("  -s, --max-size size Specify maximum message size, in bytes.\n"
+        "                      [default: 500k]\n");
+    usg("  -u, --username username\n"
+        "                      User for spamd to process this message under.\n"
         "                      [default: current user]\n");
 
-    usg("  -L learntype        Learn message as spam, ham or forget to\n"
-	"                      forget or unlearn the message.\n");
+    usg("  -L, --learntype learntype\n"
+        "                      Learn message as spam, ham or forget to\n"
+        "                      forget or unlearn the message.\n");
 
-    usg("  -C reporttype       Report message to collaborative filtering\n"
-	"                      databases.  Report type should be report for\n"
-	"                      spam or revoke for ham.\n");
-	
-    usg("  -B                  Assume input is a single BSMTP-formatted\n"
+    usg("  -C, --reporttype reporttype\n"
+        "                      Report message to collaborative filtering\n"
+        "                      databases.  Report type should be 'report' for\n"
+        "                      spam or 'revoke' for ham.\n");
+
+    usg("  -B, --bsmtp         Assume input is a single BSMTP-formatted\n"
         "                      message.\n");
-    
-    usg("  -c                  Just print the summary line and set an exit\n"
+
+    usg("  -c, --check         Just print the summary line and set an exit\n"
         "                      code.\n");
-    usg("  -y                  Just print the names of the tests hit.\n");
-    usg("  -r                  Print full report for messages identified as\n"
+    usg("  -y, --tests         Just print the names of the tests hit.\n");
+    usg("  -r, --full-spam     Print full report for messages identified as\n"
         "                      spam.\n");
-    usg("  -R                  Print full report for all messages.\n");
-    usg("  -E                  Filter as normal, and set an exit code.\n");
-    
-    usg("  -x                  Don't fallback safely.\n");
-    usg("  -l                  Log errors and warnings to stderr.\n");
+    usg("  -R, --full          Print full report for all messages.\n");
+    usg("  --headers           Rewrite only the message headers.\n");
+    usg("  -E, --exitcode      Filter as normal, and set an exit code.\n");
+
+    usg("  -x, --no-safe-fallback\n"
+        "                      Don't fallback safely.\n");
+    usg("  -l, --log-to-stderr Log errors and warnings to stderr.\n");
 #ifndef _WIN32
-    usg("  -e command [args]   Pipe the output to the given command instead\n"
+    usg("  -e, --pipe-to command [args]\n"
+        "                      Pipe the output to the given command instead\n"
         "                      of stdout. This must be the last option.\n");
 #endif
-    usg("  -h                  Print this help message and exit.\n");
-    usg("  -V                  Print spamc version and exit.\n");
+    usg("  -h, --help          Print this help message and exit.\n");
+    usg("  -V, --version       Print spamc version and exit.\n");
+    usg("  -K                  Keepalive check of spamd.\n");
+    usg("  -z                  Compress mail message sent to spamd.\n");
     usg("  -f                  (Now default, ignored.)\n");
+
     usg("\n");
 }
 
@@ -198,14 +215,46 @@ read_args(int argc, char **argv,
           struct transport *ptrn)
 {
 #ifndef _WIN32
-    const char *opts = "-BcrRd:e:fyp:t:s:u:L:C:xSHU:ElhVF:";
+    const char *opts = "-BcrRd:e:fyp:t:s:u:L:C:xzSHU:ElhVKF:0:1:2";
 #else
-    const char *opts = "-BcrRd:fyp:t:s:u:L:C:xSHElhVF:";
+    const char *opts = "-BcrRd:fyp:t:s:u:L:C:xzSHElhVKF:0:1:2";
 #endif
     int opt;
     int ret = EX_OK;
+    int longind = 1;
+
+    static struct option longoptions[] = {
+       { "dest" , required_argument, 0, 'd' },
+       { "randomize", no_argument, 0, 'H' },
+       { "port", required_argument, 0, 'p' },
+       { "ssl", optional_argument, 0, 'S' },
+       { "socket", required_argument, 0, 'U' },
+       { "config", required_argument, 0, 'F' },
+       { "timeout", required_argument, 0, 't' },
+       { "connect-retries", required_argument, 0, 0 },
+       { "retry-sleep", required_argument, 0, 1 },
+       { "max-size", required_argument, 0, 's' },
+       { "username", required_argument, 0, 'u' },
+       { "learntype", required_argument, 0, 'L' },
+       { "reporttype", required_argument, 0, 'C' },
+       { "bsmtp", no_argument, 0, 'B' },
+       { "check", no_argument, 0, 'c' },
+       { "tests", no_argument, 0, 'y' },
+       { "full-spam", no_argument, 0, 'r' },
+       { "full", no_argument, 0, 'R' },
+       { "headers", no_argument, 0, 2 },
+       { "exitcode", no_argument, 0, 'E' },
+       { "no-safe-fallback", no_argument, 0, 'x' },
+       { "log-to-stderr", no_argument, 0, 'l' },
+       { "pipe-to", required_argument, 0, 'e' },
+       { "help", no_argument, 0, 'h' },
+       { "version", no_argument, 0, 'V' },
+       { "compress", no_argument, 0, 'z' },
+       { 0, 0, 0, 0} /* last element _must_ be all zeroes */
+    };
     
-    while ((opt = getopt(argc, argv, opts)) != -1)
+    while ((opt = spamc_getopt_long(argc, argv, opts, longoptions, 
+                &longind)) != -1)
     {
         switch (opt)
         {
@@ -222,7 +271,7 @@ read_args(int argc, char **argv,
             case 'd':
             {
                 ptrn->type = TRANSPORT_TCP;
-                ptrn->hostname = optarg;        /* fix the ptr to point to this string */
+                ptrn->hostname = spamc_optarg;        /* fix the ptr to point to this string */
                 break;
             }
 #ifndef _WIN32
@@ -233,12 +282,12 @@ read_args(int argc, char **argv,
                 /* Allocate memory for the necessary pointers needed to 
                  * store the remaining arguments.
                  */
-                exec_argv = malloc(sizeof(*exec_argv) * (argc - optind + 2));
+                exec_argv = malloc(sizeof(*exec_argv) * (argc - spamc_optind + 2));
                 if (exec_argv == NULL) {
                     return EX_OSERR;
                 }
                 
-                for (i = 0, j = optind - 1; j < argc; i++, j++) {
+                for (i = 0, j = spamc_optind - 1; j < argc; i++, j++) {
                     exec_argv[i] = argv[j];
                 }
                 exec_argv[i] = NULL;
@@ -249,6 +298,11 @@ read_args(int argc, char **argv,
             case 'f':
             {
                 /* obsolete, backwards compat */
+                break;
+            }
+            case 'K':
+            {
+                flags |= SPAMC_PING;
                 break;
             }
             case 'l':
@@ -263,7 +317,7 @@ read_args(int argc, char **argv,
             }
             case 'p':
             {
-                ptrn->port = (unsigned short)atoi(optarg);
+                ptrn->port = (unsigned short)atoi(spamc_optarg);
                 break;
             }
             case 'r':
@@ -283,36 +337,52 @@ read_args(int argc, char **argv,
             }
             case 's':
             {
-                *max_size = atoi(optarg);
+                *max_size = atoi(spamc_optarg);
                 break;
             }
 #ifdef SPAMC_SSL
             case 'S':
             {
                 flags |= SPAMC_USE_SSL;
+		if (!spamc_optarg || (strcmp(spamc_optarg,"sslv23") == 0)) {
+		  /* this is the default */
+		}
+	        else if (strcmp(spamc_optarg,"sslv2") == 0) {
+		  flags |= SPAMC_SSLV2;
+		}
+		else if (strcmp(spamc_optarg,"sslv3") == 0) {
+		  flags |= SPAMC_SSLV3;
+		}
+		else if (strcmp(spamc_optarg,"tlsv1") == 0) {
+		  flags |= (SPAMC_SSLV2 | SPAMC_SSLV3);
+		}
+		else {
+		    libspamc_log(flags, LOG_ERR, "Please specifiy a legal ssl version (%s)", spamc_optarg);
+		    ret = EX_USAGE;
+		}
                 break;
             }
 #endif
             case 't':
             {
-                timeout = atoi(optarg);
+                timeout = atoi(spamc_optarg);
                 break;
             }
             case 'u':
             {
-                *username = optarg;
+                *username = spamc_optarg;
                 break;
             }
             case 'L':
 	    {
 	        flags |= SPAMC_LEARN;
-		if (strcmp(optarg,"spam") == 0) {
+		if (strcmp(spamc_optarg,"spam") == 0) {
 		    *extratype = 0;
 		}
-	        else if (strcmp(optarg,"ham") == 0) {
+	        else if (strcmp(spamc_optarg,"ham") == 0) {
 		    *extratype = 1;
 		}
-		else if (strcmp(optarg,"forget") == 0) {
+		else if (strcmp(spamc_optarg,"forget") == 0) {
 		    *extratype = 2;
 		}
 		else {
@@ -324,10 +394,10 @@ read_args(int argc, char **argv,
         case 'C':
 	    {
 	        flags |= SPAMC_REPORT_MSG;
-		if (strcmp(optarg,"report") == 0) {
+		if (strcmp(spamc_optarg,"report") == 0) {
 		    *extratype = 0;
 		}
-                else if (strcmp(optarg,"revoke") == 0) {
+                else if (strcmp(spamc_optarg,"revoke") == 0) {
 		    *extratype = 1;
 		}
 		else {
@@ -340,7 +410,7 @@ read_args(int argc, char **argv,
             case 'U':
             {
                 ptrn->type = TRANSPORT_UNIX;
-                ptrn->socketpath = optarg;
+                ptrn->socketpath = spamc_optarg;
                 break;
             }
 #endif
@@ -374,13 +444,43 @@ read_args(int argc, char **argv,
                 print_version();
                 return(EX_TEMPFAIL);
             }
+            case 'z':
+            {
+                flags |= SPAMC_USE_ZLIB;
+                break;
+            }
+            case 0:
+            {
+                ptrn->connect_retries = atoi(spamc_optarg);
+                break;
+            }
+            case 1:
+            {
+                ptrn->retry_sleep = atoi(spamc_optarg);
+                break;
+            }
+            case 2:
+            {
+                flags |= SPAMC_HEADERS;
+                break;
+            }
         }
+    }
+
+    if (*max_size > SPAMC_MAX_MESSAGE_LEN) {
+        libspamc_log(flags, LOG_ERR, "-s parameter is beyond max of %d",
+                        SPAMC_MAX_MESSAGE_LEN);
+        ret = EX_USAGE;
     }
 
     /* learning action has to block some parameters */
     if (flags & SPAMC_LEARN) {
         if (flags & SPAMC_CHECK_ONLY) {
 	    libspamc_log(flags, LOG_ERR, "Learning excludes check only");
+	    ret = EX_USAGE;
+	}
+        if (flags & SPAMC_PING) {
+            libspamc_log(flags, LOG_ERR, "Learning excludes ping");
 	    ret = EX_USAGE;
 	}
 	if (flags & SPAMC_REPORT_IFSPAM) {
@@ -442,8 +542,6 @@ combine_args(char *config_file, int argc, char **argv,
 
 	tok = option;
 	while((tok = strtok(tok, " ")) != NULL) {
-       if(tok[0] == '\n')
-          break;
 	    for(i=strlen(tok); i>0; i--) {
 	        if(tok[i] == '\n')
 		    tok[i] = '\0';
@@ -629,7 +727,7 @@ main(int argc, char *argv[])
 #endif
 
     /* set some defaults */
-    max_size = 250 * 1024;
+    max_size = 500 * 1024;
     username = NULL;
  
     combo_argc = 1;
@@ -828,13 +926,12 @@ main(int argc, char *argv[])
 	message_cleanup(&m);
 	ret = result;
     }
-    else if (flags & SPAMC_CHECK_ONLY || flags & SPAMC_REPORT
-	     || flags & SPAMC_REPORT_IFSPAM) {
+    else if (flags & (SPAMC_CHECK_ONLY | SPAMC_REPORT | SPAMC_REPORT_IFSPAM)) {
 	full_write(out_fd, 1, "0/0\n", 4);
 	message_cleanup(&m);
 	ret = EX_NOTSPAM;
     }
-    else if (flags & SPAMC_LEARN) {
+    else if (flags & (SPAMC_LEARN|SPAMC_PING) ) {
         message_cleanup(&m);
     }
     else if (flags & SPAMC_SYMBOLS) {

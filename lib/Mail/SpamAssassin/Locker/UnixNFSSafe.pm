@@ -92,7 +92,7 @@ sub safe_lock {
     }
     # link _may_ return false even if the link _is_ created
     @stat = lstat($lock_tmp);
-    if ($stat[3] > 1) {
+    if (defined $stat[3] && $stat[3] > 1) {
       dbg("locker: safe_lock: link to $lock_file: stat ok");
       $is_locked = 1;
       last;
@@ -101,7 +101,8 @@ sub safe_lock {
     my $now = ($#stat < 11 ? undef : $stat[10]);
     @stat = lstat($lock_file);
     my $lock_age = ($#stat < 11 ? undef : $stat[10]);
-    if (defined($lock_age) && ($now - $lock_age) > LOCK_MAX_AGE) {
+    if (defined($lock_age) && defined($now) && ($now - $lock_age) > LOCK_MAX_AGE)
+    {
       # we got a stale lock, break it
       dbg("locker: safe_lock: breaking stale $lock_file: age=" .
 	  (defined $lock_age ? $lock_age : "undef") . " now=$now");

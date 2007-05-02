@@ -287,7 +287,7 @@ sub tie_db_writable {
 
   # set our cache to what version DB we're using
   $self->{db_version} = ($self->get_storage_variables())[6];
-  # don't bother printing this if the db was not found since it is bogus anyway
+  # don't bother printing this unless found since it would be bogus anyway
   dbg("bayes: found bayes db version ".$self->{db_version}) if ($found);
 
   # figure out if we can read the current DB and if we need to do a
@@ -590,7 +590,7 @@ sub untie_db {
     my $db_var = 'db_'.$dbname;
 
     if (exists $self->{$db_var}) {
-      dbg("bayes: untie-ing $db_var");
+      # dbg("bayes: untie-ing $db_var");
       untie %{$self->{$db_var}};
       delete $self->{$db_var};
     }
@@ -1123,8 +1123,12 @@ sub cleanup {
 
     # argh, write failure, give up
     if (!defined $len || $len < 0) {
-      $len = 0 unless (defined $len);
-      warn "bayes: write failed to Bayes journal $path ($len of $nbytes)!\n";
+      my $err = '';
+      if (!defined $len) {
+	$len = 0;
+	$err = "  ($!)";
+      }
+      warn "bayes: write failed to Bayes journal $path ($len of $nbytes)!$err\n";
       last;
     }
 
@@ -1511,7 +1515,7 @@ sub clear_database {
     my $db_var = 'db_'.$dbname;
 
     if (exists $self->{$db_var}) {
-      dbg("bayes: untie-ing $db_var");
+      # dbg("bayes: untie-ing $db_var");
       untie %{$self->{$db_var}};
       delete $self->{$db_var};
     }
