@@ -273,42 +273,6 @@ data should be stored.
 
 =back
 
-=item $plugin->compile_now_start ( { options ... } )
-
-This is called at the beginning of Mail::SpamAssassin::compile_now() so
-plugins can do any necessary initialization for multi-process
-SpamAssassin (such as spamd or mass-check -j).
-
-=over 4
-
-=item use_user_prefs
-
-The value of $use_user_prefs option in compile_now().
-
-=item keep_userstate
-
-The value of $keep_userstate option in compile_now().
-
-=back
-
-=item $plugin->compile_now_finish ( { options ... } )
-
-This is called at the end of Mail::SpamAssassin::compile_now() so
-plugins can do any necessary initialization for multi-process
-SpamAssassin (such as spamd or mass-check -j).
-
-=over 4
-
-=item use_user_prefs
-
-The value of $use_user_prefs option in compile_now().
-
-=item keep_userstate
-
-The value of $keep_userstate option in compile_now().
-
-=back
-
 =item $plugin->check_start ( { options ... } )
 
 Signals that a message check operation is starting.
@@ -329,10 +293,23 @@ APIs on that object, too.  See C<Mail::SpamAssassin::PerMsgStatus> perldoc.
 
 =back
 
-=item $plugin->check_main ( { options ... } )
+=item $plugin->extract_metadata ( { options ... } )
 
-Signals that a message should be checked.  Note that implementations of
-this hook should return C<1>.
+Signals that a message is being mined for metadata.  Some plugins may wish
+to add their own metadata as well.
+
+=over 4
+
+=item msg
+
+The C<Mail::SpamAssassin::Message> object for this message.
+
+=back
+
+=item $plugin->parsed_metadata ( { options ... } )
+
+Signals that a message's metadata has been parsed, and can now be
+accessed by the plugin.
 
 =over 4
 
@@ -398,116 +375,6 @@ using the public APIs on this object.
 
 =back
 
-=item $plugin->finish_tests ( { options ... } )
-
-Called via SpamAssassin::finish and should clear up any tests that a plugin
-has added to the namespace.
-
-In certain circumstances, plugins may find it useful to compile
-perl functions from the ruleset, on the fly.  It is important to
-remove these once the C<Mail::SpamAssassin> object is deleted,
-however, and this API allows this.
-
-Each plugin is responsible for its own generated perl functions.
-
-=over 4
-
-=item conf
-
-The C<Mail::SpamAssassin::Conf> object on which the configuration
-data should be stored.
-
-=item $plugin->extract_metadata ( { options ... } )
-
-Signals that a message is being mined for metadata.  Some plugins may wish
-to add their own metadata as well.
-
-=over 4
-
-=item msg
-
-The C<Mail::SpamAssassin::Message> object for this message.
-
-=back
-
-=item $plugin->parsed_metadata ( { options ... } )
-
-Signals that a message's metadata has been parsed, and can now be
-accessed by the plugin.
-
-=over 4
-
-=item permsgstatus
-
-The C<Mail::SpamAssassin::PerMsgStatus> context object for this scan.
-
-=back
-
-=item $plugin->start_rules ( { options ... } )
-
-Called before testing a set of rules of a given type and priority.
-
-=over 4
-
-=item permsgstatus
-
-The C<Mail::SpamAssassin::PerMsgStatus> context object for this scan.
-
-=item ruletype
-
-The type of the rules about to be performed.
-
-=item priority
-
-The priority level of the rules about to be performed.
-
-=back
-
-=item $plugin->hit_rule ( { options ... } )
-
-Called when a rule fires.
-
-=over 4
-
-=item permsgstatus
-
-The C<Mail::SpamAssassin::PerMsgStatus> context object for this scan.
-
-=item ruletype
-
-The type of the rule that fired.
-
-=item rulename
-
-The name of the rule that fired.
-
-=item score
-
-The rule's score in the active scoreset.
-
-=back
-
-=item $plugin->ran_rule ( { options ... } )
-
-Called after a rule has been tested, whether or not it fired.  When the
-rule fires, the hit_rule callback is always called before this.
-
-=over 4
-
-=item permsgstatus
-
-The C<Mail::SpamAssassin::PerMsgStatus> context object for this scan.
-
-=item ruletype
-
-The type of the rule that was tested.
-
-=item rulename
-
-The name of the rule that was tested.
-
-=back
-
 =item $plugin->autolearn_discriminator ( { options ... } )
 
 Control whether a just-scanned message should be learned as either
@@ -549,24 +416,6 @@ Normally, any member variables on the C<PerMsgStatus> object will be cleaned up
 automatically -- but if your plugin has made a circular reference on that
 object, this is the place to break them so that garbage collection can operate
 correctly.
-
-=over 4
-
-=item permsgstatus
-
-The C<Mail::SpamAssassin::PerMsgStatus> context object for this scan.
-
-=back
-
-
-=item $plugin->have_shortcircuited ( { options ... } )
-
-Has the current scan operation 'short-circuited'?  In other words, can
-further scanning be skipped, since the message is already definitively
-classified as either spam or ham?
-
-Plugins should return C<0> to indicate that scanning should continue,
-or C<1> to indicate that short-circuiting has taken effect.
 
 =over 4
 
@@ -789,20 +638,6 @@ Address you wish to remove.
 
 Called when a new child starts up under spamd.
 
-=item $plugin->log_scan_result ( { options ... } )
-
-Called when spamd has completed scanning a message.  Currently,
-only spamd calls this API.
-
-=over 4
-
-=item result
-
-The C<'result: ...'> line for this scan.  Format is as described
-at B<http://wiki.apache.org/spamassassin/SpamdSyslogFormat>.
-
-=back
-
 =item $plugin->spamd_child_post_connection_close ()
 
 Called when child returns from handling a connection.
@@ -820,7 +655,7 @@ Called when the C<Mail::SpamAssassin> object is destroyed.
 
 sub finish {
   my ($self) = @_;
-  %{$self} = ();
+  delete $self->{main};
 }
 
 =head1 HELPER APIS
@@ -841,54 +676,6 @@ See the B<REGISTERING EVAL RULES> section for full details.
 sub register_eval_rule {
   my ($self, $nameofsub) = @_;
   $self->{main}->{conf}->register_eval_rule ($self, $nameofsub);
-}
-
-=item $plugin->register_generated_rule_method ($nameofsub)
-
-In certain circumstances, plugins may find it useful to compile
-perl functions from the ruleset, on the fly.  It is important to
-remove these once the C<Mail::SpamAssassin> object is deleted,
-however, and this API allows this.
-
-Once the method C<$nameofsub> has been generated, call this API
-with the name of the method (including full package scope).
-This indicates that it's a temporary piece of generated code,
-built from the SpamAssassin ruleset, and when 
-C<Mail::SpamAssassin::finish()> is called, the method will
-be destroyed.
-
-This API was added in SpamAssassin 3.2.0.
-
-=cut
-
-sub register_generated_rule_method {
-  my ($self, $nameofsub) = @_;
-  push @Mail::SpamAssassin::PerMsgStatus::TEMPORARY_METHODS,
-        $nameofsub;
-}
-
-=item $plugin->register_method_priority($methodname, $priority)
-
-Indicate that the method named C<$methodname> on the current object
-has a callback priority of C<$priority>.
-
-This is used by the plugin handler to determine the relative order of
-callbacks; plugins with lower-numbered priorities are called before plugins
-with higher-numbered priorities.  Each method can have a different priority
-value.  The default value is C<0>.  The ordering of callbacks to methods with
-equal priority is undefined.
-
-Typically, you only need to worry about this if you need to ensure your
-plugin's method is called before another plugin's implementation of that
-method.  It should be called from your plugin's constructor.
-
-This API was added in SpamAssassin 3.2.0.
-
-=cut
-
-sub register_method_priority {
-  my ($self, $methname, $pri) = @_;
-  $self->{method_priority}->{$methname} = $pri;
 }
 
 =item $plugin->inhibit_further_callbacks()
@@ -920,9 +707,9 @@ Output an informational message C<$message>, if the SpamAssassin object
 is running with informational messages turned on.
 
 I<NOTE:> This function is not available in the package namespace
-of general plugins and can't be called via $self->info().  If a
+of general plugins and can't be called via $self->dbg().  If a
 plugin wishes to output debug information, it should call
-C<Mail::SpamAssassin::Plugin::info($msg)>.
+C<Mail::SpamAssassin::Plugin::dbg($msg)>.
 
 =cut
 
@@ -997,23 +784,6 @@ Different rule types receive different information by default:
 
 The configuration file arguments will be passed in after the standard
 arguments.
-
-=head1 BACKWARDS COMPATIBILITY
-
-Note that if you write a plugin and need to determine if a particular
-helper method is supported on C<Mail::SpamAssassin::Plugin>, you
-can do this:
-
-    if ($self->can("name_of_method")) {
-      eval {
-        $self->name_of_method();        # etc.
-      }
-    } else {
-      # take fallback action
-    }
-
-The same applies for the public APIs on objects of other types, such as
-C<Mail::SpamAssassin::PerMsgStatus>.
 
 =head1 SEE ALSO
 

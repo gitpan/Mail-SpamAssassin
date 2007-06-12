@@ -44,7 +44,6 @@ Options:
                                    Set user preferences file
  --siteconfigpath=path             Path for site configs
                                    (def: /etc/mail/spamassassin)
- --cf='config line'                Additional line of configuration
  -x, --nocreate-prefs              Don't create user preferences file
  -e, --exit-code                   Exit with a non-zero exit code if the
                                    tested message was spam
@@ -60,7 +59,6 @@ Options:
  --add-addr-to-whitelist=addr      Add addr to persistent address whitelist
  --add-addr-to-blacklist=addr      Add addr to persistent address blacklist
  --remove-addr-from-whitelist=addr Remove addr from persistent address list
- --ipv4only, --ipv4-only, --ipv4   Disable attempted use of ipv6 for DNS
  --progress                        Print progress bar
  -D, --debug [area=n,...]          Print debugging messages
  -V, --version                     Print version
@@ -200,12 +198,6 @@ Remove the named email address from a persistent address whitelist.  Note that
 you must be running C<spamassassin> or C<spamd> with a persistent address
 list plugin enabled for this to work.
 
-=item B< --ipv4only>, B<--ipv4-only>, B<--ipv4>
-
-Do not use IPv6 for DNS tests. Normally, SpamAssassin will try to detect if
-IPv6 is available, using only IPv4 if it is not. Use if the existing tests
-for IPv6 availablity produce incorrect results or crashes.
-
 =item B<-L>, B<--local>
 
 Do only the ''local'' tests, ones that do not require an internet connection to
@@ -238,15 +230,6 @@ Ignore the default directories (usually C</usr/share/spamassassin> or similar).
 
 Use the specified path for locating site-specific configuration files.  Ignore
 the default directories (usually C</etc/mail/spamassassin> or similar).
-
-=item B<--cf='config line'>
-
-Add additional lines of configuration directly from the command-line, parsed
-after the configuration files are read.   Multiple B<--cf> arguments can be
-used, and each will be considered a separate line of configuration.  For
-example:
-
-        spamassassin -t --cf="body NEWRULE /text/" --cf="score NEWRULE 3.0"
 
 =item B<-p> I<prefs>, B<--prefspath>=I<prefs>, B<--prefs-file>=I<prefs>
 

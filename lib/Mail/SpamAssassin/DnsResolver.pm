@@ -43,9 +43,9 @@ use Mail::SpamAssassin;
 use Mail::SpamAssassin::Logger;
 
 use IO::Socket::INET;
-use Errno qw(EADDRINUSE EACCES);
+use Errno qw(EINVAL EADDRINUSE);
 
-use constant HAS_SOCKET_INET6 => eval { require IO::Socket::INET6; };
+use constant HAS_SOCKET_INET6 => eval { require IO::Socket::INET6 };
 
 our @ISA = qw();
 
@@ -81,41 +81,13 @@ sub load_resolver {
 
   if (defined $self->{res}) { return 1; }
   $self->{no_resolver} = 1;
-  # force only ipv4 if no IO::Socket::INET6 or ipv6 doesn't work
-  # to be safe test both ipv6 and ipv4 addresses in INET6
-  my $force_ipv4 = (!HAS_SOCKET_INET6) || $self->{main}->{force_ipv4} ||
-    !eval {
-      my $sock6 = IO::Socket::INET6->new(
-                                         LocalAddr => "::",
-                                         Proto     => 'udp',
-                                         );
-      if ($sock6) {
-        $sock6->close();
-        1;
-      }
-    } ||
-    !eval {
-      my $sock6 = IO::Socket::INET6->new(
-                                         LocalAddr => "0.0.0.0",
-                                         PeerAddr => "0.0.0.0",
-					 PeerPort => 53,
-                                         Proto     => 'udp',
-                                         );
-      if ($sock6) {
-        $sock6->close();
-        1;
-      }
-    };
-  
+
   eval {
     require Net::DNS;
-    # force_v4 is set in new() to avoid error in older versions of Net::DNS that don't have it
-    # other options are set by function calls so a typo or API change will cause an error here
-    $self->{res} = Net::DNS::Resolver->new(force_v4 => $force_ipv4);
+    $self->{res} = Net::DNS::Resolver->new;
     if (defined $self->{res}) {
       $self->{no_resolver} = 0;
-      $self->{force_ipv4} = $force_ipv4;
-      $self->{retry} = 1;               # retries for non-backgrounded query
+      $self->{retry} = 1;               # retries for non-nackgrounded query
       $self->{retrans} = 3;   # initial timeout for "non-backgrounded" query run in background
       $self->{res}->retry(1);           # If it fails, it fails
       $self->{res}->retrans(0);         # If it fails, it fails
@@ -129,7 +101,6 @@ sub load_resolver {
     1;
   };   #  or warn "dns: eval failed: $@ $!\n";
 
-  dbg("dns: no ipv6") if $force_ipv4;
   dbg("dns: is Net::DNS::Resolver available? " .
        ($self->{no_resolver} ? "no" : "yes"));
   if (!$self->{no_resolver} && defined $Net::DNS::VERSION) {
@@ -152,7 +123,7 @@ sub get_resolver {
 
 =item $res->nameservers()
 
-Wrapper for Net::DNS::Resolver->nameservers to get or set list of nameservers
+Wrapper for Net::DNS::Reslolver->nameservers to get or set list of nameservers
 
 =cut
 
@@ -186,17 +157,20 @@ sub connect_sock {
   my $ip64 = IP_ADDRESS;
   my $ip4 = IPV4_ADDRESS;
   my $ns = $self->{res}->{nameservers}[0];
-  my $ipv6opt = !($self->{force_ipv4});
+  my $ipv6 = 0;
 
-  # ensure families of src and dest addresses match (bug 4412 comment 29)
-  my $srcaddr;
-  if ($ipv6opt && $ns=~/^${ip64}$/o && $ns!~/^${ip4}$/o) {
-    $srcaddr = "::";
-  } else {
-    $srcaddr = "0.0.0.0";
+  # now, attempt to set the family to AF_INET6 if we can.  Some
+  # platforms don't have it (bug 4412 comment 29)...
+  # also, only set $ipv6 to true if that succeeds.
+  my $family;
+  if (HAS_SOCKET_INET6 && $ns=~/^${ip64}$/o && $ns!~/^${ip4}$/o) {
+    eval '$family = AF_INET6; $ipv6 = 1;';
+  }
+  if (!defined $family) {
+    $family = AF_INET;       # that didn't work ;)
   }
 
-  dbg("dns: name server: $ns, LocalAddr: $srcaddr");
+  dbg("dns: name server: $ns, family: $family, ipv6: $ipv6");
 
   # find next available unprivileged port (1024 - 65535)
   # starting at a random value to spread out use of ports
@@ -210,10 +184,10 @@ sub connect_sock {
         Proto => 'udp',
         LocalPort => $lport,
         Type => SOCK_DGRAM,
-        LocalAddr => $srcaddr,
+        Domain => $family,
     );
 
-    if ($ipv6opt) {
+    if (HAS_SOCKET_INET6) {
       $sock = IO::Socket::INET6->new(%args);
     } else {
       $sock = IO::Socket::INET->new(%args);
@@ -221,9 +195,11 @@ sub connect_sock {
     $errno = $!;
     if (defined $sock) {  # ok, got it
       last;
-    } elsif ($! == EADDRINUSE || $! == EACCES) {  # in use, let's try another source port
+    } elsif ($! == EADDRINUSE) {  # in use, let's try another source port
       dbg("dns: UDP port $lport already in use, trying another port");
     } else {
+      # did we fail due to the attempted use of an IPv6 nameserver?
+      $self->_ipv6_ns_warning()  if (!$ipv6 && $errno==EINVAL);
       warn "Error creating a DNS resolver socket: $errno";
       goto no_sock;
     }
@@ -316,7 +292,7 @@ sub _packet_id {
   my $ques = $questions[0];
 
   if (defined $ques) {
-    return join '/', $id, $ques->qname, $ques->qtype, $ques->qclass;
+    return $id . $ques->qname . $ques->qtype . $ques->qclass;
   } else {
     # odd.  this should not happen, but clearly some DNS servers
     # can return something that Net::DNS interprets as having no
@@ -356,8 +332,6 @@ if the reply id does not match the return value from bgsend.
 sub bgsend {
   my ($self, $host, $type, $class, $cb) = @_;
   return if $self->{no_resolver};
-
-  $self->{send_timed_out} = 0;
 
   my $pkt = $self->new_dns_packet($host, $type, $class);
 
@@ -430,9 +404,7 @@ sub poll_responses {
 
 =item $res->bgabort()
 
-Call this to release pending requests from memory, when aborting backgrounded
-requests, or when the scan is complete.
-C<Mail::SpamAssassin::PerMsgStatus::check> calls this before returning.
+Call this to release pending requests from memory when aborting backgrounded requests
 
 =cut
 
@@ -472,32 +444,10 @@ sub send {
 
     while (($now < $deadline) && (!defined($answerpkt))) {
       $self->poll_responses(1);
-      last if defined $answerpkt;
       $now = time;
     }
-    $self->{send_timed_out} = 1 unless ($now < $deadline);
   }
   return $answerpkt;
-}
-
-###########################################################################
-
-=item $res->errorstring()
-
-Little more than a stub for callers expecting this from C<Net::DNS::Resolver>.
-
-If called immediately after a call to $res->send this will return
-C<query timed out> if the $res->send DNS query timed out.  Otherwise 
-C<unknown error or no error> will be returned.
-
-No other errors are reported.
-
-=cut
-
-sub errorstring {
-  my ($self) = @_;
-  return 'query timed out' if $self->{send_timed_out};
-  return 'unknown error or no error';
 }
 
 ###########################################################################
@@ -527,7 +477,10 @@ Clean up for destruction.
 sub finish {
   my ($self) = @_;
   $self->finish_socket();
-  %{$self} = ();
+  if (!$self->{no_resolver}) {
+    delete $self->{res};
+  }
+  delete $self->{main};
 }
 
 ###########################################################################
@@ -551,6 +504,26 @@ sub reinit_post_fork {
   # and a new socket, so we don't have 5 spamds sharing the same
   # socket
   $self->connect_sock();
+}
+
+sub _ipv6_ns_warning {
+  my ($self) = @_;
+
+  # warn about the attempted use of an IPv6 nameserver without
+  # IO::Socket::INET6 installed (bug 4412)
+  my $firstns = $self->{res}->{nameservers}[0];
+
+  use Mail::SpamAssassin::Constants qw(:ip);
+  my $ip64 = IP_ADDRESS;
+  my $ip4 = IPV4_ADDRESS;
+
+  # was the nameserver in IPv6 format?
+  if ($firstns =~ /^${ip64}$/o && $firstns !~ /^${ip4}$/o) {
+    my $addr = inet_aton($firstns);
+    if (!defined $addr) {
+      die "IO::Socket::INET6 module is required to use IPv6 nameservers such as '$firstns': $@\n";
+    }
+  }
 }
 
 1;

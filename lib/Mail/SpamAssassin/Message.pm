@@ -44,6 +44,7 @@ package Mail::SpamAssassin::Message;
 
 use strict;
 use warnings;
+use bytes;
 
 use Mail::SpamAssassin;
 use Mail::SpamAssassin::Message::Node;
@@ -64,8 +65,7 @@ as a parameter.  The used hash key/value pairs are as follows:
 
 C<message> is either undef (which will use STDIN), a scalar of the
 entire message, an array reference of the message with 1 line per array
-element, and either a file glob or IO::File object which holds the entire
-contents of the message.
+element, or a file glob which holds the entire contents of the message.
 
 Note: The message is expected to generally be in RFC 2822 format, optionally
 including an mbox message separator line (the "From " line) as the first line.
@@ -95,24 +95,12 @@ my @DAY_OF_WEEK = qw/Sun Mon Tue Wed Thu Fri Sat/ ;
 sub new {
   my $class = shift;
   $class = ref($class) || $class;
+  my $self = $class->SUPER::new();
 
-  my($opts) = @_;
-  my $message = $opts->{'message'} || \*STDIN;
-  my $parsenow = $opts->{'parsenow'} || 0;
-  my $normalize = $opts->{'normalize'} || 0;
-
-  # Specifies whether or not to parse message/rfc822 parts into its own tree.
-  # If the # > 0, it'll subparse, otherwise it won't.  By default, do twenty
-  # levels deep.
-  my $subparse = defined $opts->{'subparse'} ? $opts->{'subparse'} : 20;
-
-  my $self = $class->SUPER::new({normalize=>$normalize});
-
-  $self->{tmpfiles} =           [];
   $self->{pristine_headers} =	'';
   $self->{pristine_body} =	'';
   $self->{mime_boundary_state} = {};
-  $self->{line_ending} =	"\012";
+  $self->{line_ending} =	"\n";
 
   bless($self,$class);
 
@@ -120,6 +108,14 @@ sub new {
   $self->{metadata} = Mail::SpamAssassin::Message::Metadata->new($self);
 
   # Ok, go ahead and do the message "parsing"
+  my($opts) = @_;
+  my $message = $opts->{'message'} || \*STDIN;
+  my $parsenow = $opts->{'parsenow'} || 0;
+
+  # Specifies whether or not to parse message/rfc822 parts into its own tree.
+  # If the # > 0, it'll subparse, otherwise it won't.  By default, do one
+  # level deep.
+  $self->{subparse} = defined $opts->{'subparse'} ? $opts->{'subparse'} : 20;
 
   # protect it from abuse ...
   local $_;
@@ -129,13 +125,10 @@ sub new {
   if (ref $message eq 'ARRAY') {
      @message = @{$message};
   }
-  elsif (ref $message eq 'GLOB' || ref $message eq 'IO::File') {
+  elsif (ref $message eq 'GLOB') {
     if (defined fileno $message) {
       @message = <$message>;
     }
-  }
-  elsif (ref $message) {
-    dbg("message: Input is a reference of unknown type!");
   }
   elsif (defined $message) {
     @message = split ( /^/m, $message );
@@ -183,8 +176,8 @@ sub new {
   # bug 4363
   # Check to see if we should do CRLF instead of just LF
   # For now, just check the first header and do whatever it does
-  if (@message && $message[0] =~ /\015\012/) {
-    $self->{line_ending} = "\015\012";
+  if (@message && $message[0] =~ /\r\n/) {
+    $self->{line_ending} = "\r\n";
     dbg("message: line ending changed to CRLF");
   }
 
@@ -211,7 +204,8 @@ sub new {
     else {
       # Ok, there's a header here, let's go ahead and add it in.
       if ($header) {
-        my ($key, $value) = split (/:/s, $header, 2);
+        # Yes, the /s is needed to match \n too.
+        my ($key, $value) = split (/:\s*(?=.)/s, $header, 2);
 
         # If it's not a valid header (aka: not in the form "foo: bar"), skip it.
         if (defined $value) {
@@ -266,7 +260,7 @@ sub new {
   my $start;
   # iterate over lines in reverse order
   for (my $cnt=$#message; $cnt>=0; $cnt--) {
-    $message[$cnt] =~ s/\015\012/\012/;
+    $message[$cnt] =~ s/\r\n/\n/;
 
     # line is blank
     if ($message[$cnt] !~ /\S/) {
@@ -288,31 +282,59 @@ sub new {
     }
   }
 
-  # Figure out the boundary
-  my ($boundary);
-  ($self->{'type'}, $boundary) = Mail::SpamAssassin::Util::parse_content_type($self->header('content-type'));
-  dbg("message: main message type: ".$self->{'type'});
-
-  # parse queue, simple array of parts to parse:
-  # 0: part object, already in the tree
-  # 1: boundary used to focus body parsing
-  # 2: message content
-  # 3: how many MIME subparts to parse down
-  #
-  $self->{'parse_queue'} = [ [ $self, $boundary, \@message, $subparse ] ];
-
   # If the message does need to get parsed, save off a copy of the body
   # in a format we can easily parse later so we don't have to rip from
   # pristine_body ...  If we do want to parse now, go ahead and do so ...
   #
   if ($parsenow) {
-    $self->parse_body();
+    $self->_do_parse(\@message);
+  }
+  else {
+    $self->{'toparse'} = \@message;
   }
 
   $self;
 }
 
 # ---------------------------------------------------------------------------
+
+=item _do_parse()
+
+Non-Public function which will initiate a MIME part parse (generates
+a tree) of the current message.  Typically called by find_parts()
+as necessary.
+
+=cut
+
+sub _do_parse {
+  my($self, $array) = @_;
+
+  # We can either be passed the array to parse, or we may have find it
+  # in the object data ...
+  my $toparse;
+  if (defined $array) {
+    $toparse = $array;
+  }
+  elsif (exists $self->{'toparse'}) {
+    $toparse = $self->{'toparse'};
+    delete $self->{'toparse'};
+  }
+
+  # If we're called when we don't need to be, then just go ahead and return.
+  return if (!defined $toparse);
+
+  dbg("message: ---- MIME PARSER START ----");
+
+  # Figure out the boundary
+  my ($boundary);
+  ($self->{'type'}, $boundary) = Mail::SpamAssassin::Util::parse_content_type($self->header('content-type'));
+  dbg("message: main message type: ".$self->{'type'});
+
+  # Make the tree
+  $self->parse_body( $self, $self, $boundary, $toparse, 1 );
+
+  dbg("message: ---- MIME PARSER END ----");
+}
 
 =item find_parts()
 
@@ -326,13 +348,13 @@ I<Mail::SpamAssassin::Message::Node> for more details.
 # objects which match.
 #
 sub find_parts {
-  my $self = shift;
+  my ($self, $re, $onlyleaves, $recursive) = @_;
 
   # ok, we need to do the parsing now...
-  $self->parse_body() if (exists $self->{'parse_queue'});
+  $self->_do_parse() if (exists $self->{'toparse'});
 
   # and pass through to the Message::Node version of the method
-  return $self->SUPER::find_parts(@_);
+  return $self->SUPER::find_parts($re, $onlyleaves, $recursive);
 }
 
 # ---------------------------------------------------------------------------
@@ -362,14 +384,7 @@ sub get_pristine_header {
   return $self->{pristine_headers} unless $hdr;
   my(@ret) = $self->{pristine_headers} =~ /^\Q$hdr\E:[ \t]+(.*?\n(?![ \t]))/smgi;
   if (@ret) {
-    # ensure the response retains taintedness (bug 5283)
-    if (wantarray) {
-      return map {
-                Mail::SpamAssassin::Util::taint_var($_);
-              } @ret;
-    } else {
-      return Mail::SpamAssassin::Util::taint_var($ret[-1]);
-    }
+    return wantarray ? @ret : $ret[-1];
   }
   else {
     return $self->get_header($hdr);
@@ -425,18 +440,18 @@ sub get_pristine_body {
 
 # ---------------------------------------------------------------------------
 
-=item extract_message_metadata($permsgstatus)
+=item extract_message_metadata($main)
 
 =cut
 
 sub extract_message_metadata {
-  my ($self, $permsgstatus) = @_;
+  my ($self, $main) = @_;
 
   # do this only once per message, it can be expensive
   if ($self->{already_extracted_metadata}) { return; }
   $self->{already_extracted_metadata} = 1;
 
-  $self->{metadata}->extract ($self, $permsgstatus);
+  $self->{metadata}->extract ($self, $main);
 }
 
 # ---------------------------------------------------------------------------
@@ -523,52 +538,15 @@ sub finish {
 
   # Clean ourself up
   $self->finish_metadata();
+  undef $self->{pristine_headers};
+  undef $self->{pristine_body};
+  delete $self->{pristine_headers};
+  delete $self->{pristine_body};
+  delete $self->{text_decoded};
+  delete $self->{text_rendered};
 
-  # delete temporary files
-  if ($self->{'tmpfiles'}) {
-    unlink @{$self->{'tmpfiles'}};
-    delete $self->{'tmpfiles'};
-  }
-
-  # These will only be in the root Message node
-  delete $self->{'mime_boundary_state'};
-  delete $self->{'mbox_sep'};
-  delete $self->{'normalize'};
-  delete $self->{'pristine_body'};
-  delete $self->{'pristine_headers'};
-  delete $self->{'line_ending'};
-  delete $self->{'missing_head_body_separator'};
-
-  my @toclean = ( $self );
-
-  # Go ahead and clean up all of the Message::Node parts
-  while (my $part = shift @toclean) {
-    delete $part->{'headers'};
-    delete $part->{'raw_headers'};
-    delete $part->{'header_order'};
-    delete $part->{'raw'};
-    delete $part->{'decoded'};
-    delete $part->{'rendered'};
-    delete $part->{'visible_rendered'};
-    delete $part->{'invisible_rendered'};
-    delete $part->{'type'};
-    delete $part->{'rendered_type'};
-
-    # if there are children nodes, add them to the queue of nodes to clean up
-    if (exists $part->{'body_parts'}) {
-      push(@toclean, @{$part->{'body_parts'}});
-      delete $part->{'body_parts'};
-    }
-  }
-}
-
-# also use a DESTROY method, just to ensure (as much as possible) that
-# temporary files are deleted even if the finish() method is omitted
-sub DESTROY {
-  my $self = shift;
-  if ($self->{'tmpfiles'}) {
-    unlink @{$self->{'tmpfiles'}};
-  }
+  # Destroy the tree ...
+  $self->SUPER::finish();
 }
 
 # ---------------------------------------------------------------------------
@@ -615,73 +593,32 @@ doesn't have a root node which points at the actual root node ...)
 =cut
 
 sub parse_body {
-  my($self) = @_;
+  my($self, $msg, $_msg, $boundary, $body, $initial) = @_;
 
-  # This shouldn't happen, but just in case, abort.
-  return unless (exists $self->{'parse_queue'});
+  # Figure out the simple content-type, or set it to text/plain
+  my $type = $_msg->header('Content-Type') || 'text/plain; charset=us-ascii';
 
-  dbg("message: ---- MIME PARSER START ----");
-
-  while (my $toparse = shift @{$self->{'parse_queue'}}) {
-    # multipart sections are required to have a boundary set ...  If this
-    # one doesn't, assume it's malformed and send it to be parsed as a
-    # non-multipart section
+  # multipart sections are required to have a boundary set ...  If this
+  # one doesn't, assume it's malformed and send it to be parsed as a
+  # non-multipart section
+  #
+  if ( $type =~ /^multipart\//i && defined $boundary && ($msg->{subparse} > 0)) {
+    # Treat an initial multipart parse differently.  This will keep the tree:
+    # obj(multipart->[ part1, part2 ]) instead of
+    # obj(obj(multipart ...))
     #
-    if ( $toparse->[0]->{'type'} =~ /^multipart\//i && defined $toparse->[1] && ($toparse->[3] > 0)) {
-      $self->_parse_multipart($toparse);
+    if ( $initial ) {
+      $self->_parse_multipart( $msg, $_msg, $boundary, $body );
     }
     else {
-      # If it's not multipart, go ahead and just deal with it.
-      $self->_parse_normal($toparse);
-
-      if ($toparse->[0]->{'type'} =~ /^message\b/i && ($toparse->[3] > 0)) {
-        # Just decode the part, but we don't care about the result here.
-        $toparse->[0]->decode(0);
-
-	# bug 5051: sometimes message/* parts have no content, and we get
-	# stuck waiting for STDIN, which is bad. :(
-        if ($toparse->[0]->{'decoded'}) {
-	  # Ok, so this part is still semi-recursive, since M::SA::Message calls
-	  # M::SA::Message, but we don't subparse the new message, and pull a
-	  # sneaky "steal our child's queue" maneuver to deal with it on our own
-	  # time.  Reference the decoded array directly since it's faster.
-	  # 
-          my $msg_obj = Mail::SpamAssassin::Message->new({
-    	    message	=>	$toparse->[0]->{'decoded'},
-	    parsenow	=>	0,
-	    normalize	=>	$self->{normalize},
-	    subparse	=>	$toparse->[3]-1,
-	    });
-
-	  # Add the new message to the current node
-          $toparse->[0]->add_body_part($msg_obj);
-
-	  # now this is the sneaky bit ... steal the sub-message's parse_queue
-	  # and add it to ours.  then we'll handle the sub-message in our
-	  # normal loop and get all the glory.  muhaha.  :)
-	  push(@{$self->{'parse_queue'}}, @{$msg_obj->{'parse_queue'}});
-	  delete $msg_obj->{'parse_queue'};
-
-	  # Ok, we've subparsed, so go ahead and remove the raw and decoded
-	  # data because we won't need them anymore (the tree under this part
-	  # will have that data)
-	  if (ref $toparse->[0]->{'raw'} eq 'GLOB') {
-	    # Make sure we close it if it's a temp file -- Bug 5166
-	    close ($toparse->[0]->{'raw'});
-	  }
-
-	  delete $toparse->[0]->{'raw'};
-	  
-	  delete $toparse->[0]->{'decoded'};
-        }
-      }
+      $self->_parse_multipart( $_msg, $_msg, $boundary, $body );
+      $msg->add_body_part( $_msg );
     }
   }
-
-  dbg("message: ---- MIME PARSER END ----");
-
-  # we're done parsing, so remove the queue variable
-  delete $self->{'parse_queue'};
+  else {
+    # If it's not multipart, go ahead and just deal with it.
+    $self->_parse_normal( $msg, $_msg, $boundary, $body );
+  }
 }
 
 =item _parse_multipart()
@@ -692,15 +629,7 @@ to generate the tree.
 =cut
 
 sub _parse_multipart {
-  my($self, $toparse) = @_;
-
-  my ($msg, $boundary, $body, $subparse) = @{$toparse};
-
-  # we're not supposed to be a leaf, so prep ourselves
-  $msg->{'body_parts'} = [];
-
-  # the next set of objects will be one level deeper
-  $subparse--;
+  my($self, $msg, $_msg, $boundary, $body) = @_;
 
   dbg("message: parsing multipart, got boundary: ".(defined $boundary ? $boundary : ''));
 
@@ -730,7 +659,7 @@ sub _parse_multipart {
   }
 
   # prepare a new tree node
-  my $part_msg = Mail::SpamAssassin::Message::Node->new({ normalize=>$self->{normalize} });
+  my $part_msg = Mail::SpamAssassin::Message::Node->new({ subparse=>$msg->{subparse}-1 });
   my $in_body = 0;
   my $header;
   my $part_array;
@@ -764,12 +693,7 @@ sub _parse_multipart {
       ($part_msg->{'type'}, $p_boundary) = Mail::SpamAssassin::Util::parse_content_type($part_msg->header('content-type'));
       $p_boundary ||= $boundary;
       dbg("message: found part of type ".$part_msg->{'type'}.", boundary: ".(defined $p_boundary ? $p_boundary : ''));
-
-      # we've created a new node object, so add it to the queue along with the
-      # text that belongs to that part, then add the new part to the current
-      # node to create the tree.
-      push(@{$self->{'parse_queue'}}, [ $part_msg, $p_boundary, $part_array, $subparse ]);
-      $msg->add_body_part($part_msg);
+      $self->parse_body( $msg, $part_msg, $p_boundary, $part_array, 0 );
 
       # rfc 1521 says /^--boundary--$/, some MUAs may just require /^--boundary--/
       # but this causes problems with horizontal lines when the boundary is
@@ -782,7 +706,7 @@ sub _parse_multipart {
 
       # make sure we start with a new clean node
       $in_body  = 0;
-      $part_msg = Mail::SpamAssassin::Message::Node->new({ normalize=>$self->{normalize} });
+      $part_msg = Mail::SpamAssassin::Message::Node->new({ subparse=>$msg->{subparse}-1 });
       undef $part_array;
       undef $header;
 
@@ -790,7 +714,7 @@ sub _parse_multipart {
     }
 
     if (!$in_body) {
-      # s/\s+$//;   # bug 5127: don't clean this up (yet)
+      s/\s+$//;
       if (m/^[\041-\071\073-\176]+:/) {
         if ($header) {
           my ( $key, $value ) = split ( /:\s*/, $header, 2 );
@@ -800,7 +724,7 @@ sub _parse_multipart {
 	next;
       }
       elsif (/^[ \t]/) {
-        # $_ =~ s/^\s*//;   # bug 5127, again
+        $_ =~ s/^\s*//;
         $header .= $_;
 	next;
       }
@@ -843,52 +767,77 @@ Generate a leaf node and add it to the parent.
 =cut
 
 sub _parse_normal {
-  my($self, $toparse) = @_;
-
-  my ($msg, $boundary, $body) = @{$toparse};
+  my ($self, $msg, $part_msg, $boundary, $body) = @_;
 
   dbg("message: parsing normal part");
 
   # 0: content-type, 1: boundary, 2: charset, 3: filename
-  my @ct = Mail::SpamAssassin::Util::parse_content_type($msg->header('content-type'));
+  my @ct = Mail::SpamAssassin::Util::parse_content_type($part_msg->header('content-type'));
+  $part_msg->{'type'} = $ct[0];
 
   # multipart sections are required to have a boundary set ...  If this
   # one doesn't, assume it's malformed and revert to text/plain
-  $msg->{'type'} = ($ct[0] !~ m@^multipart/@i || defined $boundary ) ? $ct[0] : 'text/plain';
-  $msg->{'charset'} = $ct[2];
+  $part_msg->{'type'} = 'text/plain' if ( $part_msg->{'type'} =~ /^multipart\//i && !defined $boundary );
 
   # attempt to figure out a name for this attachment if there is one ...
-  my $disp = $msg->header('content-disposition') || '';
+  my $disp = $part_msg->header('content-disposition') || '';
   if ($disp =~ /name="?([^\";]+)"?/i) {
-    $msg->{'name'} = $1;
+    $part_msg->{'name'} = $1;
   }
   elsif ($ct[3]) {
-    $msg->{'name'} = $ct[3];
+    $part_msg->{'name'} = $ct[3];
   }
 
-  $msg->{'boundary'} = $boundary;
+  $part_msg->{'raw'} = $body;
+  $part_msg->{'boundary'} = $boundary;
 
-  # If the part type is not one that we're likely to want to use, go
-  # ahead and write the part data out to a temp file -- why keep sucking
-  # up RAM with something we're not going to use?
-  #
-  if ($msg->{'type'} !~ m@^(?:text/(?:plain|html)$|message\b)@) {
-    my $filepath;
-    ($filepath, $msg->{'raw'}) = Mail::SpamAssassin::Util::secure_tmpfile();
+  # If this part is a message/* part, and the parent isn't also a
+  # message/* part (ie: the main part) go ahead and parse into a tree.
+  if ($part_msg->{'type'} =~ /^message\b/i && ($msg->{subparse} > 0)) {
+    # Get the part ready...
+    my $message = $part_msg->decode();
 
-    if ($filepath) {
-      # The temp file was created, add it to the list of pending deletions
-      # we cannot just delete immediately in the POSIX idiom, as this is
-      # unportable (to win32 at least)
-      push @{$self->{tmpfiles}}, $filepath;
-      $msg->{'raw'}->print(@{$body});
+    if ($message) {
+      my $msg_obj = Mail::SpamAssassin::Message->new({
+      	message		=>	$message,
+	parsenow	=>	1,
+	subparse	=>	$msg->{subparse}-1,
+	});
+
+      # main message is a message/* part ...
+      if ($msg == $part_msg) {
+        $msg->add_body_part($msg_obj);
+      }
+      else {
+        # Add the new part as a child to the parent
+        # NOTE: if the message only has this one part, we'll be recursive so delete
+        # the body_parts list appropriately.
+        $msg->add_body_part($part_msg);
+
+        $part_msg->add_body_part($msg_obj);
+      }
+
+      return;
     }
   }
-
-  # if the part didn't get a temp file, go ahead and store the data in memory
-  if (!exists $msg->{'raw'}) {
-    $msg->{'raw'} = $body;
+  else {
+    # leaves don't need the subparse value, so get rid of it
+    delete $part_msg->{subparse};
   }
+
+  # Add the new part as a child to the parent
+  # NOTE: if the message only has this one part, we'll be recursive so delete
+  # the body_parts list appropriately.
+  $msg->add_body_part($part_msg);
+
+  # now that we've added the leaf node, let's go ahead and kill
+  # body_parts (used for sub-trees).  there's no point for a leaf to have it,
+  # and if the main and child parts are the same, we'll end up being recursive,
+  # and well, let's avoid that. ;)
+  #
+  # BTW: please leave this after add_body_parts() since it'll add it back.
+  #
+  delete $part_msg->{body_parts};
 }
 
 # ---------------------------------------------------------------------------
@@ -901,7 +850,7 @@ sub get_rendered_body_text_array {
   $self->{text_rendered} = [];
 
   # Find all parts which are leaves
-  my @parts = $self->find_parts(qr/./,1);
+  my @parts = $self->find_parts(qr/^(?:text|message)\b/i,1);
   return $self->{text_rendered} unless @parts;
 
   # the html metadata may have already been set, so let's not bother if it's
@@ -909,12 +858,16 @@ sub get_rendered_body_text_array {
   my $html_needs_setting = !exists $self->{metadata}->{html};
 
   # Go through each part
-  my $text = $self->get_header ('subject') || "\n";
+  my $text = $self->get_header ('subject') || '';
   for(my $pt = 0 ; $pt <= $#parts ; $pt++ ) {
     my $p = $parts[$pt];
 
+    # bug 4843: skip text/calendar parts since they're usually an attachment
+    # and not displayed
+    next if ($p->{'type'} eq 'text/calendar');
+
     # put a blank line between parts ...
-    $text .= "\n";
+    $text .= "\n" if ( $text );
 
     my($type, $rnd) = $p->rendered(); # decode this part
     if ( defined $rnd ) {
@@ -928,6 +881,9 @@ sub get_rendered_body_text_array {
       if ($html_needs_setting && $type eq 'text/html') {
         $self->{metadata}->{html} = $p->{html_results};
       }
+    }
+    else {
+      $text .= $p->decode();
     }
   }
 
@@ -958,7 +914,7 @@ sub get_visible_rendered_body_text_array {
   $self->{text_visible_rendered} = [];
 
   # Find all parts which are leaves
-  my @parts = $self->find_parts(qr/./,1);
+  my @parts = $self->find_parts(qr/^(?:text|message)\b/i,1);
   return $self->{text_visible_rendered} unless @parts;
 
   # the html metadata may have already been set, so let's not bother if it's
@@ -966,12 +922,16 @@ sub get_visible_rendered_body_text_array {
   my $html_needs_setting = !exists $self->{metadata}->{html};
 
   # Go through each part
-  my $text = $self->get_header ('subject') || "\n";
+  my $text = $self->get_header ('subject') || '';
   for(my $pt = 0 ; $pt <= $#parts ; $pt++ ) {
     my $p = $parts[$pt];
 
+    # bug 4843: skip text/calendar parts since they're usually an attachment
+    # and not displayed
+    next if ($p->{'type'} eq 'text/calendar');
+
     # put a blank line between parts ...
-    $text .= "\n";
+    $text .= "\n" if ( $text );
 
     my($type, $rnd) = $p->visible_rendered(); # decode this part
     if ( defined $rnd ) {
@@ -985,6 +945,9 @@ sub get_visible_rendered_body_text_array {
       if ($html_needs_setting && $type eq 'text/html') {
         $self->{metadata}->{html} = $p->{html_results};
       }
+    }
+    else {
+      $text .= $p->decode();
     }
   }
 
@@ -1009,7 +972,7 @@ sub get_invisible_rendered_body_text_array {
   $self->{text_invisible_rendered} = [];
 
   # Find all parts which are leaves
-  my @parts = $self->find_parts(qr/./,1);
+  my @parts = $self->find_parts(qr/^(?:text|message)\b/i,1);
   return $self->{text_invisible_rendered} unless @parts;
 
   # the html metadata may have already been set, so let's not bother if it's
@@ -1020,6 +983,10 @@ sub get_invisible_rendered_body_text_array {
   my $text = '';
   for(my $pt = 0 ; $pt <= $#parts ; $pt++ ) {
     my $p = $parts[$pt];
+
+    # bug 4843: skip text/calendar parts since they're usually an attachment
+    # and not displayed
+    next if ($p->{'type'} eq 'text/calendar');
 
     # put a blank line between parts ...
     $text .= "\n" if ( $text );
@@ -1069,7 +1036,7 @@ sub get_decoded_body_text_array {
     next if ($parts[$pt]->{'type'} eq 'text/calendar');
 
     push(@{$self->{text_decoded}}, "\n") if ( @{$self->{text_decoded}} );
-    push(@{$self->{text_decoded}}, $parts[$pt]->decode());
+    push(@{$self->{text_decoded}}, split_into_array_of_short_lines($parts[$pt]->decode()));
   }
 
   return $self->{text_decoded};

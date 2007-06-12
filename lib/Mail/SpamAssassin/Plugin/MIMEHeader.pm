@@ -29,7 +29,7 @@ MIMEHeader - perform regexp tests against MIME headers
 This plugin allows regexp rules to be written against MIME headers in the
 message.
 
-=head1 RULE DEFINITIONS AND PRIVILEGED SETTINGS
+=head1 CONFIGURATION
 
 =over 4
 
@@ -46,10 +46,8 @@ individually as a separate string.
 
 Header names are considered case-insensitive.
 
-The header values are normally cleaned up a little; for example, whitespace
-around the newline character in "folded" headers will be replaced with a single
-space.  Append C<:raw> to the header name to retrieve the raw, undecoded value,
-including pristine whitespace, instead.
+The header values are normally cleaned up a little. Append C<:raw> to the
+header name to retrieve the raw, undecoded value instead.
 
 =back
 
@@ -64,10 +62,8 @@ use strict;
 use warnings;
 use bytes;
 
-use vars qw(@ISA @TEMPORARY_METHODS);
+use vars qw(@ISA);
 @ISA = qw(Mail::SpamAssassin::Plugin);
-
-@TEMPORARY_METHODS = (); 
 
 # ---------------------------------------------------------------------------
 
@@ -96,10 +92,9 @@ sub set_config {
 
   push (@cmds, {
     setting => 'mimeheader',
-    is_priv => 1,
     code => sub {
       my ($self, $key, $value, $line) = @_;
-      if ($value !~ /^(\S+)\s+(\S+)\s*([\=\!]\~)\s*(.+)$/) {
+      if ($value !~ /^(\S+)\s+(\S+)\s+([\=\!]\~)\s+(.+)$/) {
         return $Mail::SpamAssassin::Conf::INVALID_VALUE;
       }
 
@@ -110,7 +105,7 @@ sub set_config {
 
       return unless $self->{parser}->is_delimited_regexp_valid($rulename, $pattern);
 
-      $pattern = Mail::SpamAssassin::Util::make_qr($pattern);
+      $pattern = $pluginobj->make_qr($pattern);
       return $Mail::SpamAssassin::Conf::INVALID_VALUE unless $pattern;
 
       $self->{mimeheader_tests}->{$rulename} = {
@@ -134,7 +129,6 @@ sub set_config {
 
       $self->{parser}->add_test($rulename, $evalfn."()",
                 $Mail::SpamAssassin::Conf::TYPE_BODY_EVALS);
-
       my $evalcode = '
         sub Mail::SpamAssassin::Plugin::MIMEHeader::'.$evalfn.' {
           $_[0]->eval_hook_called($_[1], q{'.$rulename.'});
@@ -148,8 +142,6 @@ sub set_config {
       }
 
       $pluginobj->register_eval_rule($evalfn);
-
-      push @TEMPORARY_METHODS, "Mail::SpamAssassin::Plugin::MIMEHeader::${evalfn}";
     }
   });
 
@@ -176,12 +168,7 @@ sub eval_hook_called {
   }
 
   foreach my $p ($scanner->{msg}->find_parts(qr/./)) {
-    my $val;
-    if ($getraw) {
-      $val = $p->raw_header($hdr);
-    } else {
-      $val = $p->get_header($hdr);
-    }
+    my $val = $p->get_header($hdr, $getraw);
     $val ||= $if_unset;
 
     if ($val =~ ${pattern}) {
@@ -194,13 +181,26 @@ sub eval_hook_called {
 
 # ---------------------------------------------------------------------------
 
-sub finish_tests {
-  my ($self, $params) = @_;
+# turn "/foobar/i" into qr/(?i)foobar/
+sub make_qr {
+  my ($self, $pattern) = @_;
 
-  foreach my $method (@TEMPORARY_METHODS) {
-    undef &{$method};
+  my $re_delim;
+  if ($pattern =~ s/^m(\W)//) {     # m!foo/bar!
+    $re_delim = $1;
+  } else {                          # /foo\/bar/ or !foo/bar!
+    $pattern =~ s/^(\W)//; $re_delim = $1;
   }
-  @TEMPORARY_METHODS = ();      # clear for next time
+  if (!$re_delim) {
+    return;
+  }
+
+  $pattern =~ s/${re_delim}([imsx]*)$//;
+
+  my $mods = $1;
+  if ($mods) { $pattern = "(?".$mods.")".$pattern; }
+
+  return qr/$pattern/;
 }
 
 # ---------------------------------------------------------------------------

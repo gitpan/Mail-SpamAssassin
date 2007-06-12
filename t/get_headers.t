@@ -21,7 +21,7 @@ use SATest; sa_t_init("get_headers");
 
 use Mail::SpamAssassin;
 
-plan tests => 13;
+plan tests => 11;
 
 ##############################################
 
@@ -41,10 +41,6 @@ To7: "Foo Blah" <jm@foo>
 To8: "'Foo Blah'" <jm@foo>
 To9: "_$B!z8=6b$=$N>l$GEv$?$j!*!zEv_(B_$B$?$k!*!)$/$8!z7|>^%\%s%P!<!z_(B" <jm@foo>
 To10: "Some User" <"Some User"@foo>
-Hdr1:    foo  
-  bar
-	baz 
-  
 To11: "Some User"@foo
 
 Blah!
@@ -71,9 +67,7 @@ sub try {
   if ($expect eq $result) {
     return 1;
   } else {
-    my $le=$expect;$le=~s/\t/\\t/gs;$le =~s/\n/\\n/gs;
-    my $lr=$result;$lr=~s/\t/\\t/gs;$lr =~s/\n/\\n/gs;
-    warn "try: '$try' failed! expect: '$le' got: '$lr'\n";
+    warn "try: '$try' failed! expect: '$expect' got: '$result'\n";
     return 0;
   }
 }
@@ -89,6 +83,4 @@ ok(try('To8:addr', 'jm@foo'));
 ok(try('To9:addr', 'jm@foo'));
 ok(try('To10:addr', '"Some User"@foo'));
 ok(try('To11:addr', '"Some User"@foo'));
-ok(try('Hdr1', "foo   bar baz\n"));
-ok(try('Hdr1:raw', "    foo  \n  bar\n\tbaz \n  \n"));
 

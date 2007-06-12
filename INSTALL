@@ -93,9 +93,9 @@ http://wiki.apache.org/spamassassin/SingleUserUnixInstall
 	make
 	make install
 
-   Please see the file PACKAGING, sections "Changing paths in the Makefile"
-   and "Setting further options on the command line" for more informations
-   on available command line variables.
+Please see the file PACKAGING, sections "Changing paths in the Makefile"
+and "Setting further options on the command line" for more informations
+on available command line variables.
 
 4. If you already use procmail, skip to step 6.  If not, ensure procmail
    is installed using "which procmail" or install it from www.procmail.org.
@@ -112,11 +112,11 @@ http://wiki.apache.org/spamassassin/SingleUserUnixInstall
 :0fw: spamassassin.lock
 | /home/user/bin/spamassassin
 
-   The above line filters all incoming mail through SpamAssassin and tags
-   probable spam with a unique header.  If you would prefer to have spam
-   blocked and saved to a file called "caughtspam" in your home directory,
-   instead of passed through and tagged, append this directly below the above
-   lines:
+The above line filters all incoming mail through SpamAssassin and tags
+probable spam with a unique header.  If you would prefer to have spam
+blocked and saved to a file called "caughtspam" in your home directory,
+instead of passed through and tagged, append this directly below the above
+lines:
 
 :0:
 * ^X-Spam-Status: Yes
@@ -199,43 +199,15 @@ installed:
     Debian: apt-get install libdigest-sha1-perl
     Gentoo: emerge dev-perl/Digest-SHA1
 
-  - HTML::Parser >= 3.43 (from CPAN)
+  - HTML::Parser >= 3.24 (from CPAN)
+
+    Version 3.31 or later is recommended.
 
     HTML is used for an ever-increasing amount of email so this dependency
     is unavoidable.  Run "perldoc -q html" for additional information.
 
     Debian: apt-get install libhtml-parser-perl
     Gentoo: emerge dev-perl/HTML-Parser
-
-  - Net::DNS (from CPAN)
-
-    Used for all DNS-based tests (SBL, XBL, SpamCop, DSBL, etc.),
-    perform MX checks, used when manually reporting spam to SpamCop,
-    and used by sa-update to gather version information.
-
-    You need to make sure the Net::DNS version is sufficiently up-to-date:
-
-      - version 0.34 or higher on Unix systems
-      - version 0.46 or higher on Windows systems
-
-  - LWP (aka libwww-perl) (from CPAN)
-
-    This set of modules will include both the LWP::UserAgent and
-    HTTP::Date modules, used by sa-update to retrieve update archives.
-
-  - HTTP::Date (from CPAN)
-
-    Used by sa-update to deal with certain Date requests.
-
-  - IO::Zlib (from CPAN)
-
-    Used by sa-update to uncompress update archives.
-    Version 1.04 or later is required.
-
-  - Archive::Tar (from CPAN)
-
-    Used by sa-update to expand update archives.
-    Version 1.23 or later is required.
 
 
 Optional Modules
@@ -267,20 +239,30 @@ version is too low for them to be used.
     http://wiki.apache.org/spamassassin/DbFileSleepBug for details.
 
 
+  - Net::DNS (from CPAN)
+
+    Used for all DNS-based tests (SBL, XBL, SpamCop, DSBL, etc.),
+    perform MX checks, used when manually reporting spam to SpamCop,
+    and used by sa-update to gather version information.  Recommended.
+
+    If this is installed and you are using network tests of any variety
+    (which is the default), then you need to make sure the Net::DNS
+    version is sufficiently up-to-date:
+
+      - version 0.34 or higher on Unix systems
+      - version 0.46 or higher on Windows systems
+
+
   - Net::SMTP (from CPAN)
 
     Used when manually reporting spam to SpamCop.
 
 
-  - Mail::SPF (from CPAN) or Mail::SPF::Query (from CPAN)
+  - Mail::SPF::Query (from CPAN)
 
     Used to check DNS Sender Policy Framework (SPF) records to fight email
     address forgery and make it easier to identify spams.
 
-    Either of Mail::SPF or Mail::SPF::Query can be used but Mail::SPF is
-    preferred as it is the current reference implementation for RFC 4408.
-
-    Net::DNS version 0.58 or higher is required to use Mail::SPF.
     Net::DNS version 0.34 or higher is required to use Mail::SPF::Query.
 
 
@@ -312,14 +294,6 @@ version is too low for them to be used.
     compatibile spamc.)
 
 
-  - Compress::Zlib (from CPAN)
-
-    If you wish to use the optional zlib compression for communication
-    between spamc and spamd (the -z option to spamc), useful for
-    long-distance use of spamc over the internet, you need to install
-    this module.
-
-
   - Time::HiRes (from CPAN)
 
     If this module is installed, the processing times are logged/reported
@@ -329,26 +303,15 @@ version is too low for them to be used.
   - Mail::DKIM (from CPAN)
 
     If this module is installed, and you enable the DKIM plugin,
-    SpamAssassin will perform DKIM lookups when a DKIM-Signature header is
-    present in the message headers.  If Mail::DKIM version 0.20 or later
-    is installed, this will also perform Domain Key lookups on
-    DomainKey-Signature headers, without requiring the Mail::DomainKeys
-    module.
-    
-    Note that the Mail::DKIM module in turn requres the OpenSSL libraries.
+    SpamAssassin will perform Domain Keys Identified Mail lookups when
+    DKIM information is present in the message headers.
 
 
   - Mail::DomainKeys (from CPAN)
 
     If this module is installed, and you enable the DomainKeys plugin,
-    SpamAssassin will perform Domain Key lookups when Domain Key
-    information is present in the message headers.
-
-    Note that Mail::DKIM version 0.20 or later will perform Domain Key
-    lookups, so this may be redundant.
-    
-    Note that the Mail::DomainKeys module in turn requres the OpenSSL
-    libraries and the CPAN module Crypt::OpenSSL::Bignum.
+    SpamAssassin will perform domain key lookups when domain key information
+    is present in the message headers.
 
 
   - DBI *and* DBD driver/modules for your database (from CPAN)
@@ -359,39 +322,21 @@ version is too low for them to be used.
     your database.
 
 
-  - Encode::Detect (from CPAN)
+  - LWP (from CPAN)
 
-    If you plan to use the normalize_charset config setting to detect
-    charsets and convert them into Unicode, you will need to install
-    this module.
+    Used by sa-update to retrieve update archives.
 
 
-  - Apache::Test (from CPAN)
+  - IO::Zlib (from CPAN)
 
-    If you plan to run the Apache2 version of spamd in the
-    "spamd-apache2" directory, you will need to install this
-    module.
-
-
-  - Apache 2 and mod_perl
-
-    If you plan to run the Apache2 version of spamd in the "spamd-apache2"
-    directory, you will need to ensure these are installed.
-
-    Ubuntu: sudo apt-get install apache2 libapache2-mod-perl2
+    Used by sa-update to uncompress update archives.
+    Version 1.04 or later is required.
 
 
-  - Razor2
+  - Archive::Tar (from CPAN)
 
-    If you plan to use Vipul's Razor, note that versions up to and
-    including version 2.82 include a bug that will slow down the entire
-    perl interpreter.  This bug has more details, and a patch:
-
-    http://issues.apache.org/SpamAssassin/show_bug.cgi?id=5312
-
-    If you do not plan to use this plugin, be sure to comment out
-    its loadplugin line in "/etc/mail/spamassassin/v310.pre".  This
-    will ensure that the slowdown will not affect you.
+    Used by sa-update to expand update archives.
+    Version 1.23 or later is required.
 
 
 What Next?

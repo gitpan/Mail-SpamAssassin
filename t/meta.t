@@ -39,14 +39,14 @@ for (my $scoreset = 0; $scoreset < 4; $scoreset++) {
   unlink $output || die;
   %rules = ();
   %scores = ();
-  if (system("$prefix/build/parse-rules-for-masses -o $output -d \"$prefix/rules\" -s $scoreset -x")) {
+  if (system("$prefix/masses/parse-rules-for-masses -o $output -d \"$prefix/rules\" -s $scoreset -x")) {
     warn "parse-rules-for-masses failed!";
   }
   eval {
     require "log/rules-$scoreset.pl";
   };
   if ($@) {
-    warn "log/rules-$scoreset.pl is unparseable: $@";
+    warn "tmp/rules.pl is unparseable: $@";
     warn "giving up on test.";
     ok(1);
     ok(1);
@@ -54,7 +54,6 @@ for (my $scoreset = 0; $scoreset < 4; $scoreset++) {
   }
 
   while (my ($name, $info) = each %rules) {
-    next if ($name eq '_scoreset');
     my $type = $info->{type} || "unknown";
     # look at meta rules that are not disabled
     if ($type eq "meta" && ($name =~ /^__/ || $info->{score} != 0)) {

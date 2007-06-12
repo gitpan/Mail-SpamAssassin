@@ -18,7 +18,6 @@ if (-e 'test_dir') {            # running from test directory, not ..
 use strict;
 use SATest; sa_t_init("rule_names");
 use Test;
-
 use Mail::SpamAssassin;
 use Digest::SHA1;
 use vars qw(%patterns %anti_patterns);
@@ -51,24 +50,12 @@ for my $test (@tests) {
   $anti_patterns{"$test,"} = "P_" . $i++;
 }
 
-our $RUN_THIS_TEST;
-
-BEGIN {
-  $RUN_THIS_TEST = conf_bool('run_rule_name_tests');
-
-  plan tests => (!$RUN_THIS_TEST ? 0 : 
-                  scalar(keys %anti_patterns) + scalar(keys %patterns)),
-  onfail => sub {
-      warn "\n\n   Note: rule_name failures may be only cosmetic" .
-      "\n        but must be fixed before release\n\n";
-  };
+# settings
+plan tests => (scalar(keys %anti_patterns) + scalar(keys %patterns)),
+onfail => sub {
+    warn "\n\n   Note: rule_name failures may be only cosmetic" .
+    "\n        but must be fixed before release\n\n";
 };
-
-print "NOTE: this test requires 'run_rule_name_tests' set to 'y'.\n";
-exit unless $RUN_THIS_TEST;
-
-# ---------------------------------------------------------------------------
-
 
 tstprefs ("
 	# set super low threshold, so always marked as spam

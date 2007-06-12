@@ -58,7 +58,7 @@ The type of this setting:
 
            - $CONF_TYPE_STRING: string
            - $CONF_TYPE_NUMERIC: numeric value (float or int)
-           - $CONF_TYPE_BOOL: boolean (0/no or 1/yes)
+           - $CONF_TYPE_BOOL: boolean (0 or 1)
            - $CONF_TYPE_TEMPLATE: template, like "report"
            - $CONF_TYPE_ADDRLIST: address list, like "whitelist_from"
            - $CONF_TYPE_HASH_KEY_VALUE: hash key/value pair,
@@ -191,12 +191,8 @@ sub build_command_luts {
     # next, its priority (used to ensure frequently-used params
     # are parsed first)
     my $cmdname = $cmd->{command} || $cmd->{setting};
-    $self->{command_luts}->{$set}->{$cmdname} = $cmd;
-
-    if ($cmd->{aliases} && scalar @{$cmd->{aliases}} > 0) {
-      foreach my $name (@{$cmd->{aliases}}) {
-        $self->{command_luts}->{$set}->{$name} = $cmd;
-      }
+    foreach my $name ($cmdname, @{$cmd->{aliases}}) {
+      $self->{command_luts}->{$set}->{$name} = $cmd;
     }
   }
 }
@@ -239,7 +235,6 @@ sub parse {
   my @if_stack = ();
   my @conf_lines = split (/\n/, $_[1]);
   my $line;
-  $self->{if_stack} = \@if_stack;
 
   while (defined ($line = shift @conf_lines)) {
     local ($1);         # bug 3838: prevent random taint flagging of $1
@@ -278,10 +273,8 @@ sub parse {
           my $cond = pop @if_stack;
 
           if ($cond->{type} eq 'if') {
-            my $msg = "config: unclosed 'if' in ".
+            warn "config: unclosed 'if' in ".
                   $self->{currentfile}.": if ".$cond->{conditional}."\n";
-            warn $msg;
-            $self->lint_warn($msg, undef);
           }
           else {
             # die seems a bit excessive here, but this shouldn't be possible
@@ -289,6 +282,7 @@ sub parse {
             die "config: unknown 'if' type: ".$cond->{type}."\n";
           }
 
+          $conf->{errors}++;
           @if_stack = ();
         }
         $skip_parsing = 0;
@@ -323,25 +317,9 @@ sub parse {
       next;
     }
 
-    if ($key eq 'else') {
-      # TODO: if/else/else won't get flagged here :(
-      if (!@if_stack) {
-        $parse_error = "config: found else without matching conditional";
-        goto failed_line;
-      }
-
-      $skip_parsing = !$skip_parsing;
-      next;
-    }
-
     # and the endif statement:
     if ($key eq 'endif') {
       my $lastcond = pop @if_stack;
-      if (!defined $lastcond) {
-        $parse_error = "config: found endif without matching conditional";
-        goto failed_line;
-      }
-
       $skip_parsing = $lastcond->{skip_parsing};
       next;
     }
@@ -364,14 +342,13 @@ sub parse {
       #$value =~ s/^(\d+)\.(\d{1,3}).*$/sprintf "%d.%d", $1, $2/e;
 
       if ($ver ne $value) {
-        my $msg = "config: configuration file \"$self->{currentfile}\" requires ".
-                "version $value of SpamAssassin, but this is code version ".
+        warn "config: configuration file \"$self->{currentfile}\" requires version ".
+                "$value of SpamAssassin, but this is code version ".
                 "$ver. Maybe you need to use ".
                 "the -C switch, or remove the old config files? ".
                 "Skipping this file";
-        warn $msg;
-        $self->lint_warn($msg, undef);
         $skip_parsing = 1;
+        $conf->{errors}++;
       }
       next;
     }
@@ -443,17 +420,23 @@ failed_line:
       if ($migrated_keys{$key}) {
         # this key was moved into a plugin; non-fatal for lint
         $is_error = 0;
-        $msg = "config: failed to parse, now a plugin, skipping, in \"$self->{currentfile}\": $line";
+        $msg = "config: failed to parse, now a plugin, skipping: $line";
       } else {
         # a real syntax error; this is fatal for --lint
-        $msg = "config: failed to parse line, skipping, in \"$self->{currentfile}\": $line";
+        $msg = "config: failed to parse line, skipping: $line";
       }
     }
 
-    $self->lint_warn($msg, undef, $is_error);
-  }
+    if ($conf->{lint_rules}) {
+      warn $msg."\n";
+    } else {
+      info($msg);
+    }
 
-  delete $self->{if_stack};
+    if ($is_error) {
+      $conf->{errors}++;
+    }
+  }
 
   $self->lint_check();
   $self->set_default_scores();
@@ -491,7 +474,7 @@ sub handle_conditional {
   }
 
   if ($bad) {
-    $self->lint_warn("bad 'if' line, in \"$self->{currentfile}\"", undef);
+    $conf->{errors}++;
     return -1;
   }
 
@@ -521,18 +504,22 @@ sub cond_clause_plugin_loaded {
 sub lint_check {
   my ($self) = @_;
   my $conf = $self->{conf};
+  my ($k, $v);
 
-  if ($conf->{lint_rules}) {
+  if ($conf->{lint_rules})
+  {
     # Check for description and score issues in lint fashion
-    while ( my $k = each %{$conf->{descriptions}} ) {
+    while ( ($k,$v) = each %{$conf->{descriptions}} ) {
       if (!exists $conf->{tests}->{$k}) {
-        $self->lint_warn("config: warning: description exists for non-existent rule $k\n", $k);
+        warn "config: warning: description exists for non-existent rule $k\n";
+        $conf->{errors}++;
       }
     }
 
     while ( my($sk) = each %{$conf->{scores}} ) {
       if (!exists $conf->{tests}->{$sk}) {
-        $self->lint_warn("config: warning: score set for non-existent rule $sk\n", $sk);
+        warn "config: warning: score set for non-existent rule $sk\n";
+        $conf->{errors}++;
       }
     }
   }
@@ -546,13 +533,14 @@ sub lint_check {
 sub set_default_scores {
   my ($self) = @_;
   my $conf = $self->{conf};
+  my ($k, $v);
 
-  while ( my $k = each %{$conf->{tests}} ) {
+  while ( ($k,$v) = each %{$conf->{tests}} ) {
     if ( ! exists $conf->{scores}->{$k} ) {
       # T_ rules (in a testing probationary period) get low, low scores
       my $set_score = ($k =~/^T_/) ? 0.01 : 1.0;
 
-      $set_score = -$set_score if ( ($conf->{tflags}->{$k}||'') =~ /\bnice\b/ );
+      $set_score = -$set_score if ( $conf->{tflags}->{$k} =~ /\bnice\b/ );
       for my $index (0..3) {
         $conf->{scoreset}->[$index]->{$k} = $set_score;
       }
@@ -610,16 +598,6 @@ sub set_bool_value {
   unless (defined $value && $value !~ /^$/) {
     return $Mail::SpamAssassin::Conf::MISSING_REQUIRED_VALUE;
   }
-
-  # bug 4462: allow yes/1 and no/0 for boolean values
-  $value = lc $value;
-  if ($value eq 'yes') {
-    $value = 1;
-  }
-  elsif ($value eq 'no') {
-    $value = 0;
-  }
-
   unless ($value =~ /^[01]$/) {
     return $Mail::SpamAssassin::Conf::INVALID_VALUE;
   }
@@ -683,12 +661,6 @@ sub finish_parsing {
   my ($self) = @_;
   my $conf = $self->{conf};
 
-  $self->trace_meta_dependencies();
-  $self->fix_priorities();
-  $self->find_dup_rules();          # must be after fix_priorities()
-
-  dbg("conf: finish parsing");
-
   while (my ($name, $text) = each %{$conf->{tests}}) {
     my $type = $conf->{test_types}->{$name};
     my $priority = $conf->{priority}->{$name} || 0;
@@ -696,39 +668,53 @@ sub finish_parsing {
 
     # eval type handling
     if (($type & 1) == 1) {
+      my @args;
       if (my ($function, $args) = ($text =~ m/(.*?)\s*\((.*?)\)\s*$/)) {
-        my ($packed, $argsref) =
-                $self->pack_eval_method($function, $args, $name, $text);
-
-        if (!$packed) {
-          # we've already warned about this
-        }
+	if ($args) {
+	  # bug 4419: Parse quoted strings, unquoted alphanumerics/floats and
+	  # both unquoted IPv4 and IPv6 addresses.  s// is used so that we can
+	  # determine whether or not we successfully parsed ALL arguments.
+	  while ($args =~ s/^\s*(?:['"](.*?)['"]|([\d\.:A-Za-z]+?))\s*(?:,\s*|$)//) {
+	    if (defined $1) {
+	      push @args, $1;
+	    }
+	    else {
+	      push @args, $2;
+	    }
+	  }
+	}
+        unshift(@args, $function);
+	if ($args) {
+	  $conf->{errors}++;
+	  warn("syntax error (unparsable argument: $args) for eval function: $name: $text");
+	}
         elsif ($type == $Mail::SpamAssassin::Conf::TYPE_BODY_EVALS) {
-          $conf->{body_evals}->{$priority}->{$name} = $packed;
+          $conf->{body_evals}->{$priority}->{$name} = \@args;
         }
         elsif ($type == $Mail::SpamAssassin::Conf::TYPE_HEAD_EVALS) {
-          $conf->{head_evals}->{$priority}->{$name} = $packed;
+          $conf->{head_evals}->{$priority}->{$name} = \@args;
         }
         elsif ($type == $Mail::SpamAssassin::Conf::TYPE_RBL_EVALS) {
           # We don't do priorities for $Mail::SpamAssassin::Conf::TYPE_RBL_EVALS
-          # we also use the arrayref instead of the packed string
-          $conf->{rbl_evals}->{$name} = [ $function, @$argsref ];
+          $conf->{rbl_evals}->{$name} = \@args;
         }
         elsif ($type == $Mail::SpamAssassin::Conf::TYPE_RAWBODY_EVALS) {
-          $conf->{rawbody_evals}->{$priority}->{$name} = $packed;
+          $conf->{rawbody_evals}->{$priority}->{$name} = \@args;
         }
         elsif ($type == $Mail::SpamAssassin::Conf::TYPE_FULL_EVALS) {
-          $conf->{full_evals}->{$priority}->{$name} = $packed;
+          $conf->{full_evals}->{$priority}->{$name} = \@args;
         }
         #elsif ($type == $Mail::SpamAssassin::Conf::TYPE_URI_EVALS) {
-        #  $conf->{uri_evals}->{$priority}->{$name} = $packed;
+        #  $conf->{uri_evals}->{$priority}->{$name} = \@args;
         #}
         else {
-          $self->lint_warn("unknown type $type for $name: $text", $name);
+          $conf->{errors}++;
+	  warn("unknown type $type for $name: $text");
         }
       }
       else {
-        $self->lint_warn("syntax error for eval function $name: $text", $name);
+        $conf->{errors}++;
+        warn("syntax error for eval function $name: $text");
       }
     }
     # non-eval tests
@@ -740,6 +726,15 @@ sub finish_parsing {
         $conf->{head_tests}->{$priority}->{$name} = $text;
       }
       elsif ($type == $Mail::SpamAssassin::Conf::TYPE_META_TESTS) {
+        # Meta Tests must have a priority of at least META_TEST_MIN_PRIORITY,
+        # if it's lower then reset the value
+        if ($priority < META_TEST_MIN_PRIORITY) {
+          # we need to lower the count of the old priority and raise the
+          # count of the new priority
+          $conf->{priorities}->{$priority}--;
+          $priority = META_TEST_MIN_PRIORITY;
+          $conf->{priorities}->{$priority}++;
+        }
         $conf->{meta_tests}->{$priority}->{$name} = $text;
       }
       elsif ($type == $Mail::SpamAssassin::Conf::TYPE_URI_TESTS) {
@@ -752,7 +747,8 @@ sub finish_parsing {
         $conf->{full_tests}->{$priority}->{$name} = $text;
       }
       else {
-        $self->lint_warn("unknown type $type for $name: $text", $name);
+        $conf->{errors}++;
+        warn("unknown type $type for $name: $text");
       }
     }
   }
@@ -762,165 +758,8 @@ sub finish_parsing {
   # named this way just in case we ever want a "finish_parsing_start"
   $conf->{main}->call_plugins("finish_parsing_end", { conf => $conf });
 
-  # free up stuff we no longer need
-  delete $conf->{tests};
-  delete $conf->{priority};
-  delete $conf->{test_types};
-}
-
-sub trace_meta_dependencies {
-  my ($self) = @_;
-  my $conf = $self->{conf};
-  $conf->{meta_dependencies} = { };
-
-  foreach my $name (keys %{$conf->{tests}}) {
-    next unless ($conf->{test_types}->{$name}
-                    == $Mail::SpamAssassin::Conf::TYPE_META_TESTS);
-
-    my $deps = [ ];
-    my $alreadydone = { };
-    $self->_meta_deps_recurse($conf, $name, $name, $deps, $alreadydone);
-    $conf->{meta_dependencies}->{$name} = join (' ', @{$deps});
-  }
-}
-
-sub _meta_deps_recurse {
-  my ($self, $conf, $toprule, $name, $deps, $alreadydone) = @_;
-
-  # Only do each rule once per top-level meta; avoid infinite recursion
-  return if $alreadydone->{$name};
-  $alreadydone->{$name} = 1;
-
-  # Obviously, don't trace empty or nonexistent rules
-  my $rule = $conf->{tests}->{$name};
-  return unless $rule;
-
-  # Lex the rule into tokens using a rather simple RE method ...
-  my $lexer = ARITH_EXPRESSION_LEXER;
-  my @tokens = ($rule =~ m/$lexer/g);
-
-  # Go through each token in the meta rule
-  foreach my $token (@tokens) {
-    # has to be an alpha+numeric token
-    next if ($token =~ /^(?:\W+|[+-]?\d+(?:\.\d+)?)$/);
-    # and has to be a rule name
-    next unless exists $conf->{tests}->{$token};
-
-    # add and recurse
-    push @{$deps}, $token;
-    $self->_meta_deps_recurse($conf, $toprule, $token, $deps, $alreadydone);
-  }
-}
-
-sub fix_priorities {
-  my ($self) = @_;
-  my $conf = $self->{conf};
-
-  die unless $conf->{meta_dependencies};    # order requirement
-  my $pri = $conf->{priority};
-
-  # sort into priority order, lowest first -- this way we ensure that if we
-  # rearrange the pri of a rule early on, we cannot accidentally increase its
-  # priority later.
-  foreach my $rule (sort {
-            $pri->{$a} <=> $pri->{$b}
-          } keys %{$pri})
-  {
-    # we only need to worry about meta rules -- they are the
-    # only type of rules which depend on other rules
-    my $deps = $conf->{meta_dependencies}->{$rule};
-    next unless (defined $deps);
-
-    my $basepri = $pri->{$rule};
-    foreach my $dep (split ' ', $deps) {
-      my $deppri = $pri->{$dep};
-      if ($deppri > $basepri) {
-        dbg("rules: $rule (pri $basepri) requires $dep (pri $deppri): fixed");
-        $pri->{$dep} = $basepri;
-      }
-    }
-  }
-}
-
-sub find_dup_rules {
-  my ($self) = @_;
-  my $conf = $self->{conf};
-
-  my %names_for_text = ();
-  my %dups = ();
-  while (my ($name, $text) = each %{$conf->{tests}}) {
-    my $type = $conf->{test_types}->{$name};
-    my $tf = ($conf->{tflags}->{$name}||''); $tf =~ s/\s+/ /gs;
-    # ensure similar, but differently-typed, rules are not marked as dups;
-    # take tflags into account too due to "tflags multiple"
-    $text = "$type\t$text\t$tf";
-
-    if (defined $names_for_text{$text}) {
-      $names_for_text{$text} .= " ".$name;
-      $dups{$text} = undef;     # found (at least) one
-    } else {
-      $names_for_text{$text} = $name;
-    }
-  }
-
-  foreach my $text (keys %dups) {
-    my $first;
-    my $first_pri;
-    my @names = sort {$a cmp $b} split(' ', $names_for_text{$text});
-    foreach my $name (@names) {
-      my $priority = $conf->{priority}->{$name} || 0;
-
-      if (!defined $first || $priority < $first_pri) {
-        $first_pri = $priority;
-        $first = $name;
-      }
-    }
-    # $first is now the earliest-occurring rule. mark others as dups
-
-    my @dups = ();
-    foreach my $name (@names) {
-      next if $name eq $first;
-      push @dups, $name;
-      delete $conf->{tests}->{$name};
-    }
-
-    dbg("rules: $first merged duplicates: ".join(' ', @dups));
-    $conf->{duplicate_rules}->{$first} = \@dups;
-  }
-}
-
-sub pack_eval_method {
-  my ($self, $function, $args, $name, $text) = @_;
-
-  my @args;
-  if ($args) {
-    # bug 4419: Parse quoted strings, unquoted alphanumerics/floats and
-    # both unquoted IPv4 and IPv6 addresses.  s// is used so that we can
-    # determine whether or not we successfully parsed ALL arguments.
-    while ($args =~ s/^\s*(?:['"](.*?)['"]|([\d\.:A-Za-z]+?))\s*(?:,\s*|$)//) {
-      if (defined $1) {
-        push @args, $1;
-      }
-      else {
-        push @args, $2;
-      }
-    }
-  }
-
-  if ($args) {
-    $self->lint_warn("syntax error (unparsable argument: $args) for eval function: $name: $text", $name);
-    return;
-  }
-
-  my $argstr = $function;
-  $argstr =~ s/\s+//gs;
-
-  if (scalar @args > 0) {
-    $argstr .= ',' . join (', ', map {
-            s/\#/[HASH]/gs; "q#".$_."#" 
-          } @args);
-  }
-  return ($argstr, \@args);
+  delete $conf->{tests};                # free it up
+  delete $conf->{priority};             # free it up
 }
 
 ###########################################################################
@@ -929,48 +768,38 @@ sub lint_trusted_networks {
   my ($self) = @_;
   my $conf = $self->{conf};
 
+  my $nt = $conf->{trusted_networks};
+  my $ni = $conf->{internal_networks};
+
   # validate trusted_networks and internal_networks, bug 4760.
   # check that all internal_networks are listed in trusted_networks
-  # too.  do the same for msa_networks, but check msa_networks against
-  # internal_networks if trusted_networks aren't defined
+  # too.
 
-  my ($nt, $matching_against);
-  if ($conf->{trusted_networks_configured}) {
-    $nt = $conf->{trusted_networks};
-    $matching_against = 'trusted_networks';
-  } elsif ($conf->{internal_networks_configured}) {
-    $nt = $conf->{internal_networks};
-    $matching_against = 'internal_networks';
-  } else {
-    return;
-  }
-
-  foreach my $net_type ('internal_networks', 'msa_networks') {
-    next unless $conf->{"${net_type}_configured"};
-    next if $net_type eq $matching_against;
-
+  if ($ni->get_num_nets() > 0 && $nt->get_num_nets() > 0) {
     my $replace_nets;
-    my @valid_net_list = ();
-    my $net_list = $conf->{$net_type};
+    my @valid_ni = ();
 
-    foreach my $net (@{$net_list->{nets}}) {
+    foreach my $net (@{$ni->{nets}}) {
       # don't check to see if an excluded network is included - that's senseless
       if (!$net->{exclude} && !$nt->contains_net($net)) {
-        my $msg = "$matching_against doesn't contain $net_type entry '".
-                  ($net->{as_string})."'";
+        my $msg = "trusted_networks doesn't contain internal_networks entry '".
+                ($net->{as_string})."'\n";
 
-        $self->lint_warn($msg, undef);      # complain
+        if ($conf->{lint_rules}) {
+          warn $msg;
+          $conf->{errors}++;
+        }
         $replace_nets = 1;  # and omit it from the new internal set
       }
       else {
-        push @valid_net_list, $net;
+        push @valid_ni, $net;
       }
     }
 
     if ($replace_nets) {
       # something was invalid. replace the old nets list with a fixed version
       # (which may be empty)
-      $net_list->{nets} = \@valid_net_list;
+      $ni->{nets} = \@valid_ni;
     }
   }
 }
@@ -983,8 +812,9 @@ sub add_test {
 
   # Don't allow invalid names ...
   if ($name !~ /^\D\w*$/) {
-    $self->lint_warn("config: error: rule '$name' has invalid characters ".
-	   "(not Alphanumeric + Underscore + starting with a non-digit)\n", $name);
+    warn "config: error: rule '$name' has invalid characters ".
+	   "(not Alphanumeric + Underscore + starting with a non-digit)\n";
+    $conf->{errors}++;
     return;
   }
 
@@ -992,16 +822,18 @@ sub add_test {
   # characters throw warnings).  Check this separately from the above
   # pattern to avoid vague error messages.
   if (length $name > 200) {
-    $self->lint_warn("config: error: rule '$name' is way too long ".
-	   "(recommended maximum length is 22 characters)\n", $name);
+    warn "config: error: rule '$name' is way too long ".
+	   "(recommended maximum length is 22 characters)\n";
+    $conf->{errors}++;
     return;
   }
 
   # Warn about, but use, long rule names during --lint
   if ($conf->{lint_rules}) {
     if (length($name) > 50 && $name !~ /^__/ && $name !~ /^T_/) {
-      $self->lint_warn("config: warning: rule name '$name' is over 50 chars ".
-	     "(recommended maximum length is 22 characters)\n", $name);
+      warn "config: warning: rule name '$name' is over 50 chars ".
+	     "(recommended maximum length is 22 characters)\n";
+      $conf->{errors}++;
     }
   }
 
@@ -1016,7 +848,7 @@ sub add_test {
   if ($type == $Mail::SpamAssassin::Conf::TYPE_HEAD_TESTS)
   {
     my ($pat) = ($text =~ /^\s*\S+\s*(?:\=|\!)\~\s*(\S.*?\S)\s*$/);
-    if ($pat) { $pat =~ s/\s+\[if-unset:\s+(.+)\]\s*$//; }
+    $pat =~ s/\s+\[if-unset:\s+(.+)\]\s*$//;
     return unless $self->is_delimited_regexp_valid($name, $pat);
   }
   elsif ($type == $Mail::SpamAssassin::Conf::TYPE_META_TESTS)
@@ -1026,18 +858,9 @@ sub add_test {
 
   $conf->{tests}->{$name} = $text;
   $conf->{test_types}->{$name} = $type;
-  if ($type == $Mail::SpamAssassin::Conf::TYPE_META_TESTS) {
-    $conf->{priority}->{$name} ||= 500;
-  }
-  else {
-    $conf->{priority}->{$name} ||= 0;
-  }
+  $conf->{tflags}->{$name} ||= '';
   $conf->{priority}->{$name} ||= 0;
   $conf->{source_file}->{$name} = $self->{currentfile};
-
-  if ($self->{main}->{keep_config_parsing_metadata}) {
-    $conf->{if_stack}->{$name} = $self->get_if_stack_as_string();
-  }
 
   if ($self->{scoresonly}) {
     $conf->{user_rules_to_compile}->{$type} = 1;
@@ -1089,7 +912,8 @@ sub is_meta_valid {
     my $err = $@;
     $err =~ s/\s+(?:at|near)\b.*//s;
     $err =~ s/Illegal division by zero/division by zero possible/i;
-    $self->lint_warn("config: invalid expression for rule $name: \"$rule\": $err\n", $name);
+    warn "config: invalid expression for rule $name: \"$rule\": $err\n";
+    $self->{conf}->{errors}++;
     return 0;
   }
 }
@@ -1097,9 +921,9 @@ sub is_meta_valid {
 sub is_delimited_regexp_valid {
   my ($self, $name, $re) = @_;
 
-  if (!$re || $re !~ /^\s*m?(\W).*(?:\1|>|}|\)|\])[a-z]*\s*$/) {
-    $re ||= '';
-    $self->lint_warn("config: invalid regexp for rule $name: $re: missing or invalid delimiters\n", $name);
+  unless ($re =~ /^\s*m?(\W).*(?:\1|>|}|\)|\])[a-z]*\s*$/) {
+    warn "config: invalid regexp for rule $name: $re: missing or invalid delimiters\n";
+    $self->{conf}->{errors}++;
     return 0;
   }
   return $self->is_regexp_valid($name, $re);
@@ -1148,7 +972,8 @@ sub is_regexp_valid {
 
   my $err = $@;
   $err =~ s/ at .*? line \d.*$//;
-  $self->lint_warn("config: invalid regexp for rule $name: $origre: $err\n", $name);
+  warn "config: invalid regexp for rule $name: $origre: $err\n";
+  $self->{conf}->{errors}++;
   return 0;
 }
 
@@ -1211,50 +1036,12 @@ sub remove_from_addrlist_rcvd {
 sub fix_path_relative_to_current_file {
   my ($self, $path) = @_;
 
-  # the path may be specified as "~/foo", so deal with that
-  $path = $self->{conf}->{main}->sed_path($path);
-
   if (!File::Spec->file_name_is_absolute ($path)) {
     my ($vol, $dirs, $file) = File::Spec->splitpath ($self->{currentfile});
     $path = File::Spec->catpath ($vol, $dirs, $path);
-    dbg("config: fixed relative path: $path");
+    dbg("plugin: fixed relative path: $path");
   }
   return $path;
-}
-
-###########################################################################
-
-sub lint_warn {
-  my ($self, $msg, $rule, $iserror) = @_;
-
-  if (!defined $iserror) { $iserror = 1; }
-
-  if ($self->{conf}->{main}->{lint_callback}) {
-    $self->{conf}->{main}->{lint_callback}->(
-          msg => $msg,
-          rule => $rule,
-          iserror => $iserror
-        );
-  }
-  elsif ($self->{conf}->{lint_rules}) {
-    warn $msg."\n";
-  }
-  else {
-    info($msg);
-  }
-
-  if ($iserror) {
-    $self->{conf}->{errors}++;
-  }
-}
-
-###########################################################################
-
-sub get_if_stack_as_string {
-  my ($self) = @_;
-  return join ' ', map {
-    $_->{conditional}
-  } @{$self->{if_stack}};
 }
 
 ###########################################################################

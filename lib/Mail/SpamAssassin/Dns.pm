@@ -22,7 +22,6 @@ package Mail::SpamAssassin::PerMsgStatus;
 
 use Mail::SpamAssassin::Conf;
 use Mail::SpamAssassin::PerMsgStatus;
-use Mail::SpamAssassin::AsyncLoop;
 use Mail::SpamAssassin::Constants qw(:ip);
 use File::Spec;
 use IO::Socket;
@@ -33,7 +32,7 @@ use warnings;
 use bytes;
 
 use vars qw{
-  $KNOWN_BAD_DIALUP_RANGES @EXISTING_DOMAINS $IS_DNS_AVAILABLE $LAST_DNS_CHECK $VERSION
+  $KNOWN_BAD_DIALUP_RANGES @EXISTING_DOMAINS $IS_DNS_AVAILABLE $VERSION
 };
 
 # use very well-connected domains (fast DNS response, many DNS servers,
@@ -94,48 +93,32 @@ BEGIN {
 
 ###########################################################################
 
+# DNS query array constants
+use constant ID => 0;
+use constant RULES => 1;
+use constant SETS => 2;
+
 # TODO: $server is currently unused
 sub do_rbl_lookup {
   my ($self, $rule, $set, $type, $server, $host, $subtest) = @_;
 
-  my $key = "dns:$type:$host";
-  my $existing = $self->{async}->get_lookup($key);
-
   # only make a specific query once
-  if (!$existing) {
+  if (!defined $self->{dnspending}->{$type}->{$host}->[ID]) {
     dbg("dns: launching DNS $type query for $host in background");
-
-    my $ent = {
-      key => $key,
-      type => "DNSBL-".$type,
-      sets => [ ],  # filled in below
-      rules => [ ], # filled in below
-      # id is filled in after we send the query below
-    };
-
-    my $id = $self->{resolver}->bgsend($host, $type, undef, sub {
-        my $pkt = shift;
-        my $id = shift;
-        $self->process_dnsbl_result($ent, $pkt);
-        $self->{async}->report_id_complete($id);
-      });
-
-    $ent->{id} = $id;     # tie up the loose end
-    $existing = $self->{async}->start_lookup($ent);
+    $self->{rbl_launch} = time;
+    $self->{dnspending}->{$type}->{$host}->[ID] = $self->res_bgsend($host, $type);
   }
 
   # always add set
-  push @{$existing->{sets}}, $set;
+  push @{$self->{dnspending}->{$type}->{$host}->[SETS]}, $set;
 
   # sometimes match or always match
   if (defined $subtest) {
     $self->{dnspost}->{$set}->{$subtest} = $rule;
   }
   else {
-    push @{$existing->{rules}}, $rule;
+    push @{$self->{dnspending}->{$type}->{$host}->[RULES]}, $rule;
   }
-
-  $self->{rule_to_rblkey}->{$rule} = $key;
 }
 
 # TODO: these are constant so they should only be added once at startup
@@ -147,29 +130,23 @@ sub register_rbl_subtest {
 sub do_dns_lookup {
   my ($self, $rule, $type, $host) = @_;
 
-  my $key = "dns:$type:$host";
-
   # only make a specific query once
-  return if $self->{async}->get_lookup($key);
+  if (!defined $self->{dnspending}->{$type}->{$host}->[ID]) {
+    dbg("dns: launching DNS $type query for $host in background");
+    $self->{rbl_launch} = time;
+    $self->{dnspending}->{$type}->{$host}->[ID] = $self->res_bgsend($host, $type);
+  }
+  push @{$self->{dnspending}->{$type}->{$host}->[RULES]}, $rule;
+}
 
-  dbg("dns: launching DNS $type query for $host in background");
+sub res_bgsend {
+  my ($self, $host, $type) = @_;
 
-  my $ent = {
-    key => $key,
-    type => "DNSBL-".$type,
-    rules => [ $rule ],
-    # id is filled in after we send the query below
-  };
-
-  my $id = $self->{resolver}->bgsend($host, $type, undef, sub {
-      my $pkt = shift;
-      my $id = shift;
-      $self->process_dnsbl_result($ent, $pkt);
-      $self->{async}->report_id_complete($id);
-    });
-
-  $ent->{id} = $id;     # tie up the loose end
-  $self->{async}->start_lookup($ent);
+  return $self->{resolver}->bgsend($host, $type, undef, sub {
+          my $pkt = shift;
+          my $id = shift;
+          $self->{dnsfinished}->{$id} = $pkt;
+        });
 }
 
 ###########################################################################
@@ -188,23 +165,7 @@ sub dnsbl_hit {
       $log = "$4.$3.$2.$1 listed in $5";
     }
   }
-
-  # TODO: this may result in some log messages appearing under the
-  # wrong rules, since we could see this sequence: { test one hits,
-  # test one's message is logged, test two hits, test one fires again
-  # on another IP, test one's message is logged for that other IP --
-  # but under test two's heading }.   Right now though it's better
-  # than just not logging at all.
-
-  $self->{already_logged} ||= { };
-  if ($log && !$self->{already_logged}->{$log}) {
-    $self->test_log($log);
-    $self->{already_logged}->{$log} = 1;
-  }
-
-  if (!$self->{tests_already_hit}->{$rule}) {
-    $self->got_hit($rule, "RBL: ", ruletype => "dnsbl");
-  }
+  $self->{dnsresult}->{$rule}->{$log} = 1;
 }
 
 sub dnsbl_uri {
@@ -221,8 +182,6 @@ sub dnsbl_uri {
     push(@vals, "type=$qtype") if $qtype ne "A";
     my $uri = "dns:$qname" . (@vals ? "?" . join(";", @vals) : "");
     push @{ $self->{dnsuri}->{$uri} }, $rdatastr;
-
-    dbg ("dns: hit <$uri> $rdatastr");
   }
 }
 
@@ -233,9 +192,6 @@ sub process_dnsbl_result {
   my $question = ($packet->question)[0];
   return if !defined $question;
 
-  my $sets = $query->{sets} || [];
-  my $rules = $query->{rules};
-
   # NO_DNS_FOR_FROM
   if ($self->{sender_host} &&
       $question->qname eq $self->{sender_host} &&
@@ -243,11 +199,10 @@ sub process_dnsbl_result {
       $packet->header->rcode =~ /^(?:NXDOMAIN|SERVFAIL)$/ &&
       ++$self->{sender_host_fail} == 2)
   {
-    for my $rule (@{$rules}) {
-      $self->got_hit($rule, "DNS: ", ruletype => "dns");
+    for my $rule (@{$query->[RULES]}) {
+      $self->got_hit($rule, "DNS: ");
     }
   }
-
   # DNSBL tests are here
   foreach my $answer ($packet->answer) {
     next if !defined $answer;
@@ -257,10 +212,10 @@ sub process_dnsbl_result {
     next if ($answer->type ne 'A' && $answer->type ne 'TXT');
     # skip any A record that isn't on 127/8
     next if ($answer->type eq 'A' && $answer->rdatastr !~ /^127\./);
-    for my $rule (@{$rules}) {
+    for my $rule (@{$query->[RULES]}) {
       $self->dnsbl_hit($rule, $question, $answer);
     }
-    for my $set (@{$sets}) {
+    for my $set (@{$query->[SETS]}) {
       if ($self->{dnspost}->{$set}) {
 	$self->process_dnsbl_set($set, $question, $answer);
       }
@@ -274,7 +229,7 @@ sub process_dnsbl_set {
 
   my $rdatastr = $answer->rdatastr;
   while (my ($subtest, $rule) = each %{ $self->{dnspost}->{$set} }) {
-    next if $self->{tests_already_hit}->{$rule};
+    next if defined $self->{tests_already_hit}->{$rule};
 
     # exact substr (usually IP address)
     if ($subtest eq $rdatastr) {
@@ -305,7 +260,7 @@ sub process_dnsbl_set {
       my $untainted = $1;
       $subtest = $untainted;
 
-      $self->got_hit($rule, "SenderBase: ", ruletype => "dnsbl") if !$undef && eval $subtest;
+      $self->got_hit($rule, "SenderBase: ") if !$undef && eval $subtest;
     }
     # bitmask
     elsif ($subtest =~ /^\d+$/) {
@@ -325,83 +280,76 @@ sub process_dnsbl_set {
   }
 }
 
-sub harvest_until_rule_completes {
-  my ($self, $rule) = @_;
-
-  return if !defined $self->{async}->get_last_start_lookup_time();
-
-  my $deadline = $self->{conf}->{rbl_timeout} + $self->{async}->get_last_start_lookup_time();
-  my $now = time;
-
-  my @left = $self->{async}->get_pending_lookups();
-  my $total = scalar @left;
-
-  while (($now < $deadline) && !$self->{async}->complete_lookups(1))
-  {
-    if ($self->is_rule_complete($rule)) {
-      return 1;
-    }
-
-    $self->{main}->call_plugins ("check_tick", { permsgstatus => $self });
-    @left = $self->{async}->get_pending_lookups();
-
-    # dynamic timeout
-    my $dynamic = (int($self->{conf}->{rbl_timeout}
-                      * (1 - (($total - scalar @left) / $total) ** 2) + 0.5)
-                  + $self->{async}->get_last_start_lookup_time());
-    $deadline = $dynamic if ($dynamic < $deadline);
-    $now = time;
-  }
-}
-
 sub harvest_dnsbl_queries {
   my ($self) = @_;
 
-  return if !defined $self->{async}->get_last_start_lookup_time();
+  return if !defined $self->{rbl_launch};
 
-  my $deadline = $self->{conf}->{rbl_timeout} + $self->{async}->get_last_start_lookup_time();
+  my $deadline = $self->{conf}->{rbl_timeout} + $self->{rbl_launch};
+  my @waiting = (values %{ $self->{dnspending}->{A} },
+		 values %{ $self->{dnspending}->{MX} },
+		 values %{ $self->{dnspending}->{TXT} });
+  my @left;
+  my $total;
+
+  @waiting = grep { defined $_->[ID] } @waiting;
+  $total = scalar @waiting;
   my $now = time;
+  # trap this loop in an eval { } block, as Net::DNS could throw
+  # die()s our way; in particular, process_dnsbl_results() has
+  # thrown die()s before (bug 3794).
+  eval {
+    while (@waiting && ($now < $deadline)) {
+      @left = ();
+      for my $query (@waiting) {
+        if (exists $self->{dnsfinished}->{$query->[ID]}) {
+          my $pkt = delete $self->{dnsfinished}->{$query->[ID]};
+          $self->process_dnsbl_result($query, $pkt);
+        } else {
+          push(@left, $query);
+        }
+      }
+      $self->{main}->call_plugins ("check_tick", { permsgstatus => $self });
+      last unless @left;
+      @waiting = @left;
+      # dynamic timeout
+      my $dynamic = (int($self->{conf}->{rbl_timeout}
+                        * (1 - (($total - @left) / $total) ** 2) + 0.5)
+                    + $self->{rbl_launch});
+      $deadline = $dynamic if ($dynamic < $deadline);
+      until((($now = time) >= $deadline) || ($self->{resolver}->poll_responses(1) > 0)) {
+      }
+    }
+    dbg("dns: success for " . ($total - @left) . " of $total queries");
+  };
 
-  my @left = $self->{async}->get_pending_lookups();
-  my $total = scalar @left;
-
-  while (($now < $deadline) && !$self->{async}->complete_lookups(1))
-  {
-    $self->{main}->call_plugins ("check_tick", { permsgstatus => $self });
-    @left = $self->{async}->get_pending_lookups();
-
-    # dynamic timeout
-    my $dynamic = (int($self->{conf}->{rbl_timeout}
-                      * (1 - (($total - scalar @left) / $total) ** 2) + 0.5)
-                  + $self->{async}->get_last_start_lookup_time());
-    $deadline = $dynamic if ($dynamic < $deadline);
-    $now = time;    # and loop again
+  if ($@) {
+    dbg("dns: DNS harvest failed: $@");
+    # carry on and clean up the BGSOCKs anyway.
   }
-
-  dbg("dns: success for " . ($total - @left) . " of $total queries");
 
   # timeouts
-  @left = $self->{async}->get_pending_lookups();
   for my $query (@left) {
     my $string = '';
-    if (defined @{$query->{sets}}) {
-      $string = join(",", grep defined, @{$query->{sets}});
+    if (defined @{$query->[SETS]}) {
+      $string = join(",", grep defined, @{$query->[SETS]});
     }
-    elsif (defined @{$query->{rules}}) {
-      $string = join(",", grep defined, @{$query->{rules}});
+    elsif (defined @{$query->[RULES]}) {
+      $string = join(",", grep defined, @{$query->[RULES]});
     }
-    my $delay = time - $self->{async}->get_last_start_lookup_time();
+    my $delay = time - $self->{rbl_launch};
     dbg("dns: timeout for $string after $delay seconds");
+    undef $query->[ID];
   }
-
-  # and explicitly abort anything left
-  $self->{async}->abort_remaining_lookups();
-  $self->mark_all_async_rules_complete();
-}
-
-sub set_rbl_tag_data {
-  my ($self) = @_;
-
+  # register hits
+  while (my ($rule, $logs) = each %{ $self->{dnsresult} }) {
+    for my $log (keys %{$logs}) {
+      $self->test_log($log) if $log;
+    }
+    if (!defined $self->{tests_already_hit}->{$rule}) {
+      $self->got_hit($rule, "RBL: ");
+    }
+  }
   # DNS URIs
   while (my ($dnsuri, $answers) = each %{ $self->{dnsuri} }) {
     # when parsing, look for elements of \".*?\" or \S+ with ", " as separator
@@ -417,10 +365,14 @@ sub set_rbl_tag_data {
 sub rbl_finish {
   my ($self) = @_;
 
-  $self->set_rbl_tag_data();
+  delete $self->{rbl_launch};
+  delete $self->{dnspending};
+  delete $self->{dnsfinished};
 
+  # TODO: do not remove these since they can be retained!
   delete $self->{dnscache};
   delete $self->{dnspost};
+  delete $self->{dnsresult};
   delete $self->{dnsuri};
 }
 
@@ -456,7 +408,7 @@ sub lookup_ns {
       $nsrecords = $self->{dnscache}->{NS}->{$dom} = [ @nses ];
     };
     if ($@) {
-      dbg("dns: NS lookup failed horribly, perhaps bad resolv.conf setting? ($@)");
+      dbg("dns: NS lookup failed horribly, perhaps bad resolv.conf setting?");
       return undef;
     }
   }
@@ -490,7 +442,7 @@ sub lookup_mx {
       $mxrecords = $self->{dnscache}->{MX}->{$dom} = [ @ips ];
     };
     if ($@) {
-      dbg("dns: MX lookup failed horribly, perhaps bad resolv.conf setting? ($@)");
+      dbg("dns: MX lookup failed horribly, perhaps bad resolv.conf setting?");
       return undef;
     }
   }
@@ -549,7 +501,7 @@ sub lookup_ptr {
     };
 
     if ($@) {
-      dbg("dns: PTR lookup failed horribly, perhaps bad resolv.conf setting? ($@)");
+      dbg("dns: PTR lookup failed horribly, perhaps bad resolv.conf setting?");
       return undef;
     }
   }
@@ -591,7 +543,7 @@ sub lookup_a {
     };
 
     if ($@) {
-      dbg("dns: A lookup failed horribly, perhaps bad resolv.conf setting? ($@)");
+      dbg("dns: A lookup failed horribly, perhaps bad resolv.conf setting?");
       return undef;
     }
   }
@@ -603,21 +555,9 @@ sub lookup_a {
 sub is_dns_available {
   my ($self) = @_;
   my $dnsopt = $self->{conf}->{dns_available};
-  my $dnsint = $self->{conf}->{dns_test_interval} || 600;
   my @domains;
 
-  $LAST_DNS_CHECK ||= 0;
-  my $diff = time() - $LAST_DNS_CHECK;
-
-  # undef $IS_DNS_AVAILABLE if we should be testing for
-  # working DNS and our check interval time has passed
-  if ($dnsopt eq "test" && $diff > $dnsint) {
-    $IS_DNS_AVAILABLE = undef;
-    dbg("dns: is_dns_available() last checked $diff seconds ago; re-checking");
-  }
-
   return $IS_DNS_AVAILABLE if (defined $IS_DNS_AVAILABLE);
-  $LAST_DNS_CHECK = time();
 
   $IS_DNS_AVAILABLE = 0;
   if ($dnsopt eq "no") {
@@ -793,56 +733,5 @@ sub cleanup_kids {
 }
 
 ###########################################################################
-
-sub register_async_rule_start {
-  my ($self, $rule) = @_;
-  dbg ("dns: $rule lookup start");
-  $self->{rule_to_rblkey}->{$rule} = '*ASYNC_START';
-}
-
-sub register_async_rule_finish {
-  my ($self, $rule) = @_;
-  dbg ("dns: $rule lookup finished");
-  delete $self->{rule_to_rblkey}->{$rule};
-}
-
-sub mark_all_async_rules_complete {
-  my ($self) = @_;
-  $self->{rule_to_rblkey} = { };
-}
-
-sub is_rule_complete {
-  my ($self, $rule) = @_;
-
-  my $key = $self->{rule_to_rblkey}->{$rule};
-  if (!defined $key) {
-    # dbg("dns: $rule lookup complete, not in list");
-    return 1;
-  }
-
-  if ($key eq '*ASYNC_START') {
-    dbg("dns: $rule lookup not yet complete");
-    return 0;       # not yet complete
-  }
-
-  my $obj = $self->{async}->get_lookup($key);
-  if (!defined $obj) {
-    dbg("dns: $rule lookup complete, $key no longer pending");
-    return 1;
-  }
-
-  dbg("dns: $rule lookup not yet complete");
-  return 0;         # not yet complete
-}
-
-###########################################################################
-
-# interface called by SPF plugin
-sub check_for_from_dns {
-  my ($self, $pms) = @_;
-  if (defined $pms->{sender_host_fail}) {
-    return ($pms->{sender_host_fail} == 2); # both MX and A need to fail
-  }
-}
 
 1;

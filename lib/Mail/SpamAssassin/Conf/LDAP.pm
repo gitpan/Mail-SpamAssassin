@@ -107,7 +107,7 @@ sub load {
    };
 
    if ($@) {
-     warn "ldap: failed to load user scores from LDAP server, ignored ($@)\n";
+     warn "ldap: failed to load user scores from LDAP server, ignored\n";
    }
 }
 
@@ -130,7 +130,6 @@ sub load_with_ldap {
   my @attr   = $uri->attributes;
   my $scope  = $uri->scope;
   my $filter = $uri->filter;
-  my $schema = $uri->schema;
   my %extn   = $uri->extensions; # unused
 
   $filter =~ s/__USERNAME__/$username/g;
@@ -155,10 +154,7 @@ sub load_with_ldap {
 
   my $f_attribute = $attr[0];
 
-  my $ldap = Net::LDAP->new ("$host:$port",
-                onerror => "warn",
-                schema => $schema);
-
+  my $ldap = Net::LDAP->new ("$host:$port", onerror => "warn");
   if (!defined($ldapuser) && !defined($ldappass)) {
     $ldap->bind;
   } else {

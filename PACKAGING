@@ -156,22 +156,6 @@ CONFDIR (LOCALRULESDIR):
     try this:
     	perl Makefile.PL CONFDIR=/etc/spamassassin
 
-LOCALSTATEDIR:
-  "sa-update" will download rule updates into LOCALSTATEDIR/spamassassin.
-
-  The default depends on the PREFIX and is compliant to the FHS:
-    - if PREFIX is either /usr or /usr/local:
-      /var/lib
-    - if PREFIX starts with /opt:
-      /var/opt
-    - else:
-      PREFIX/var
-
-  Samples:
-    If you'd like to have the downloaded rules files in /var/spamassassin
-    try this:
-    	perl Makefile.PL LOCALSTATEDIR=/var
-
 
 Installing to a directory different from the final destination
 --------------------------------------------------------------
@@ -307,9 +291,7 @@ success:
    	export PERL5LIB="/tmp/ExtUtils-MakeMaker-6.16/lib:$PERL5LIB"
 
 4. Now build SpamAssassin. As long as the PERL5LIB variable is set, the
-   updated ExtUtils::MakeMaker is used.  (SpamAssassin will use PERL5LIB
-   during building, but the built scripts ignore it due to taint-mode
-   security features.)
+   updated ExtUtils::MakeMaker is used.
 
 
 Obsolete Variables

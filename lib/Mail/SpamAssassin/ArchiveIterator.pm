@@ -23,6 +23,8 @@ use strict;
 use warnings;
 use bytes;
 
+use IO::Select;
+use IO::Socket;
 use Mail::SpamAssassin::Util;
 use Mail::SpamAssassin::Constants qw(:sa);
 use Mail::SpamAssassin::Logger;
@@ -34,11 +36,9 @@ use constant BIG_LINES => BIG_BYTES/65;	# 65 bytes/line is a good approximation
 use vars qw {
   $MESSAGES
   $AICache
-  %class_opts
-  @ISA
 };
 
-@ISA = qw();
+my @ISA = qw($MESSAGES);
 
 =head1 NAME
 
@@ -48,6 +48,8 @@ Mail::SpamAssassin::ArchiveIterator - find and process messages one at a time
 
   my $iter = new Mail::SpamAssassin::ArchiveIterator(
     { 
+      'opt_j'     => 0,
+      'opt_n'     => 1,
       'opt_all'   => 1,
       'opt_cache' => 1,
     }
@@ -93,13 +95,58 @@ optional unless otherwise noted.
 Typically messages over 250k are skipped by ArchiveIterator.  Use this option
 to keep from skipping messages based on size.
 
-=item opt_scanprob
+=item opt_j (required)
 
-Randomly select messages to scan, with a probability of N, where N ranges
-from 0.0 (no messages scanned) to 1.0 (all messages scanned).  Default
-is 1.0.
+Specifies how many messages should be run at the same time, as well as the
+method with which to scan for the messages.
 
-This setting can be specified separately for each target.
+If the value is 0, the list of messages to process will be kept in memory,
+and only 1 message at a time will be processed by the wanted subroutine.
+Restarting is not allowed.
+
+If the value is 1, the list of messages to process will be kept in a
+temporary file, and only 1 message at a time will be processed by the
+wanted subroutine.  Restarting is not allowed.
+
+If the value is 2 or higher, the list of messages to process will be kept
+in a temporary file, and the process will split into a parent/child mode.
+The option value number of children will be forked off and each child
+will process messages via the wanted subroutine in parallel.  Restarting
+is allowed.
+
+B<NOTE:> For C<opt_j> >= 1, an extra child process will be created to
+determine the list of messages, sort the list, everything as appropriate.
+This will keep the list in memory (possibly multiple copies) before
+writing the final list to a temporary file which will be used for
+processing.  The list generation child will exit, freeing up the memory.
+
+=item opt_n
+
+ArchiveIterator is typically used to simulate ham and spam moving through
+SpamAssassin.  By default, the list of messages is sorted by received date so
+that the mails can be passed through in order.  If opt_n is true, the sorting
+will not occur.  This is useful if you don't care about the order of the
+messages.
+
+=item opt_restart
+
+If set to a positive integer value, children processes (see opt_j w/ value 2
+or higher above) will restart after the option value number of messages, in
+total, have been processed.
+
+=item opt_head
+
+Only use the first N ham and N spam (or if the value is -N, only use the first
+N total messages regardless of class).
+
+=item opt_tail
+
+Only use the last N ham and N spam (or if the value is -N, only use the last
+N total messages regardless of class).
+
+If both C<opt_head> and C<opt_tail> are specified, then the C<opt_head> value
+specifies a subset of the C<opt_tail> selection to use; in other words, the
+C<opt_tail> splice is applied first.
 
 =item opt_before
 
@@ -107,14 +154,10 @@ Only use messages which are received after the given time_t value.
 Negative values are an offset from the current time, e.g. -86400 =
 last 24 hours; or as parsed by Time::ParseDate (e.g. '-6 months')
 
-This setting can be specified separately for each target.
-
 =item opt_after
 
 Same as opt_before, except the messages are only used if after the given
 time_t value.
-
-This setting can be specified separately for each target.
 
 =item opt_want_date
 
@@ -126,8 +169,7 @@ hit.
 =item opt_cache
 
 Set to 0 (default) if you don't want to use cached information to help speed
-up ArchiveIterator.  Set to 1 to enable.  This setting requires C<opt_cachedir>
-also be set.
+up ArchiveIterator.  Set to 1 to enable.
 
 =item opt_cachedir
 
@@ -174,9 +216,14 @@ sub new {
   if (!defined $self) { $self = { }; }
   bless ($self, $class);
 
+  $self->{opt_head} = 0 unless (defined $self->{opt_head});
+  $self->{opt_tail} = 0 unless (defined $self->{opt_tail});
+  $self->{opt_want_date} = 1 unless (defined $self->{opt_want_date});
+  $self->{opt_cache} = 0 unless (defined $self->{opt_cache});
+
   # If any of these options are set, we need to figure out the message's
-  # receive date at scan time.  opt_after, opt_before, or opt_want_date
-  $self->{determine_receive_date} = 
+  # receive date at scan time.  opt_n == 0, opt_after, opt_before
+  $self->{determine_receive_date} = !$self->{opt_n} ||
   	defined $self->{opt_after} || defined $self->{opt_before} ||
         $self->{opt_want_date};
 
@@ -199,8 +246,8 @@ reporting.  For more information, see I<new()> above.
 
 sub set_functions {
   my ($self, $wanted, $result) = @_;
-  $self->{wanted_sub} = $wanted if defined $wanted;
-  $self->{result_sub} = $result if defined $result;
+  $self->{wanted_sub} = $wanted;
+  $self->{result_sub} = $result;
 }
 
 ###########################################################################
@@ -212,13 +259,8 @@ configured wanted subroutine.  Files which have a name ending in C<.gz> or
 C<.bz2> will be properly uncompressed via call to C<gzip -dc> and C<bzip2 -dc>
 respectively.
 
-The target_paths array is expected to be either one element per path in the
-following format: C<class:format:raw_location>, or a hash reference containing
-key-value option pairs and a 'target' key with a value in that format.
-
-The key-value option pairs that can be used are: opt_scanprob, opt_after,
-opt_before.  See the constructor method's documentation for more information
-on their effects.
+The target_paths array is expected to be one element per path in the following
+format: class:format:raw_location
 
 run() returns 0 if there was an error (can't open a file, etc,) and 1 if there
 were no errors.
@@ -264,34 +306,151 @@ sub run {
     return 0;
   }
 
-  # scan the targets and get the number and list of messages
-  $self->_scan_targets(\@targets,
-    sub {
-      my($self, $date, $class, $format, $mail) = @_;
-      push(@{$self->{$class}}, _index_pack($date, $class, $format, $mail));
+  # non-forking model (generally sa-learn), everything in a single process
+  if ($self->{opt_j} == 0) {
+    my $messages;
+
+    # message-array
+    ($MESSAGES, $messages) = $self->message_array(\@targets);
+
+    while (my $message = shift @{$messages}) {
+      my($class, undef, $date, undef, $result) = $self->run_message($message);
+      &{$self->{result_sub}}($class, $result, $date) if $result;
     }
-  );
-
-  my $messages;
-  # for ease of memory, we'll play with pointers
-  $messages = $self->{s};
-  undef $self->{s};
-  push(@{$messages}, @{$self->{h}});
-  undef $self->{h};
-
-  $MESSAGES = scalar(@{$messages});
-
-  # go ahead and run through all of the messages specified
-  return $self->_run($messages);
-}
-
-sub _run {
-  my ($self, $messages) = @_;
-
-  while (my $message = shift @{$messages}) {
-    my($class, undef, $date, undef, $result) = $self->_run_message($message);
-    &{$self->{result_sub}}($class, $result, $date) if $result;
   }
+  # forking model (generally mass-check), avoid extended memory usage
+  else {
+    my $tmpf;
+    ($tmpf, $self->{messageh}) = Mail::SpamAssassin::Util::secure_tmpfile()
+      or die 'archive-iterator: failed to create temp file';
+    unlink $tmpf or die "archive-iterator: unlink '$tmpf': $!";
+    undef $tmpf;
+
+    # forked child process scans messages
+    if ($tmpf = fork()) {
+      # parent
+      waitpid($tmpf, 0);
+    }
+    elsif (defined $tmpf) {
+      # child
+      $self->message_array(\@targets, $self->{messageh});
+      exit;
+    }
+    else {
+      die "archive-iterator: cannot fork: $!";
+    }
+
+    # we now have a temporary file with the messages to process
+    # in theory, our file pointer is at the start of the file, but make sure.
+    # NOTE: do this here, not in message_array, since that will only affect
+    # the child.
+    seek($self->{messageh}, 0, 0);
+    $MESSAGES = $self->next_message();
+
+    if (!$MESSAGES) {
+      die "archive-iterator: no messages to process\n";
+    }
+    # only do 1 process, message list in a temp file, no restarting
+    if ($self->{opt_j} == 1 && !defined $self->{opt_restart}) {
+      my $message;
+      my $messages;
+      my $total_count = 0;
+
+      while (($MESSAGES > $total_count) && ($message = $self->next_message())) {
+        my($class, undef, $date, undef, $result) = $self->run_message($message);
+        &{$self->{result_sub}}($class, $result, $date) if $result;
+	$total_count++;
+      }
+    }
+    # more than one process or one process with restarts
+    else {
+      my $select = IO::Select->new();
+
+      my $total_count = 0;
+      my $needs_restart = 0;
+      my @child = ();
+      my @pid = ();
+      my $messages;
+
+      # start children processes
+      $self->start_children($self->{opt_j}, \@child, \@pid, $select);
+
+      # feed childen, make them work for it, repeat
+      while ($select->count()) {
+        foreach my $socket ($select->can_read()) {
+	  my $line = $self->read_line($socket);
+
+          # some error happened during the read!
+          if (!defined $line) {
+            $needs_restart = 1;
+            warn "archive-iterator: readline failed, attempting to recover\n";
+            $select->remove($socket);
+          }
+	  elsif ($line =~ /^([^\0]+)\0RESULT (.+)$/s) {
+	    my $result = $1;
+	    my ($date,$class,$type) = index_unpack($2);
+	    #warn ">> RESULT: $class, $type, $date\n";
+
+	    if (defined $self->{opt_restart} && ($total_count % $self->{opt_restart}) == 0) {
+	      $needs_restart = 1;
+	    }
+
+	    # if messages remain, and we don't need to restart, send message
+	    if (($MESSAGES > $total_count) && !$needs_restart) {
+	      $self->send_line($socket, $self->next_message());
+	      $total_count++;
+	      #warn ">> recv: $MESSAGES $total_count\n";
+	    }
+	    else {
+	      # stop listening on this child since we're done with it
+	      #warn ">> removeresult: $needs_restart $MESSAGES $total_count\n";
+	      $select->remove($socket);
+	    }
+
+	    # deal with the result we received
+	    if ($result) {
+	      &{$self->{result_sub}}($class, $result, $date);
+	    }
+	  }
+	  elsif ($line eq "START") {
+	    if ($MESSAGES > $total_count) {
+	      # we still have messages, send one to child
+	      $self->send_line($socket, $self->next_message());
+	      $total_count++;
+	      #warn ">> new: $MESSAGES $total_count\n";
+	    }
+	    else {
+	      # no more messages, so stop listening on this child
+	      #warn ">> removestart: $needs_restart $MESSAGES $total_count\n";
+	      $select->remove($socket);
+	    }
+	  }
+        }
+
+        #warn ">> out of loop, $MESSAGES $total_count $needs_restart ".$select->count()."\n";
+
+        # If there are still messages to process, and we need to restart
+        # the children, and all of the children are idle, let's go ahead.
+        if ($needs_restart && $select->count == 0 && $MESSAGES > $total_count)
+	{
+	  $needs_restart = 0;
+
+	  #warn "debug: needs restart, $MESSAGES total, $total_count done\n";
+	  $self->reap_children($self->{opt_j}, \@child, \@pid);
+	  @child=();
+	  @pid=();
+	  $self->start_children($self->{opt_j}, \@child, \@pid, $select);
+        }
+      }
+
+      # reap children
+      $self->reap_children($self->{opt_j}, \@child, \@pid);
+    }
+
+    # close tempfile so it will be unlinked
+    close($self->{messageh});
+  }
+
   return ! $self->{access_problem};
 }
 
@@ -299,26 +458,26 @@ sub _run {
 
 ## run_message and related functions to process a single message
 
-sub _run_message {
+sub run_message {
   my ($self, $msg) = @_;
 
-  my ($date, $class, $format, $mail) = _index_unpack($msg);
+  my ($date, $class, $format, $mail) = index_unpack($msg);
 
   if ($format eq 'f') {
-    return $self->_run_file($class, $format, $mail, $date);
+    return $self->run_file($class, $format, $mail, $date);
   }
   elsif ($format eq 'm') {
-    return $self->_run_mailbox($class, $format, $mail, $date);
+    return $self->run_mailbox($class, $format, $mail, $date);
   }
   elsif ($format eq 'b') {
-    return $self->_run_mbx($class, $format, $mail, $date);
+    return $self->run_mbx($class, $format, $mail, $date);
   }
 }
 
-sub _run_file {
+sub run_file {
   my ($self, $class, $format, $where, $date) = @_;
 
-  if (!_mail_open($where)) {
+  if (!mail_open($where)) {
     $self->{access_problem} = 1;
     return;
   }
@@ -333,7 +492,7 @@ sub _run_file {
   my $header;
   while (<INPUT>) {
     push(@msg, $_);
-    if (!defined $header && /^\015?$/) {
+    if (!defined $header && /^\s*$/) {
       $header = $#msg;
     }
   }
@@ -346,13 +505,13 @@ sub _run_file {
   return($class, $format, $date, $where, &{$self->{wanted_sub}}($class, $where, $date, \@msg, $format));
 }
 
-sub _run_mailbox {
+sub run_mailbox {
   my ($self, $class, $format, $where, $date) = @_;
 
   my ($file, $offset) = ($where =~ m/(.*)\.(\d+)$/);
   my @msg;
   my $header;
-  if (!_mail_open($file)) {
+  if (!mail_open($file)) {
     $self->{access_problem} = 1;
     return;
   }
@@ -381,14 +540,14 @@ sub _run_mailbox {
   return($class, $format, $date, $where, &{$self->{wanted_sub}}($class, $where, $date, \@msg, $format));
 }
 
-sub _run_mbx {
+sub run_mbx {
   my ($self, $class, $format, $where, $date) = @_;
 
   my ($file, $offset) = ($where =~ m/(.*)\.(\d+)$/);
   my @msg;
   my $header;
 
-  if (!_mail_open($file)) {
+  if (!mail_open($file)) {
     $self->{access_problem} = 1;
     return;
   }
@@ -421,31 +580,141 @@ sub _run_mbx {
 
 ############################################################################
 
+## figure out the next message to process, used when opt_j >= 1
+
+sub next_message {
+  my ($self) = @_;
+  my $line = $self->read_line($self->{messageh});
+  return $line;
+}
+
+############################################################################
+
+## children processors, start and process, used when opt_j > 1
+
+sub start_children {
+  my ($self, $count, $child, $pid, $socket) = @_;
+
+  my $io = IO::Socket->new();
+  my $parent;
+
+  # create children
+  for (my $i = 0; $i < $count; $i++) {
+    ($child->[$i],$parent) = $io->socketpair(AF_UNIX,SOCK_STREAM,PF_UNSPEC)
+	or die "archive-iterator: socketpair failed: $!";
+    if ($pid->[$i] = fork) {
+      close $parent;
+
+      # disable caching for parent<->child relations
+      my ($old) = select($child->[$i]);
+      $|++;
+      select($old);
+
+      $socket->add($child->[$i]);
+      #warn "debug: starting new child $i (pid ",$pid->[$i],")\n";
+      next;
+    }
+    elsif (defined $pid->[$i]) {
+      my $result;
+      my $line;
+
+      close $self->{messageh} if defined $self->{messageh};
+
+      close $child->[$i];
+      select($parent);
+      $| = 1;	# print to parent by default, turn off buffering
+      $self->send_line($parent,"START");
+      while ($line = $self->read_line($parent)) {
+	if ($line eq "exit") {
+	  close $parent;
+	  exit;
+	}
+
+	my($class, $format, $date, $where, $result) = $self->run_message($line);
+	$result ||= '';
+
+	# If determine_receive_date is not set, the original input date
+	# wasn't calculated, but run_message would have done so, so reset
+	# the packed version if possible ...  use defined for date since
+	# it could == 0.
+        if (!$self->{determine_receive_date} && $class && $format && defined $date && $where) {
+	  $line = index_pack($date, $class, $format, $where);
+        }
+
+	$self->send_line($parent,"$result\0RESULT $line");
+      }
+      exit;
+    }
+    else {
+      die "archive-iterator: cannot fork: $!";
+    }
+  }
+}
+
+## handling killing off the children
+
+sub reap_children {
+  my ($self, $count, $socket, $pid) = @_;
+
+  # If the child died, sending it the exit will generate a SIGPIPE, but we
+  # don't really care since the readline will go undef (which is fine),
+  # then we do the waitpid which will finish it off.  So we end up in the
+  # right state, in theory.
+  local $SIG{'PIPE'} = 'IGNORE';
+
+  for (my $i = 0; $i < $count; $i++) {
+    #warn "debug: killing child $i (pid ",$pid->[$i],")\n";
+    $self->send_line($socket->[$i],"exit"); # tell the child to die.
+    close $socket->[$i];
+    waitpid($pid->[$i], 0); # wait for the signal ...
+  }
+}
+
+############################################################################
+
+# four bytes in network/vax format (little endian) as length of message
+# the rest is the actual message
+
+sub read_line {
+  my($self, $fd) = @_;
+  my($length,$msg);
+
+  # read in the 4 byte length and unpack
+  sysread($fd, $length, 4);
+  $length = unpack("V", $length);
+#  warn "<< $$ $length\n";
+  return unless $length;
+
+  # read in the rest of the single message
+  sysread($fd, $msg, $length);
+#  warn "<< $$ $msg\n";
+  return $msg;
+}
+
+sub send_line {
+  my $self = shift;
+  my $fd = shift;
+
+  foreach ( @_ ) {
+    my $length = pack("V", length $_);
+#    warn ">> $$ ".length($_)." $_\n";
+    syswrite($fd, $length . $_);
+  }
+}
+
+############################################################################
+
 ## FUNCTIONS BELOW THIS POINT ARE FOR FINDING THE MESSAGES TO RUN AGAINST
 
 ############################################################################
 
-sub _scan_targets {
-  my ($self, $targets, $bkfunc) = @_;
-
-  %class_opts = ();
+sub message_array {
+  my ($self, $targets, $fh) = @_;
 
   foreach my $target (@${targets}) {
     if (!defined $target) {
       warn "archive-iterator: invalid (undef) value in target list";
       next;
-    }
-
-    my %opts = ();
-    if (ref $target eq 'HASH') {
-      # e.g. { target => $target, opt_foo => 1, opt_bar => 0.4 ... }
-      foreach my $k (keys %{$target}) {
-        next unless ($k =~ /^opt_/);
-        my $v = $target->{$k};
-        next unless defined $v;
-        $opts{$k} = $v;
-      }
-      $target = $target->{target};
     }
 
     my ($class, $format, $rawloc) = split(/:/, $target, 3);
@@ -469,62 +738,115 @@ sub _scan_targets {
     # use ham by default, things like "spamassassin" can't specify the type
     $class = substr($class, 0, 1) || 'h';
 
-    # keep a copy of the most recent message-selection options for
-    # each class
-    $class_opts{$class} = \%opts;
-
-    foreach my $k (keys %opts) {
-      $self->{$k} = $opts{$k};
-    }
-    $self->_set_default_message_selection_opts();
-
-    my @locations = $self->_fix_globs($rawloc);
+    my @locations = $self->fix_globs($rawloc);
 
     foreach my $location (@locations) {
       my $method;
-
-      # for this location only; 'detect' means they can differ for each location
-      my $thisformat = $format;     
 
       if ($format eq 'detect') {
 	# detect the format
         if (!-d $location && $location =~ /\.mbox/i) {
           # filename indicates mbox
-          $thisformat = 'mbox';
+          $method = \&scan_mailbox;
         } 
 	elsif (!(-d $location)) {
-          $thisformat = 'file';
+          $method = \&scan_file;
 	}
 	else {
 	  # it's a directory
-	  $thisformat = 'dir';
+	  $method = \&scan_directory;
+	}
+      }
+      else {
+	if ($format eq "dir") {
+	  $method = \&scan_directory;
+	}
+	elsif ($format eq "file") {
+	  $method = \&scan_file;
+	}
+	elsif ($format eq "mbox") {
+	  $method = \&scan_mailbox;
+        }
+	elsif ($format eq "mbx") {
+	  $method = \&scan_mbx;
 	}
       }
 
-      if ($thisformat eq 'dir') {
-        $method = \&_scan_directory;
-      }
-      elsif ($thisformat eq 'mbox') {
-        $method = \&_scan_mailbox;
-      }
-      elsif ($thisformat eq 'file') {
-        $method = \&_scan_file;
-      }
-      elsif ($thisformat eq 'mbx') {
-        $method = \&_scan_mbx;
+      if(defined($method)) {
+	&{$method}($self, $class, $location);
       }
       else {
-	warn "archive-iterator: format $thisformat (from $format) unknown!";
-        next;
+	warn "archive-iterator: format $format unknown!";
       }
-
-      # call the appropriate method
-      &{$method}($self, $class, $location, $bkfunc);
     }
   }
+
+  my @messages;
+  if ($self->{opt_n}) {
+    # OPT_N == 1 means don't bother sorting on message receive date
+
+    # head or tail > 0 means crop each list
+    if ($self->{opt_tail} > 0) {
+      splice(@{$self->{s}}, 0, -$self->{opt_tail});
+      splice(@{$self->{h}}, 0, -$self->{opt_tail});
+    }
+    if ($self->{opt_head} > 0) {
+      splice(@{$self->{s}}, min ($self->{opt_head}, scalar @{$self->{s}}));
+      splice(@{$self->{h}}, min ($self->{opt_head}, scalar @{$self->{h}}));
+    }
+
+    @messages = ( @{$self->{s}}, @{$self->{h}} );
+    undef $self->{s};
+    undef $self->{h};
+  }
+  else {
+    # OPT_N == 0 means sort on message receive date
+
+    # Sort the spam and ham groups by date
+    my @s = sort { $a cmp $b } @{$self->{s}};
+    undef $self->{s};
+    my @h = sort { $a cmp $b } @{$self->{h}};
+    undef $self->{h};
+
+    # head or tail > 0 means crop each list
+    if ($self->{opt_tail} > 0) {
+      splice(@s, 0, -$self->{opt_tail});
+      splice(@h, 0, -$self->{opt_tail});
+    }
+    if ($self->{opt_head} > 0) {
+      splice(@s, min ($self->{opt_head}, scalar @s));
+      splice(@h, min ($self->{opt_head}, scalar @h));
+    }
+
+    # interleave ordered spam and ham
+    if (@s && @h) {
+      my $ratio = @s / @h;
+      while (@s && @h) {
+	push @messages, (@s / @h > $ratio) ? (shift @s) : (shift @h);
+      }
+    }
+    # push the rest onto the end
+    push @messages, @s, @h;
+  }
+
+  # head or tail < 0 means crop the total list, negate the value appropriately
+  if ($self->{opt_tail} < 0) {
+    splice(@messages, 0, $self->{opt_tail});
+  }
+  if ($self->{opt_head} < 0) {
+    splice(@messages, -$self->{opt_head});
+  }
+
+  # Dump out the messages to the temp file if we're using one
+  if (defined $fh) {
+    $self->send_line($fh, scalar(@messages), @messages);
+    return;
+  }
+
+  return scalar(@messages), \@messages;
 }
 
-sub _mail_open {
+sub mail_open {
   my ($file) = @_;
 
   # bug 5288: the "magic" version of open will strip leading and trailing
@@ -558,60 +880,24 @@ sub _mail_open {
   return 1;
 }
 
-sub _set_default_message_selection_opts {
-  my ($self) = @_;
-  $self->{opt_scanprob} = 1.0 unless (defined $self->{opt_scanprob});
-  $self->{opt_want_date} = 1 unless (defined $self->{opt_want_date});
-  $self->{opt_cache} = 0 unless (defined $self->{opt_cache});
-}
-
 ############################################################################
 
-sub _message_is_useful_by_date {
+sub message_is_useful_by_date  {
   my ($self, $date) = @_;
+
+  return 0 unless $date;	# undef or 0 date = unusable
 
   if (!$self->{opt_after} && !$self->{opt_before}) {
     # Not using the feature
     return 1;
   }
-
-  return 0 unless $date;	# undef or 0 date = unusable
-
-  if (!$self->{opt_before}) {
-    # Just care about after
+  elsif (!$self->{opt_before}) {
+    # Just case about after
     return $date > $self->{opt_after};
   }
   else {
     return (($date < $self->{opt_before}) && ($date > $self->{opt_after}));
   }
-}
-
-# additional check, based solely on a file's mod timestamp.  we cannot
-# make assumptions about --before, since the file may have been "touch"ed
-# since the last message was appended; but we can assume that too-old
-# files cannot contain messages newer than their modtime.
-sub _message_is_useful_by_file_modtime {
-  my ($self, $date) = @_;
-
-  # better safe than sorry, if date is undef; let other stuff catch errors
-  return 1 unless $date;
-
-  if ($self->{opt_after}) {
-    return ($date > $self->{opt_after});
-  }
-  else {
-    return 1;       # --after not in use
-  }
-}
-
-sub _scanprob_says_scan {
-  my ($self) = @_;
-  if (defined $self->{opt_scanprob} && $self->{opt_scanprob} < 1.0) {
-    if ( int( rand( 1 / $self->{opt_scanprob} ) ) != 0 ) {
-      return 0;
-    }
-  }
-  return 1;
 }
 
 ############################################################################
@@ -623,18 +909,18 @@ sub _scanprob_says_scan {
 
 # put the date in first, big-endian packed format
 # this format lets cmp easily sort by date, then class, format, and path.
-sub _index_pack {
+sub index_pack {
   return pack("NAAA*", @_);
 }
 
-sub _index_unpack {
+sub index_unpack {
   return unpack("NAAA*", $_[0]);
 }
 
 ############################################################################
 
-sub _scan_directory {
-  my ($self, $class, $folder, $bkfunc) = @_;
+sub scan_directory {
+  my ($self, $class, $folder) = @_;
 
   my @files;
 
@@ -658,10 +944,10 @@ sub _scan_directory {
     return;
   }
 
-  $self->_create_cache('dir', $folder);
+  $self->create_cache('dir', $folder);
 
   foreach my $mail (@files) {
-    $self->_scan_file($class, $mail, $bkfunc);
+    $self->scan_file($class, $mail);
   }
 
   if (defined $AICache) {
@@ -669,45 +955,40 @@ sub _scan_directory {
   }
 }
 
-sub _scan_file {
-  my ($self, $class, $mail, $bkfunc) = @_;
+sub scan_file {
+  my ($self, $class, $mail) = @_;
 
-  $self->_bump_scan_progress();
-
-  my @s = stat($mail);
-  return unless $self->_message_is_useful_by_file_modtime($s[9]);
-
-  my $date = AI_TIME_UNKNOWN;
-
-  if ($self->{determine_receive_date}) {
-    unless (defined $AICache and $date = $AICache->check($mail)) {
-      my $header;
-      if (!_mail_open($mail)) {
-        $self->{access_problem} = 1;
-        return;
-      }
-      while (<INPUT>) {
-        last if /^\015?$/s;
-        $header .= $_;
-      }
-      close(INPUT);
-      $date = Mail::SpamAssassin::Util::receive_date($header);
-      if (defined $AICache) {
-        $AICache->update($mail, $date);
-      }
-    }
-
-    return if !$self->_message_is_useful_by_date($date);
-    return if !$self->_scanprob_says_scan();
+  $self->bump_scan_progress();
+  if (!$self->{determine_receive_date}) {
+    push(@{$self->{$class}}, index_pack(AI_TIME_UNKNOWN, $class, "f", $mail));
+    return;
   }
 
-  &{$bkfunc}($self, $date, $class, 'f', $mail);
+  my $date;
 
-  return;
+  unless (defined $AICache and $date = $AICache->check($mail)) {
+    my $header;
+    if (!mail_open($mail)) {
+      $self->{access_problem} = 1;
+      return;
+    }
+    while (<INPUT>) {
+      last if /^\s*$/;
+      $header .= $_;
+    }
+    close(INPUT);
+    $date = Mail::SpamAssassin::Util::receive_date($header);
+    if (defined $AICache) {
+      $AICache->update($mail, $date);
+    }
+  }
+
+  return if !$self->message_is_useful_by_date($date);
+  push(@{$self->{$class}}, index_pack($date, $class, "f", $mail));
 }
 
-sub _scan_mailbox {
-  my ($self, $class, $folder, $bkfunc) = @_;
+sub scan_mailbox {
+  my ($self, $class, $folder) = @_;
   my @files;
 
   if (-d $folder) {
@@ -731,20 +1012,17 @@ sub _scan_mailbox {
   }
 
   foreach my $file (@files) {
-    $self->_bump_scan_progress();
+    $self->bump_scan_progress();
     if ($file =~ /\.(?:gz|bz2)$/) {
       warn "archive-iterator: compressed mbox folders are not supported at this time\n";
       $self->{access_problem} = 1;
       next;
     }
 
-    my @s = stat($file);
-    next unless $self->_message_is_useful_by_file_modtime($s[9]);
-
     my $info = {};
     my $count;
 
-    $self->_create_cache('mbox', $file);
+    $self->create_cache('mbox', $file);
 
     if ($self->{opt_cache}) {
       if ($count = $AICache->count()) {
@@ -753,7 +1031,7 @@ sub _scan_mailbox {
     }
 
     unless ($count) {
-      if (!_mail_open($file)) {
+      if (!mail_open($file)) {
         $self->{access_problem} = 1;
 	next;
       }
@@ -768,7 +1046,7 @@ sub _scan_mailbox {
         my $header = $first;	# remember first line
         while (<INPUT>) {
 	  if ($in_header) {
-            if (/^\015?$/s) {
+	    if (/^$/) {
 	      $in_header = 0;
 	    }
 	    else {
@@ -785,7 +1063,7 @@ sub _scan_mailbox {
 	  $where = tell INPUT;
         }
         if ($header) {
-          $self->_bump_scan_progress();
+          $self->bump_scan_progress();
 	  $info->{$offset} = Mail::SpamAssassin::Util::receive_date($header);
 	}
       }
@@ -798,11 +1076,10 @@ sub _scan_mailbox {
       }
 
       if ($self->{determine_receive_date}) {
-        next if !$self->_message_is_useful_by_date($v);
+        next if !$self->message_is_useful_by_date($v);
       }
-      next if !$self->_scanprob_says_scan();
 
-      &{$bkfunc}($self, $v, $class, 'm', "$file.$k");
+      push(@{$self->{$class}}, index_pack($v, $class, "m", "$file.$k"));
     }
 
     if (defined $AICache) {
@@ -811,8 +1088,8 @@ sub _scan_mailbox {
   }
 }
 
-sub _scan_mbx {
-  my ($self, $class, $folder, $bkfunc) = @_;
+sub scan_mbx {
+  my ($self, $class, $folder) = @_;
   my (@files, $fp);
 
   if (-d $folder) {
@@ -836,7 +1113,7 @@ sub _scan_mbx {
   }
 
   foreach my $file (@files) {
-    $self->_bump_scan_progress();
+    $self->bump_scan_progress();
 
     if ($folder =~ /\.(?:gz|bz2)$/) {
       warn "archive-iterator: compressed mbx folders are not supported at this time\n";
@@ -844,13 +1121,10 @@ sub _scan_mbx {
       next;
     }
 
-    my @s = stat($file);
-    next unless $self->_message_is_useful_by_file_modtime($s[9]);
-
     my $info = {};
     my $count;
 
-    $self->_create_cache('mbx', $file);
+    $self->create_cache('mbx', $file);
 
     if ($self->{opt_cache}) {
       if ($count = $AICache->count()) {
@@ -859,7 +1133,7 @@ sub _scan_mbx {
     }
 
     unless ($count) {
-      if (!_mail_open($file)) {
+      if (!mail_open($file)) {
 	$self->{access_problem} = 1;
         next;
       }
@@ -883,11 +1157,11 @@ sub _scan_mbx {
 	  # gather up the headers...
 	  my $header = '';
 	  while (<INPUT>) {
-            last if (/^\015?$/s);
+	    last if (/^\s*$/);
 	    $header .= $_;
 	  }
 
-          $self->_bump_scan_progress();
+          $self->bump_scan_progress();
 	  $info->{$offset} = Mail::SpamAssassin::Util::receive_date($header);
 
 	  # go onto the next message
@@ -906,11 +1180,10 @@ sub _scan_mbx {
       }
 
       if ($self->{determine_receive_date}) {
-        next if !$self->_message_is_useful_by_date($v);
+        next if !$self->message_is_useful_by_date($v);
       }
-      next if !$self->_scanprob_says_scan();
 
-      &{$bkfunc}($self, $v, $class, 'b', "$file.$k");
+      push(@{$self->{$class}}, index_pack($v, $class, "b", "$file.$k"));
     }
 
     if (defined $AICache) {
@@ -921,7 +1194,7 @@ sub _scan_mbx {
 
 ############################################################################
 
-sub _bump_scan_progress {
+sub bump_scan_progress {
   my ($self) = @_;
   if (exists $self->{scan_progress_sub}) {
     return unless ($self->{scan_progress_counter}++ % 50 == 0);
@@ -934,7 +1207,7 @@ sub _bump_scan_progress {
 {
   my $home;
 
-  sub _fix_globs {
+  sub fix_globs {
     my ($self, $path) = @_;
 
     unless (defined $home) {
@@ -964,7 +1237,11 @@ sub _bump_scan_progress {
   }
 }
 
-sub _create_cache {
+sub min {
+  return ($_[0] < $_[1] ? $_[0] : $_[1]);
+}
+
+sub create_cache {
   my ($self, $type, $path) = @_;
 
   if ($self->{opt_cache}) {

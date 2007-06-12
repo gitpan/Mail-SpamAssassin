@@ -7,7 +7,6 @@ BEGIN {
 
   if (-e 'test_dir') {            # running from test directory, not ..
     unshift(@INC, '../blib/lib');
-    unshift(@INC, '../lib');
   }
 }
 
@@ -24,7 +23,7 @@ use Digest::SHA1;
 my %files = (
 	"$prefix/t/data/nice/mime1" => [
 	  join("\n", 'multipart/alternative','text/plain',
-	             'multipart/mixed,text/plain','application/andrew-inset'),
+	             'multipart/mixed,text/richtext','application/andrew-inset'),
 	],
 
 	"$prefix/t/data/nice/mime2" => [
@@ -111,9 +110,8 @@ foreach my $k ( sort keys %files ) {
   close(INP);
 
   my $res = join("\n",$mail->content_summary());
-  my $want = shift @{$files{$k}};
-#  print "---$k---\n---\nGOT: $res\n---\nEXPECTED: $want\n---\n";
-  ok( $res eq $want );
+# print "---\n$res\n---\n";
+  ok( $res eq shift @{$files{$k}} );
   if ( @{$files{$k}} ) {
     my @parts = $mail->find_parts(qr/./,1);
 
@@ -130,7 +128,6 @@ foreach my $k ( sort keys %files ) {
 	  $res = Digest::SHA1::sha1_hex($parts[0]->decode());
 	}
 #	print ">> ",$parts[0]->{'type'}," = $res\n";
-#	print ">> ",$parts[0]->{'type'}," expected $_\n";
         $res = $res eq $_;
       }
       ok ( $res );

@@ -77,7 +77,7 @@ default.
 =item term [optional]
 
 The module will attempt to determine if a valid terminal exists on the
-STDIN filehandle.  This item allows you to override that value.
+filehandle.  This item allows you to override that value.
 
 =back
 
@@ -95,12 +95,11 @@ sub new {
   my $self = {
 	      'total' => $args->{total},
 	      'fh' => $args->{fh} || \*STDERR,
-              'itemtype' => $args->{itemtype} || 'msgs'
 	     };
 
   bless ($self, $class);
 
-  $self->{term} = $args->{term} || (-t STDIN);
+  $self->{term} = $args->{term} || -t $self->{fh};
 
   $self->init_bar(); # this will give us the initial progress bar
   
@@ -182,8 +181,8 @@ sub init_bar {
 
   my @chars = (' ') x $self->{bar_size};
 
-  print $fh sprintf("\r%3d%% [%s] %6.2f %s/sec %sm%ss LEFT",
-		    0, join('', @chars), 0, $self->{itemtype}, '--', '--');
+  print $fh sprintf("\r%3d%% [%s] %6.2f msgs/sec %sm%ss LEFT",
+		    0, join('', @chars), 0, '--', '--');
 
   return;
 }
@@ -238,9 +237,8 @@ sub update {
       my $min = int($eta/60) % 60;
       my $sec = int($eta % 60);
       
-      print $fh sprintf("\r%3d%% [%s] %6.2f %s/sec %02dm%02ds LEFT",
-			$percentage, join('', @chars), $self->{avg_msgs_per_sec},
-                        $self->{itemtype}, $min, $sec);
+      print $fh sprintf("\r%3d%% [%s] %6.2f msgs/sec %02dm%02ds LEFT",
+			$percentage, join('', @chars), $self->{avg_msgs_per_sec}, $min, $sec);
     }
     else { # we have no term, so fake it
       print $fh '.' x $msgs_since;
@@ -294,14 +292,12 @@ sub final {
       $chars[$_] = '=';
     }
 
-    print $fh sprintf("\r%3d%% [%s] %6.2f %s/sec %02dm%02ds DONE\n",
-		      $percentage, join('', @chars), $msgs_per_sec,
-                      $self->{itemtype}, $min, $sec);
+    print $fh sprintf("\r%3d%% [%s] %6.2f msgs/sec %02dm%02ds DONE\n",
+		      $percentage, join('', @chars), $msgs_per_sec, $min, $sec);
   }
   else {
-    print $fh sprintf("\n%3d%% Completed %6.2f %s/sec in %02dm%02ds\n",
-		      $percentage, $msgs_per_sec,
-                      $self->{itemtype}, $min, $sec);
+    print $fh sprintf("\n%3d%% Completed %6.2f msgs/sec in %02dm%02ds\n",
+		      $percentage, $msgs_per_sec, $min, $sec);
   }
 
   return;

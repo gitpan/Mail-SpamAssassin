@@ -74,7 +74,7 @@ sub new {
 ###########################################################################
 
 sub load_plugin {
-  my ($self, $package, $path, $silent) = @_;
+  my ($self, $package, $path) = @_;
 
   my $ret;
   if ($path) {
@@ -84,17 +84,8 @@ sub load_plugin {
     $path = Mail::SpamAssassin::Util::untaint_file_path(
               File::Spec->rel2abs($path)
 	    );
-
-    # if (exists $INC{$path}) {
-      # dbg("plugin: not loading $package from $path, already loaded");
-      # return;
-    # }
-
     dbg("plugin: loading $package from $path");
-
-    # use require instead of "do", so we get built-in $INC{filename}
-    # smarts
-    $ret = eval { require $path; };
+    $ret = do $path;
   }
   else {
     dbg("plugin: loading $package from \@INC");
@@ -103,22 +94,13 @@ sub load_plugin {
   }
 
   if (!$ret) {
-    if ($silent) {
-      if ($@) { dbg("plugin: failed to parse tryplugin $path: $@\n"); }
-      elsif ($!) { dbg("plugin: failed to load tryplugin $path: $!\n"); }
-    }
-    else {
-      if ($@) { warn "plugin: failed to parse plugin $path: $@\n"; }
-      elsif ($!) { warn "plugin: failed to load plugin $path: $!\n"; }
-    }
-    return;           # failure!  no point in continuing here
+    if ($@) { warn "plugin: failed to parse plugin $path: $@\n"; }
+    elsif ($!) { warn "plugin: failed to load plugin $path: $!\n"; }
   }
 
   my $plugin = eval $package.q{->new ($self->{main}); };
 
-  if ($@ || !$plugin) {
-    warn "plugin: failed to create instance of plugin $package: $@\n";
-  }
+  if ($@ || !$plugin) { warn "plugin: failed to create instance of plugin $package: $@\n"; }
 
   # Don't load the same plugin twice!
   foreach my $old_plugin (@{$self->{plugins}}) {
@@ -138,7 +120,7 @@ sub register_plugin {
   my ($self, $plugin) = @_;
   $plugin->{main} = $self->{main};
   push (@{$self->{plugins}}, $plugin);
-  # dbg("plugin: registered $plugin");
+  dbg("plugin: registered $plugin");
 
   # invalidate cache entries for any configuration-time hooks, in case
   # one has already been built; this plugin may implement that hook!
@@ -149,38 +131,6 @@ sub register_plugin {
 
 ###########################################################################
 
-sub have_callback {
-  my ($self, $subname) = @_;
-
-  # have we set up the cache entry for this callback type?
-  if (!exists $self->{cbs}->{$subname}) {
-    # nope.  run through all registered plugins and see which ones
-    # implement this type of callback.  sort by priority
-
-    my %subsbypri = ();
-    foreach my $plugin (@{$self->{plugins}}) {
-      my $methodref = $plugin->can ($subname);
-      if (defined $methodref) {
-        my $pri = $plugin->{method_priority}->{$subname} || 0;
-
-        $subsbypri{$pri} ||= [];
-        push (@{$subsbypri{$pri}}, [ $plugin, $methodref ]);
-
-        dbg("plugin: ${plugin} implements '$subname', priority $pri");
-      }
-    }
-
-    my @subs = ();
-    foreach my $pri (sort { $a <=> $b } keys %subsbypri) {
-      push @subs, @{$subsbypri{$pri}};
-    }
-
-    $self->{cbs}->{$subname} = \@subs;
-  }
-
-  return scalar(@{$self->{cbs}->{$subname}});
-}
-
 sub callback {
   my $self = shift;
   my $subname = shift;
@@ -188,7 +138,17 @@ sub callback {
 
   # have we set up the cache entry for this callback type?
   if (!exists $self->{cbs}->{$subname}) {
-    return unless $self->have_callback($subname);
+    # nope.  run through all registered plugins and see which ones
+    # implement this type of callback
+    my @subs = ();
+    foreach my $plugin (@{$self->{plugins}}) {
+      my $methodref = $plugin->can ($subname);
+      if (defined $methodref) {
+        push (@subs, [ $plugin, $methodref ]);
+        dbg("plugin: ${plugin} implements '$subname'");
+      }
+    }
+    $self->{cbs}->{$subname} = \@subs;
   }
 
   foreach my $cbpair (@{$self->{cbs}->{$subname}}) {
@@ -216,13 +176,6 @@ sub callback {
 
   $overallret ||= $ret;
   return $overallret;
-}
-
-###########################################################################
-
-sub get_loaded_plugins_list {
-  my ($self) = @_;
-  return @{$self->{plugins}};
 }
 
 ###########################################################################

@@ -36,10 +36,10 @@ print OUT "
 ";
 close OUT;
 
-ok (start_spamd ("--virtual-config-dir=log/virtualconfig/%u -L"));
+ok (start_spamd ("--virtual-config-dir=log/virtualconfig/%u -L -u $current_user"));
 ok (spamcrun ("-u testuser < data/spam/009", \&patterns_run_cb));
 ok (stop_spamd ());
 
-checkfile ($spamd_stderr, \&patterns_run_cb);
+checkfile ("spamd_allow_user_rules-spamd.err", \&patterns_run_cb);
 ok_all_patterns();
 

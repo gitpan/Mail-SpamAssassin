@@ -92,7 +92,7 @@ sub create_test_message_3 {
   my $text = q{From: foo
 Message-Id: <bar>
 To: baz
-Subject: testing recursion 3
+Subject: testing recursion 2
 };
 
   for my $i (1 .. 600) {

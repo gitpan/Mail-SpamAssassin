@@ -180,9 +180,7 @@ sub _run {      # private
       }
     }
   } elsif ($timedout) {
-    # this happens occasionally; haven't figured out why.  seems
-    # harmless in effect, though, so just issue a warning and carry on...
-    warn "timeout with empty \$@";  
+    warn "timeout with empty \$@";  # this is worth complaining about
     $self->{timed_out} = 1;
   }
 

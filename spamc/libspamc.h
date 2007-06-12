@@ -27,23 +27,14 @@
  4115 named type definition in parentheses
  4127 conditional expression is constant
  4514 unreferenced inline function removed
- 4996 deprecated "unsafe" functions (bug 4855)
  */
 #pragma warning( disable : 4115 4127 4514 )
-#if (_MSC_VER >= 1400)  /* VC8+ */
-#pragma warning( disable : 4996 )
-#endif
-
 #endif
 #include <winsock.h>
 #else
 #include <netdb.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
-/* some platforms (Cygwin) don't implement getaddrinfo */
-#ifdef EAI_AGAIN
-#define SPAMC_HAS_ADDRINFO 1
-#endif
 #endif
 
 #if (defined(_WIN32) || !defined(_SYSEXITS_H))
@@ -113,20 +104,6 @@
 /* May 5, 2005 NP: added list reporting support */
 #define SPAMC_REPORT_MSG      (1<<20)
 
-/* Oct 21, 2005 sidney: added ping test */
-#define SPAMC_PING      (1<<19)
-
-/* Jan 1, 2007 sidney: added SSL protocol versions */
-/* no flags means use default of SSL_v23 */
-/* Set both flags to specify TSL_v1 */
-#define SPAMC_SSLV2 (1<<18)
-#define SPAMC_SSLV3 (1<<17)
-
-/* Nov 30, 2006 jm: add -z, zlib support */
-#define SPAMC_USE_ZLIB        (1<<16)
-
-/* Jan 16, 2007 jm: get markup headers from spamd */
-#define SPAMC_HEADERS         (1<<15)
 
 #define SPAMC_MESSAGE_CLASS_SPAM 1
 #define SPAMC_MESSAGE_CLASS_HAM  2
@@ -136,8 +113,6 @@
 
 #define SPAMC_REMOVE_LOCAL       4
 #define SPAMC_REMOVE_REMOTE      8
-
-#define SPAMC_MAX_MESSAGE_LEN     (256 * 1024 * 1024)     /* see bug 4928 */
 
 /* Aug 14, 2002 bj: A struct for storing a message-in-progress */
 typedef enum
@@ -222,17 +197,9 @@ struct transport
 
     unsigned short port;	/* for TCP sockets              */
 
-#ifdef SPAMC_HAS_ADDRINFO
-    struct addrinfo *hosts[TRANSPORT_MAX_HOSTS];
-#else
     struct in_addr hosts[TRANSPORT_MAX_HOSTS];
-#endif
     int nhosts;
     int flags;
-
-    /* added in SpamAssassin 3.2.0 */
-    int connect_retries;
-    int retry_sleep;
 };
 
 extern void transport_init(struct transport *tp);
