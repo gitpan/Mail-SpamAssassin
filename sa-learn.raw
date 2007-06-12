@@ -36,37 +36,26 @@ my $LOCAL_RULES_DIR = '@@LOCAL_RULES_DIR@@';  # substituted at 'make' time
 
 use lib '@@INSTALLSITELIB@@';                # substituted at 'make' time
 
-BEGIN {
-  # Locate locally installed SA libraries *without* using FindBin, which generates
-  # warnings and causes more trouble than its worth.  We don't need to be too
-  # smart about this BTW.
+BEGIN {                          # see comments in "spamassassin.raw" for doco
   my @bin = File::Spec->splitpath($0);
-  my $bin = ($bin[0] ? File::Spec->catpath(@bin[0..1]) : $bin[1])  # /home/jm/foo -> /home/jm
-            || File::Spec->curdir;                                 # foo          -> .
+  my $bin = ($bin[0] ? File::Spec->catpath(@bin[0..1]) : $bin[1])
+            || File::Spec->curdir;
 
-  # check to make sure it wasn't just installed in the normal way.
-  # note that ./lib/Mail/SpamAssassin.pm takes precedence, for
-  # building SpamAssassin on a machine where an old version is installed.
   if (-e $bin.'/lib/Mail/SpamAssassin.pm'
-        || !-e '@@INSTALLSITELIB@@/Mail/SpamAssassin.pm')
+        || !-e '@@INSTALLSITELIB@@/Mail/SpamAssassin.pm' )
   {
-    # Firstly, are we running "make test" in the "t" dir?  the test files
-    # *need* to use 'blib', so that 'use bytes' is removed for pre-5.6 perls
-    # beforehand by the preproc.  However, ./spamassassin does not, as the
-    # preproc will have stripped out the "use rule files from cwd" code from
-    # Mail::SpamAssassin.  So we want to use blib just for the t scripts.
-    if ( $bin eq '../' && -e '../blib/lib/Mail/SpamAssassin.pm' ) {
-      unshift(@INC, '../blib/lib');
-    }
-    else {
-      # These are common paths where the SA libs might be found.
-      foreach (qw(lib ../lib/site_perl
-                  ../lib/spamassassin ../share/spamassassin/lib))
+    my $searchrelative;
+    $searchrelative = 1;    # disabled during "make install": REMOVEFORINST
+    if ($searchrelative && $bin eq '../' && -e '../blib/lib/Mail/SpamAssassin.pm')
+    {
+      unshift ( @INC, '../blib/lib' );
+    } else {
+      foreach ( qw(lib ../lib/site_perl
+                ../lib/spamassassin ../share/spamassassin/lib))
       {
-        my $dir = File::Spec->catdir($bin, split('/', $_));
-        if(-f File::Spec->catfile($dir, "Mail", "SpamAssassin.pm")) {
-          unshift(@INC, $dir); last;
-        }
+        my $dir = File::Spec->catdir( $bin, split ( '/', $_ ) );
+        if ( -f File::Spec->catfile( $dir, "Mail", "SpamAssassin.pm" ) )
+        { unshift ( @INC, $dir ); last; }
       }
     }
   }
@@ -85,7 +74,8 @@ use Mail::SpamAssassin::Util::Progress;
 %opt = (
   'force-expire' => 0,
   'use-ignores'  => 0,
-  'nosync'    => 0,
+  'nosync'       => 0,
+  'cf'           => []
 );
 
 Getopt::Long::Configure(
@@ -104,6 +94,7 @@ GetOptions(
   'configpath|config-file|config-dir|c|C=s' => \$opt{'configpath'},
   'prefspath|prefs-file|p=s'                => \$opt{'prefspath'},
   'siteconfigpath=s'                        => \$opt{'siteconfigpath'},
+  'cf=s'                                    => \@{$opt{'cf'}},
 
   'folders|f=s'          => \$opt{'folders'},
   'force-expire|expire'  => \$opt{'force-expire'},
@@ -118,7 +109,7 @@ GetOptions(
   'randseed=i'  => \$opt{'randseed'},
   'stopafter=i' => \$opt{'stopafter'},
 
-  'debug-level|D:s' => \$opt{'debug'},
+  'debug|debug-level|D:s' => \$opt{'debug'},
   'help|h|?'        => \$opt{'help'},
   'version|V'       => \$opt{'version'},
 
@@ -195,6 +186,29 @@ if ( defined $opt{'old_format'} ) {
   }
 }
 
+my $post_config = '';
+
+# kluge to support old check_bayes_db operation
+# bug 3799: init() will go r/o with the configured DB, and then dbpath needs
+# to override.  Just access the dbpath version via post_config_text.
+if ( defined $bayes_override_path ) {
+  # Add a default prefix if the path is a directory
+  if ( -d $bayes_override_path ) {
+    $bayes_override_path = File::Spec->catfile( $bayes_override_path, 'bayes' );
+  }
+
+  $post_config .= "bayes_path $bayes_override_path\n";
+}
+
+# These options require bayes_scanner, which requires "use_bayes 1", but
+# that's not necessary for these commands.
+if (defined $opt{'dump'} || defined $opt{'import'} || defined $opt{'clear'} ||
+    defined $opt{'backup'} || defined $opt{'restore'}) {
+  $post_config .= "use_bayes 1\n";
+}
+
+$post_config .= join("\n", @{$opt{'cf'}})."\n";
+
 # create the tester factory
 $spamtest = new Mail::SpamAssassin(
   {
@@ -208,6 +222,7 @@ $spamtest = new Mail::SpamAssassin(
     PREFIX              => $PREFIX,
     DEF_RULES_DIR       => $DEF_RULES_DIR,
     LOCAL_RULES_DIR     => $LOCAL_RULES_DIR,
+    post_config_text	=> $post_config,
   }
 );
 
@@ -216,20 +231,6 @@ $spamtest->init(1);
 if (Mail::SpamAssassin::Util::am_running_on_windows()) {
   binmode(STDIN);       # bug 4363
   binmode(STDOUT);
-}
-
-# kluge to support old check_bayes_db operation
-if ( defined $bayes_override_path ) {
-
-  # Add a default prefix if the path is a directory
-  if ( -d $bayes_override_path ) {
-    $bayes_override_path = File::Spec->catfile( $bayes_override_path, 'bayes' );
-  }
-
-  # init() above ties to the db r/o and leaves it that way
-  # so we need to untie before dumping (it'll reopen)
-  $spamtest->finish_learner();
-  $spamtest->{conf}->{bayes_path} = $bayes_override_path;
 }
 
 if ( defined $opt{'dump'} ) {
@@ -401,7 +402,10 @@ eval {
 
     # make sure the target list is in the normal AI format
     if ($targets[$elem] !~ /^[^:]*:[a-z]+:/) {
-      $targets[$elem] = target($targets[$elem]);
+      my $item = splice @targets, $elem, 1;
+      target($item); # add back to the list
+      $elem--; # go back to this element again
+      next;
     }
   }
 
@@ -409,9 +413,8 @@ eval {
 
   my $iter = new Mail::SpamAssassin::ArchiveIterator(
     {
-      'opt_j'   => 0,
-      'opt_n'   => 1,
       'opt_all' => 0,       # skip messages over 250k
+      'opt_want_date' => 0,
     }
   );
 
@@ -569,9 +572,9 @@ Options:
  --dbpath <path>       Allows commandline override (in bayes_path form)
                        for where to read the Bayes DB from
  --dump [all|data|magic]  Display the contents of the Bayes database
-                          Takes optional argument for what to display
-  --regexp <re>        For dump only, specifies which tokens to dump
-                       based on a regular expression.
+                       Takes optional argument for what to display
+  --regexp <re>        For dump only, specifies which tokens to
+                       dump based on a regular expression.
  -f file, --folders=file  Read list of files/directories from file
  --dir                 Ignored; historical compatibility
  --file                Ignored; historical compatibility
@@ -579,11 +582,11 @@ Options:
  --mbx                 Input sources are in mbx format
  --showdots            Show progress using dots
  --progress            Show progress using progress bar
- --no-sync             Skip synchronizing the database and journal after
-                       learning
+ --no-sync             Skip synchronizing the database and journal
+                       after learning
  -L, --local           Operate locally, no network accesses
- --import              Migrate data from older version/non DB_File based
-                       databases
+ --import              Migrate data from older version/non DB_File
+                       based databases
  --clear               Wipe out existing database
  --backup              Backup, to STDOUT, existing database
  --restore <filename>  Restore a database from filename
@@ -596,7 +599,8 @@ Options:
                        Set user preferences file
  --siteconfigpath=path Path for site configs
                        (default: /etc/mail/spamassassin)
- -D, --debug-level     Print debugging messages
+ --cf='config line'    Additional line of configuration
+ -D, --debug [area=n,...]  Print debugging messages
  -V, --version         Print version
  -h, --help            Print usage message
 
@@ -622,6 +626,9 @@ If you make a mistake and scan a mail as ham when it is spam, or vice
 versa, simply rerun this command with the correct classification, and the
 mistake will be corrected.  SpamAssassin will automatically 'forget' the
 previous indications.
+
+Users of C<spamd> who wish to perform training remotely, over a network,
+should investigate the C<spamc -L> switch.
 
 =head1 OPTIONS
 
@@ -750,6 +757,12 @@ Ignore the default directories (usually C</usr/share/spamassassin> or similar).
 Use the specified path for locating site-specific configuration files.  Ignore
 the default directories (usually C</etc/mail/spamassassin> or similar).
 
+=item B<--cf='config line'>
+
+Add additional lines of configuration directly from the command-line, parsed
+after the configuration files are read.   Multiple B<--cf> arguments can be
+used, and each will be considered a separate line of configuration.
+
 =item B<-p> I<prefs>, B<--prefspath>=I<prefs>, B<--prefs-file>=I<prefs>
 
 Read user score preferences from I<prefs> (usually C<$HOME/.spamassassin/user_prefs>).
@@ -760,7 +773,7 @@ Prints a progress bar (to STDERR) showing the current progress.  In the case
 where no valid terminal is found this option will behave very much like the
 --showdots option.
 
-=item B<-D>, B<--debug-level>
+=item B<-D> [I<area,...>], B<--debug> [I<area,...>]
 
 Produce debugging output. If no areas are listed, all debugging information is
 printed. Diagnostic output can also be enabled for each area individually;
@@ -768,6 +781,11 @@ I<area> is the area of the code to instrument. For example, to produce
 diagnostic output on bayes, learn, and dns, use:
 
         spamassassin -D bayes,learn,dns
+
+For more information about which areas (also known as channels) are available,
+please see the documentation at:
+
+        C<http://wiki.apache.org/spamassassin/DebugChannels>
 
 Higher priority informational messages that are suitable for logging in normal
 circumstances are available with an area of "info".

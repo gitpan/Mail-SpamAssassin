@@ -36,7 +36,6 @@ package Mail::SpamAssassin::Message::Node;
 
 use strict;
 use warnings;
-use bytes;
 
 use Mail::SpamAssassin;
 use Mail::SpamAssassin::Constants qw(:sa);
@@ -57,15 +56,12 @@ sub new {
   my $self = {
     headers		=> {},
     raw_headers		=> {},
-    body_parts		=> [],
     header_order	=> []
   };
 
   # deal with any parameters
   my($opts) = @_;
-  if (defined $opts->{'subparse'}) {
-    $self->{subparse} = $opts->{'subparse'};
-  }
+  $self->{normalize} = $opts->{'normalize'} || 0;
 
   bless($self,$class);
   $self;
@@ -94,7 +90,8 @@ only look at the part and any direct children of the part.
 
 # Used to find any MIME parts whose simple content-type matches a given regexp
 # Searches it's own and any children parts.  Returns an array of MIME
-# objects which match.
+# objects which match.  Our callers may expect the default behavior which is a
+# depth-first array of parts.
 #
 sub find_parts {
   my ($self, $re, $onlyleaves, $recursive) = @_;
@@ -109,30 +106,20 @@ sub find_parts {
     $depth = 1;
   }
   
-  return $self->_find_parts($re, $onlyleaves, $depth);
-}
-
-# We have 2 functions in find_parts() to optimize out the penalty of
-# $onlyleaves, $re, and $recursive over and over again.
-#
-sub _find_parts {
-  my ($self, $re, $onlyleaves, $depth) = @_;
   my @ret = ();
+  my @search = ( $self );
 
-  # If this object matches, mark it for return.
-  my $amialeaf = $self->is_leaf();
+  while (my $part = shift @search) {
+    # If this object matches, mark it for return.
+    my $amialeaf = $part->is_leaf();
 
-  if ( $self->{'type'} =~ /$re/ && (!$onlyleaves || $amialeaf) ) {
-    push(@ret, $self);
-  }
+    if ( $part->{'type'} =~ /$re/ && (!$onlyleaves || $amialeaf) ) {
+      push(@ret, $part);
+    }
   
-  if ( !$amialeaf && (!defined $depth || $depth > 0)) {
-    $depth-- if defined $depth;
-
-    # This object is a subtree root.  Search all children.
-    foreach my $parts ( @{$self->{'body_parts'}} ) {
-      # Add the recursive results to our results
-      push(@ret, $parts->_find_parts($re, $onlyleaves, $depth));
+    if ( !$amialeaf && (!defined $depth || $depth > 0)) {
+      $depth-- if defined $depth;
+      unshift(@search, @{$part->{'body_parts'}});
     }
   }
 
@@ -183,7 +170,12 @@ sub header {
       $self->{'raw_headers'}->{$key} = [];
     }
 
-    push @{ $self->{'headers'}->{$key} },     _decode_header($raw_value);
+    my $dec_value = $raw_value;
+    $dec_value =~ s/\n[ \t]+/ /gs;
+    $dec_value =~ s/\s*$//s;
+    $dec_value =~ s/^\s*//s;
+    push @{ $self->{'headers'}->{$key} },     $self->_decode_header($dec_value);
+
     push @{ $self->{'raw_headers'}->{$key} }, $raw_value;
 
     return $self->{'headers'}->{$key}->[-1];
@@ -268,13 +260,28 @@ Return a reference to the the raw array.  Treat this as READ ONLY.
 =cut
 
 sub raw {
-  return $_[0]->{'raw'};
+  my $self = shift;
+
+  # Ok, if we're called we are expected to return an array.
+  # so if it's a file reference, read in the message into an array...
+  #
+  # NOTE: that "ref undef" works, so don't bother checking for a defined var
+  # first.
+  if (ref $self->{'raw'} eq 'GLOB') {
+    my @array;
+    my $fd = $self->{'raw'};
+    seek $fd, 0, 0;
+    @array = <$fd>;
+    return \@array;
+  }
+
+  return $self->{'raw'};
 }
 
 =item decode()
 
 If necessary, decode the part text as base64 or quoted-printable.
-The decoded text will be returned as a scalar.  An optional length
+The decoded text will be returned as a scalar string.  An optional length
 parameter can be passed in which limits how much decoded data is returned.
 If the scalar isn't needed, call with "0" as a parameter.
 
@@ -284,13 +291,32 @@ sub decode {
   my($self, $bytes) = @_;
 
   if ( !exists $self->{'decoded'} ) {
+    # Someone is looking for a decoded part where there is no raw data
+    # (multipart or subparsed message, etc.)  Just return undef.
+    if (!exists $self->{'raw'}) {
+      return undef;
+    }
+
+    my $raw;
+
+    # if the part is held in a temp file, read it into the scalar
+    if (ref $self->{'raw'} eq 'GLOB') {
+      my $fd = $self->{'raw'};
+      seek $fd, 0, 0;
+      local $/ = undef;
+      $raw = <$fd>;
+    }
+    else {
+      # create a new scalar from the raw array in memory
+      $raw = join('', @{$self->{'raw'}});
+    }
+
     my $encoding = lc $self->header('content-transfer-encoding') || '';
 
     if ( $encoding eq 'quoted-printable' ) {
       dbg("message: decoding quoted-printable");
-      $self->{'decoded'} = [
-        map { s/\r\n/\n/; $_; } split ( /^/m, Mail::SpamAssassin::Util::qp_decode( join ( "", @{$self->{'raw'}} ) ) )
-	];
+      $self->{'decoded'} = Mail::SpamAssassin::Util::qp_decode($raw);
+      $self->{'decoded'} =~ s/\015\012/\012/gs;
     }
     elsif ( $encoding eq 'base64' ) {
       dbg("message: decoding base64");
@@ -298,16 +324,16 @@ sub decode {
       # if it's not defined or is 0, do the whole thing, otherwise only decode
       # a portion
       if ($bytes) {
-        return Mail::SpamAssassin::Util::base64_decode(join("", @{$self->{'raw'}}), $bytes);
+        return Mail::SpamAssassin::Util::base64_decode($raw, $bytes);
       }
       else {
         # Generate the decoded output
-        $self->{'decoded'} = [ Mail::SpamAssassin::Util::base64_decode(join("", @{$self->{'raw'}})) ];
+        $self->{'decoded'} = Mail::SpamAssassin::Util::base64_decode($raw);
       }
 
       # If it's a type text or message, split it into an array of lines
       if ( $self->{'type'} =~ m@^(?:text|message)\b/@i ) {
-        $self->{'decoded'} = [ map { s/\r\n/\n/; $_; } split(/^/m, $self->{'decoded'}->[0]) ];
+        $self->{'decoded'} =~ s/\015\012/\012/gs;
       }
     }
     else {
@@ -318,17 +344,17 @@ sub decode {
       else {
         dbg("message: no encoding detected");
       }
-      $self->{'decoded'} = $self->{'raw'};
+      $self->{'decoded'} = $raw;
     }
   }
 
   if ( !defined $bytes || $bytes ) {
-    my $tmp = join("", @{$self->{'decoded'}});
     if ( !defined $bytes ) {
-      return $tmp;
+      # force a copy
+      return '' . $self->{'decoded'};
     }
     else {
-      return substr($tmp, 0, $bytes);
+      return substr($self->{'decoded'}, 0, $bytes);
     }
   }
 }
@@ -350,6 +376,31 @@ sub _html_render {
   return 0;
 }
 
+sub _normalize {
+  my ($self, $data, $charset) = @_;
+  return $data unless $self->{normalize};
+
+  my $detected = Encode::Detect::Detector::detect($data);
+
+  my $converter;
+
+  if ($charset && $charset !~ /^us-ascii$/i &&
+      ($detected || 'none') !~ /^(?:UTF|EUC|ISO-2022|Shift_JIS|Big5|GB)/i) {
+      dbg("Using labeled charset $charset");
+      $converter = Encode::find_encoding($charset);
+  }
+
+  $converter = Encode::find_encoding($detected) unless $converter || !defined($detected);
+
+  return $data unless $converter;
+
+  dbg("Converting...");
+
+  my $rv = $converter->decode($data, 0);
+  utf8::downgrade($rv, 1);
+  return $rv
+}
+
 =item rendered()
 
 render_text() takes the given text/* type MIME part, and attempts to
@@ -363,17 +414,20 @@ or whatever the original type was), and the rendered text.
 sub rendered {
   my ($self) = @_;
 
-  # We don't render anything except text
-  return(undef,undef) unless ( $self->{'type'} =~ /^text\b/i );
-
   if (!exists $self->{rendered}) {
-    my $text = $self->decode();
+    # We only know how to render text/plain and text/html ...
+    # Note: for bug 4843, make sure to skip text/calendar parts
+    # we also want to skip things like text/x-vcard
+    # text/x-aol is ignored here, but looks like text/html ...
+    return(undef,undef) unless ( $self->{'type'} =~ /^text\/(?:plain|html)$/i );
+
+    my $text = $self->_normalize($self->decode(), $self->{charset});
     my $raw = length($text);
 
     # render text/html always, or any other text|text/plain part as text/html
     # based on a heuristic which simulates a certain common mail client
-    if ($raw > 0 && ($self->{'type'} =~ m@^text/html\b@i ||
-		     ($self->{'type'} =~ m@^text(?:$|/plain)@i &&
+    if ($raw > 0 && ($self->{'type'} =~ m@^text/html$@i ||
+		     ($self->{'type'} =~ m@^text/plain$@i &&
 		      _html_render(substr($text, 0, 23)))))
     {
       $self->{rendered_type} = 'text/html';
@@ -398,11 +452,30 @@ sub rendered {
     }
     else {
       $self->{rendered_type} = $self->{type};
-      $self->{rendered} = $text;
+      $self->{rendered} = $self->{'visible_rendered'} = $text;
+      $self->{'invisible_rendered'} = '';
     }
   }
 
   return ($self->{rendered_type}, $self->{rendered});
+}
+
+=item set_rendered($text, $type)
+
+Set the rendered text and type for the given part.  If type is not
+specified, and text is a defined value, a default of 'text/plain' is used.
+This can be used, for instance, to render non-text parts using plugins.
+
+=cut
+
+sub set_rendered {
+  my ($self, $text, $type) = @_;
+
+  $type = 'text/plain' if (!defined $type && defined $text);
+
+  $self->{'rendered_type'} = $type;
+  $self->{'rendered'} = $self->{'visible_rendered'} = $text;
+  $self->{'invisible_rendered'} = defined $text ? '' : undef;
 }
 
 =item visible_rendered()
@@ -438,32 +511,27 @@ Note: This function requires that the message be parsed first!
 
 # return an array with scalars describing mime parts
 sub content_summary {
-  my($self, $recurse) = @_;
+  my($self) = @_;
 
-  # go recursive the first time through
-  $recurse = 1 unless ( defined $recurse );
+  my @ret = ( [ $self->{'type'} ] );
+  my @search = ( );
 
-  # If this object matches, mark it for return.
-  if ( exists $self->{'body_parts'} ) {
-    my @ret = ();
-
-    # This object is a subtree root.  Search all children.
-    foreach my $parts ( @{$self->{'body_parts'}} ) {
-      # Add the recursive results to our results
-      my @p = $parts->content_summary(0);
-      if ( $recurse ) {
-        push(@ret, join(",", @p));
-      }
-      else {
-        push(@ret, @p);
-      }
+  if (exists $self->{'body_parts'}) {
+    my $count = @{$self->{'body_parts'}};
+    for(my $i=0; $i<$count; $i++) {
+      push(@search, [ $i+1, $self->{'body_parts'}->[$i] ]);
     }
+  }
 
-    return($self->{'type'}, @ret);
+  while(my $part = shift @search) {
+    my($index, $part) = @{$part};
+    push(@{$ret[$index]}, $part->{'type'});
+    if (exists $part->{'body_parts'}) {
+      unshift(@search, map { [ $index, $_ ] } @{$part->{'body_parts'}});
+    }
   }
-  else {
-    return $self->{'type'};
-  }
+
+  return map { join(",", @{$_}) } @ret;
 }
 
 =item delete_header()
@@ -486,11 +554,11 @@ sub delete_header {
 
 # decode a header appropriately.  don't bother adding it to the pod documents.
 sub __decode_header {
-  my ( $encoding, $cte, $data ) = @_;
+  my ( $self, $encoding, $cte, $data ) = @_;
 
   if ( $cte eq 'B' ) {
     # base 64 encoded
-    return Mail::SpamAssassin::Util::base64_decode($data);
+    $data = Mail::SpamAssassin::Util::base64_decode($data);
   }
   elsif ( $cte eq 'Q' ) {
     # quoted printable
@@ -498,34 +566,35 @@ sub __decode_header {
     # the RFC states that in the encoded text, "_" is equal to "=20"
     $data =~ s/_/=20/g;
 
-    return Mail::SpamAssassin::Util::qp_decode($data);
+    $data = Mail::SpamAssassin::Util::qp_decode($data);
   }
   else {
     # not possible since the input has already been limited to 'B' and 'Q'
     die "message: unknown encoding type '$cte' in RFC2047 header";
   }
+  return $self->_normalize($data, $encoding);
 }
 
 # Decode base64 and quoted-printable in headers according to RFC2047.
 #
 sub _decode_header {
-  my($header) = @_;
+  my($self, $header) = @_;
 
   return '' unless $header;
 
   # deal with folding and cream the newlines and such
   $header =~ s/\n[ \t]+/\n /g;
-  $header =~ s/\r?\n//g;
-
-  return $header unless $header =~ /=\?/;
+  $header =~ s/\015?\012//gs;
 
   # multiple encoded sections must ignore the interim whitespace.
   # to avoid possible FPs with (\s+(?==\?))?, look for the whole RE
   # separated by whitespace.
   1 while ($header =~ s/(=\?[\w_-]+\?[bqBQ]\?[^?]+\?=)\s+(=\?[\w_-]+\?[bqBQ]\?[^?]+\?=)/$1$2/g);
 
-  $header =~
-    s/=\?([\w_-]+)\?([bqBQ])\?([^?]+)\?=/__decode_header($1, uc($2), $3)/ge;
+  unless ($header =~
+	  s/=\?([\w_-]+)\?([bqBQ])\?([^?]+)\?=/$self->__decode_header($1, uc($2), $3)/ge) {
+    $header = $self->_normalize($header);
+  }
 
   return $header;
 }
@@ -547,8 +616,6 @@ scalar context or both are returned in array context.
 
 =cut
 
-# TODO: this could be made much faster by only processing all headers
-# when called in array context, otherwise just do one header
 sub get_header {
   my ($self, $hdr, $raw) = @_;
   $raw ||= 0;
@@ -561,7 +628,7 @@ sub get_header {
   my @hdrs;
   if ( $raw ) {
     if (@hdrs = $self->raw_header($hdr)) {
-      @hdrs = map { s/\r?\n\s+/ /g; $_; } @hdrs;
+      @hdrs = map { s/\015?\012\s+/ /gs; $_; } @hdrs;
     }
   }
   else {
@@ -633,37 +700,8 @@ sub get_all_headers {
   return wantarray ? @lines : join ('', @lines);
 }
 
-# ---------------------------------------------------------------------------
-
-=item finish()
-
-Clean up the object so that it can be destroyed.
-
-=cut
-
-sub finish {
-  my ($self) = @_;
-
-  # Clean up ourself
-  undef $self->{'headers'};
-  undef $self->{'raw_headers'};
-  undef $self->{'header_order'};
-  undef $self->{'raw'};
-  undef $self->{'decoded'};
-  undef $self->{'rendered'};
-  undef $self->{'visible_rendered'};
-  undef $self->{'invisible_rendered'};
-  undef $self->{'type'};
-  undef $self->{'rendered_type'};
-
-  # Clean up our kids
-  if (exists $self->{'body_parts'}) {
-    while ( my $part = shift @{$self->{'body_parts'}} ) {
-      $part->finish();
-    }
-    undef $self->{'body_parts'};
-  }
-}
+# legacy public API; now a no-op.
+sub finish { }
 
 # ---------------------------------------------------------------------------
 

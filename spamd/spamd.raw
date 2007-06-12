@@ -22,19 +22,64 @@ my $LOCAL_RULES_DIR = '@@LOCAL_RULES_DIR@@';    # substituted at 'make' time
 my $LOCAL_STATE_DIR = '@@LOCAL_STATE_DIR@@';    # substituted at 'make' time
 use lib '@@INSTALLSITELIB@@';                   # substituted at 'make' time
 
-BEGIN {    # added by jm for use inside the distro
-  if ( -e '../blib/lib/Mail/SpamAssassin.pm' ) {
-    unshift ( @INC, '../blib/lib' );
-  }
-  else {
-    unshift ( @INC, '../lib' );
-  }
+# added by jm for use inside the distro
+# This is disabled during the "make install" process.
+BEGIN {
+  if ( -e '../blib/lib/Mail/SpamAssassin.pm' ) {    # REMOVEFORINST
+    unshift ( @INC, '../blib/lib' );                # REMOVEFORINST
+  } else {                                          # REMOVEFORINST
+    unshift ( @INC, '../lib' );                     # REMOVEFORINST
+  }                                                 # REMOVEFORINST
 }
 
 use strict;
 use warnings;
 
-use IO::Socket;
+# Big Ugly Hack; purpose: don't force requirement on IO::Socket::INET6
+BEGIN {
+  use Socket;
+  eval {
+    require IO::Socket::INET6;
+    require Socket6;
+  };
+  if ($@) {    # IPv4 only
+    require IO::Socket::INET;
+    *new_io_socket_inetx = sub { IO::Socket::INET->new(@_); };
+    *ip_or_name_to_ip    = sub {
+      my $in_addr = (gethostbyname(shift))[4] or return undef;
+      Socket::inet_ntoa($in_addr);
+    };
+    *peer_info_from_socket = sub {
+      my $sock = shift;
+      my ($port, $in_addr) = Socket::sockaddr_in($sock->peername)
+        or return;
+      my $addr = Socket::inet_ntoa($in_addr) or return;
+      my $host = gethostbyaddr($in_addr, Socket::AF_INET()) || $addr;
+      return ($port, $addr, $host);
+    };
+  }
+  else {    # IPv4+IPv6
+    *new_io_socket_inetx = sub { IO::Socket::INET6->new(@_); };
+    *ip_or_name_to_ip    = sub {
+      my $addr = (
+        Socket6::getaddrinfo(
+          shift, '', Socket::AF_UNSPEC(), Socket::SOCK_STREAM()
+        )
+        )[3]
+        or return undef;
+      $addr = (Socket6::getnameinfo($addr, Socket6::NI_NUMERICHOST()))[0];
+    };
+    *peer_info_from_socket = sub {
+      my $sock = shift;
+      my $addr = $sock->peerhost or return;
+      my $host =
+        (Socket6::getnameinfo($sock->peername, Socket6::NI_NAMEREQD()))[0]
+        || $addr;
+      return ($sock->peerport(), $addr, $host);
+    };
+  }
+}
+
 use IO::Handle;
 use IO::Pipe;
 
@@ -67,11 +112,14 @@ BEGIN {
   eval { require Time::HiRes };
   Time::HiRes->import(qw(time)) unless $@;
   # redirect __WARN__ and __DIE__
+  # do not trap warnings here based on eval scope; evals are very
+  # common throughout.  die()s can be trapped though.
   $SIG{__WARN__} = sub {
     log_message("warn", $_[0]);
   };
   $SIG{__DIE__} = sub {
-    log_message("error", $_[0]) if $_[0] !~ /\bin eval\b/;
+    # see http://use.perl.org/comments.pl?mode=flat&sid=33872 for $^S
+    log_message("error", $_[0]) unless $^S;
   };
 }
 
@@ -100,6 +148,8 @@ sub print_version {
   printf("  running on Perl %s\n", join(".", map { $_||=0; $_*1 } ($] =~ /(\d)\.(\d{3})(\d{3})?/)));
   eval { require IO::Socket::SSL; };
   printf("  with SSL support (%s %s)\n", "IO::Socket::SSL", $IO::Socket::SSL::VERSION) unless ($@);
+  eval { require Compress::Zlib; };
+  printf("  with zlib support (%s %s)\n", "Compress::Zlib", $Compress::Zlib::VERSION) unless ($@);
 }
 
 sub print_usage_and_exit {
@@ -126,6 +176,7 @@ my %opt = (
   'min-children'  => 1,         # min kids to have running
   'min-spare'     => 1,         # min kids that must be spare
   'max-spare'     => 2,         # max kids that should be spare
+  'cf'            => [],        # extra config lines
 );
 
 
@@ -168,11 +219,12 @@ GetOptions(
   'helper-home-dir|H:s'      => \$opt{'home_dir_for_helpers'},
   'help|h'                   => \$opt{'help'},
   'ident-timeout=f'          => \$opt{'ident-timeout'},
+  'ipv4only|ipv4-only|ipv4'  => \$opt{'force_ipv4'},
   'ldap-config!'             => \$opt{'ldap-config'},
   'listen-ip|ip-address|i:s' => \$opt{'listen-ip'},
   'local!'                   => \$opt{'local'},
-  'l'                        => \$opt{'tell'},
   'L'                        => \$opt{'local'},
+  'l'                        => \$opt{'tell'},
   'round-robin!'             => \$opt{'round-robin'},
   'min-children=i'           => \$opt{'min-children'},
   'max-children|m=i'         => \$opt{'max-children'},
@@ -191,12 +243,15 @@ GetOptions(
   'setuid-with-ldap'         => \$opt{'setuid-with-ldap'},
   'setuid-with-sql'          => \$opt{'setuid-with-sql'},
   'siteconfigpath=s'         => \$opt{'siteconfigpath'},
+  'cf=s'                     => \@{$opt{'cf'}},
   'socketgroup=s'            => \$opt{'socketgroup'},
   'socketmode=s'             => \$opt{'socketmode'},
   'socketowner=s'            => \$opt{'socketowner'},
   'socketpath=s'             => \$opt{'socketpath'},
   'sql-config!'              => \$opt{'sql-config'},
   'ssl'                      => \$opt{'ssl'},
+  'ssl-port=s'               => \$opt{'ssl-port'},
+  'ssl-version=s'            => \$opt{'ssl-version'},
   'syslog-socket=s'          => \$opt{'syslog-socket'},
   'syslog|s=s'               => \$opt{'syslog'},
   'timeout-tcp|T=i'          => \$opt{'timeout-tcp'},
@@ -264,20 +319,40 @@ foreach my $opt (
   ) if ( $opt{$opt} );
 }
 
-# sanity checking on parameters: if --socketpath is used, it means that we're using
-# UNIX domain sockets, none of the IP params are allowed. The code would probably
-# work ok if we didn't check it, but it's better if we detect the error and report
-# it lest the admin find surprises.
+# sanity checking on parameters: if --socketpath is used, and --port or
+# --ssl-port is NOT specified, it means that we're using UNIX domain sockets,
+# none of the IP params are allowed. The code would probably work ok if we
+# didn't check it, but it's better if we detect the error and report it lest
+# the admin find surprises.
+
+my $listen_unix = 1;
+my $listen_inet = 1;
+my $listen_ssl  = 0;
+if (!defined $opt{'socketpath'}) {
+  $listen_unix = 0;
+} else {
+  $listen_inet = 0;
+}
 
 if (
-  defined $opt{'socketpath'}
-  and ( ( @{ $opt{'allowed-ip'} } > 0 )
-    or defined $opt{'ssl'}
+  ( @{ $opt{'allowed-ip'} } > 0 )
     or defined $opt{'auth-ident'}
-    or defined $opt{'port'} )
+    or defined $opt{'port'}
   )
 {
-  print_usage_and_exit("ERROR: --socketpath mutually exclusive with --allowed-ip/--ssl/--port params");
+  $listen_inet = 1;
+}
+
+if (
+    defined $opt{'ssl'}
+    or defined $opt{'ssl-port'}
+    or defined $opt{'ssl-version'}
+  )
+{
+  $listen_ssl = 1;
+  if (!defined $opt{'ssl-port'}) {
+    $listen_inet = 0;
+  }
 }
 
 if (
@@ -295,17 +370,18 @@ if (
 my $allowed_nets = Mail::SpamAssassin::NetSet->new();
 if ( not defined $opt{'socketpath'} ) {
   if ( @{ $opt{'allowed-ip'} } ) {
-    set_allowed_ip( split /,/, join ( ',', @{ $opt{'allowed-ip'} } ) );
+    set_allowed_ip( grep length, map { split /,/ } @{ $opt{'allowed-ip'} } );
   }
   else {
-    set_allowed_ip('127.0.0.1');
+    set_allowed_ip('127.0.0.1'); #, '::1'); M::SA::NetSet needs fixing for IPv6
   }
 }
 
 # ident-based spamc user authentication
 if ( $opt{'auth-ident'} ) {
   eval { require Net::Ident };
-  die "spamd: ident-based authentication requested, but Net::Ident is unavailable\n" if ($@);
+  die "spamd: ident-based authentication requested, but Net::Ident is unavailable ($@)\n"
+    if ($@);
 
   $opt{'ident-timeout'} = undef if $opt{'ident-timeout'} <= 0.0;
   import Net::Ident qw(ident_lookup);
@@ -314,9 +390,9 @@ if ( $opt{'auth-ident'} ) {
 # Check for server certs
 $opt{'server-key'}  ||= "$LOCAL_RULES_DIR/certs/server-key.pem";
 $opt{'server-cert'} ||= "$LOCAL_RULES_DIR/certs/server-cert.pem";
-if ( $opt{'ssl'} ) {
+if ( $listen_ssl ) {
   eval { require IO::Socket::SSL };
-  die "spamd: SSL encryption requested, but IO::Socket::SSL is unavailable\n"
+  die "spamd: SSL encryption requested, but IO::Socket::SSL is unavailable ($@)\n"
     if ($@);
 
   if ( !-e $opt{'server-key'} ) {
@@ -516,37 +592,24 @@ if ( defined $ENV{'HOME'} ) {
 
 # Do whitelist later in tmp dir. Side effect: this will be done as -u user.
 
-my ( $port, $addr, $proto );
-my ($listeninfo);              # just for reporting
+my ( $sslport, $sslversion, $inetport, $addr, $proto );
 
-if ( defined $opt{'socketpath'} ) {
-  $listeninfo = "UNIX domain socket " . $opt{'socketpath'};
-}
-else {
-  $proto = getprotobyname('tcp');
+if ( $listen_inet || $listen_ssl ) {
+  $proto = getprotobyname('tcp') or die "getprotobyname(tcp): $!";
 
   $addr = $opt{'listen-ip'};
   if (defined $addr) {
     if ($addr ne '') {
-      $addr = ( gethostbyname($addr) )[4];
+      $addr = ip_or_name_to_ip($addr);
       die "spamd: invalid address: $opt{'listen-ip'}\n" unless $addr;
-      $addr = inet_ntoa($addr);
     }
     else {
-      $addr = '0.0.0.0';
+      $addr = '0.0.0.0';    # FIXME: this won't bind to IPv6 sockets
     }
   }
   else {
     $addr = '127.0.0.1';
   }
-
-  $port = $opt{'port'} || 783;
-  if ($port !~ /^(\d+)$/ ) {
-    $port = ( getservbyname($port, 'tcp') )[2];
-    die "spamd: invalid port: $opt{'port'}\n" unless $port;
-  }
-
-  $listeninfo = "port $port/tcp";
 }
 
 my $backchannel = Mail::SpamAssassin::SubProcBackChannel->new();
@@ -572,12 +635,92 @@ if (!$opt{'round-robin'})
       });
 }
 
-# Be a well-behaved daemon
-my $server;
-if ( $opt{'socketpath'} ) {
+# ---------------------------------------------------------------------------
+
+my $listeninfo = compose_listen_info_string();
+
+sub compose_listen_info_string {
+  my @listeninfo = ();
+
+  if ( $listen_unix ) {
+    push @listeninfo, "UNIX domain socket " . $opt{'socketpath'};
+  }
+
+  if ( $listen_ssl ) {
+    $sslport = $opt{'ssl-port'} || $opt{'port'} || 783;
+    if ($sslport !~ /^(\d+)$/ ) {
+      $sslport = ( getservbyname($sslport, 'tcp') )[2];
+      die "spamd: invalid ssl-port: $opt{'port'}\n" unless $sslport;
+    }
+    $sslversion = $opt{'ssl-version'} || 'sslv23';
+    if ($sslversion !~ /^(?:sslv([23]|23)|(tlsv1))$/) {
+      die "spamd: invalid ssl-version: $opt{'ssl-version'}\n";
+    }
+
+    push @listeninfo, "SSL port $sslport/tcp";
+    push @listeninfo, "SSL version $sslversion";
+  }
+
+  if ( $listen_inet ) {
+    $inetport = $opt{'port'} || 783;
+    if ($inetport !~ /^(\d+)$/ ) {
+      $inetport = ( getservbyname($inetport, 'tcp') )[2];
+      die "spamd: invalid port: $opt{'port'}\n" unless $inetport;
+    }
+
+    push @listeninfo, "port $inetport/tcp";
+  }
+
+  # just for reporting at startup
+  $listeninfo = join ', ', @listeninfo;
+}
+
+# ---------------------------------------------------------------------------
+# Server (listening) socket setup for the various supported types
+
+my ( $server_inet, $server_unix, $server_ssl );
+my ( $fd_inet, $fd_unix, $fd_ssl );
+my $have_multiple_server_socks;
+my $server_select_mask;
+
+# abstract out the setup-retry code
+if ( $listen_unix ) {
+  server_sock_setup(sub { server_sock_setup_unix(); });
+}
+if ( $listen_ssl ) {
+  server_sock_setup(sub { server_sock_setup_ssl(); });
+}
+if ( $listen_inet ) {
+  server_sock_setup(sub { server_sock_setup_inet(); });
+}
+
+sub server_sock_setup {
+  my $sub = shift;
+
+  # retry 3 times to bind to the listening socket; 3 seconds delay,
+  # max, but should allow a little time for any existing shutting-down
+  # server to complete shutdown
+  for my $retry (1 .. 3) {
+    if ($retry > 1) { sleep 1; }
+
+    eval { $sub->(); };
+    last unless ($@);       # success => break
+
+    if ($retry == 3) {
+      die $@;               # this is fatal
+    } else {
+      warn "server socket setup failed, retry $retry: $@";
+      # but retry
+    }
+  }
+}
+
+# ---------------------------------------------------------------------------
+
+# Create the sockets
+sub server_sock_setup_unix {
   my $path = $opt{'socketpath'};
 
-  #---------------------------------------------------------------------
   # see if the socket is in use: if we connect to the current socket, it
   # means that spamd is already running, so we have to bail on our own.
   # Yes, there is a window here: best we can do for now. There is almost
@@ -610,15 +753,15 @@ if ( $opt{'socketpath'} ) {
     Listen => SOMAXCONN,
   );
   dbg("spamd: creating UNIX socket:\n" . join("\n", map { " $_: " . (defined $socket{$_} ? $socket{$_} : "(undef)") } sort keys %socket));
-  $server = IO::Socket::UNIX->new(%socket);
+  $server_unix = IO::Socket::UNIX->new(%socket);
   
   # sanity check!  cf. bug 3490
-  if (not $server or not -S $path) {
-    unless ($server) {
+  if (not $server_unix or not -S $path) {
+    unless ($server_unix) {
       dbg "spamd: socket path might have been truncated due to system limits\n";
       die "spamd: could not create UNIX socket on $path: $!\n";
     }
-    my $hostpath = $server->hostpath();
+    my $hostpath = $server_unix->hostpath();
     if ($hostpath ne $path) {
       warn "spamd: socket path was truncated at position " . length($hostpath) . "\n";
       warn "spamd: leaving stale socket at $hostpath\n" if -S $hostpath;
@@ -660,35 +803,43 @@ if ( $opt{'socketpath'} ) {
     die "spamd: could not chmod $path to $mode: $!";
   }
 }
-elsif ( $opt{'ssl'} ) {
+
+sub server_sock_setup_ssl {
   my %socket = (
     LocalAddr       => $addr,
-    LocalPort       => $port,
+    LocalPort       => $sslport,
     Proto           => $proto,
     Type            => SOCK_STREAM,
     ReuseAddr       => 1,
     Listen          => SOMAXCONN,
+    SSL_version     => $sslversion,
     SSL_verify_mode => 0x00,
     SSL_key_file    => $opt{'server-key'},
     SSL_cert_file   => $opt{'server-cert'}
   );
   dbg("spamd: creating SSL socket:\n" . join("\n", map { " $_:  " . (defined $socket{$_} ? $socket{$_} : "(undef)") } sort keys %socket));
-  $server = new IO::Socket::SSL(%socket)
-       || die "spamd: could not create SSL socket on $addr:$port: $!\n";
+  $server_ssl = new IO::Socket::SSL(%socket)
+       || die "spamd: could not create SSL socket on $addr:$sslport: $!\n";
 }
-else {
+
+sub server_sock_setup_inet {
   my %socket = (
     LocalAddr => $addr,
-    LocalPort => $port,
+    LocalPort => $inetport,
     Proto     => $proto,
     Type      => SOCK_STREAM,
     ReuseAddr => 1,
     Listen    => SOMAXCONN
   );
   dbg("spamd: creating INET socket:\n" . join("\n", map { " $_: " . (defined $socket{$_} ? $socket{$_} : "(undef)") } sort keys %socket));
-  $server = new IO::Socket::INET(%socket)
-         || die "spamd: could not create INET socket on $addr:$port: $!\n";
+  $server_inet = new_io_socket_inetx(%socket)
+       || die "spamd: could not create INET socket on $addr:$inetport: $!\n";
 }
+
+# ---------------------------------------------------------------------------
+
+# for select() purposes: make a map of the server socket FDs
+map_server_sockets();
 
 if ( defined $opt{'pidfile'} ) {
   $opt{'pidfile'} =
@@ -701,6 +852,8 @@ my $spamtest = Mail::SpamAssassin->new(
     dont_copy_prefs      => $dontcopy,
     rules_filename       => ( $opt{'configpath'} || 0 ),
     site_rules_filename  => ( $opt{'siteconfigpath'} || 0 ),
+    post_config_text     => join("\n", @{$opt{'cf'}})."\n",
+    force_ipv4           => ( $opt{'force_ipv4'} || 0 ),
     local_tests_only     => ( $opt{'local'} || 0 ),
     debug                => ( $opt{'debug'} || 0 ),
     paranoid             => ( $opt{'paranoid'} || 0 ),
@@ -712,9 +865,13 @@ my $spamtest = Mail::SpamAssassin->new(
     PREFIX          => $PREFIX,
     DEF_RULES_DIR   => $DEF_RULES_DIR,
     LOCAL_RULES_DIR => $LOCAL_RULES_DIR,
-    LOCAL_STATE_DIR => $LOCAL_STATE_DIR,
+    LOCAL_STATE_DIR => $LOCAL_STATE_DIR
   }
 );
+
+$spamtest->init_learner({
+  opportunistic_expire_check_only => 1,
+});
 
 # if $clients_per_child == 1, there's no point in copying configs around
 unless ($clients_per_child > 1) {
@@ -726,6 +883,12 @@ unless ($clients_per_child > 1) {
 ## DAEMONIZE! ##
 
 $opt{'daemonize'} and daemonize();
+
+# bug 3443: setup signal handlers before the kids since we may have to
+# kill them...  make sure this happens before setting up the pidfile to
+# avoid a race condition.
+my $got_sighup;
+setup_parent_sig_handlers();
 
 # should be done post-daemonize such that any files created by this
 # process are written with the right ownership and everything.
@@ -749,19 +912,9 @@ if ($copy_config_p) {
     die "spamd: error returned from copy_config\n";
 }
 
-# bug 3443: setup signal handlers before the kids since we may have to
-# kill them...  make sure this happens before setting up the pidfile to
-# avoid a race condition.
-my $got_sighup;
-setup_parent_sig_handlers();
-
 # bonus: SIGUSR2 to dump a stack trace.  this is never reset
 my $current_msgid = "(none)";
 $SIG{USR2} = \&backtrace_handler;
-
-my $select_mask = '';
-vec($select_mask, $server->fileno, 1) = 1;
-$backchannel->set_selector(\$select_mask);
 
 # log server started, but processes watching the log to wait for connect
 # should wait until they see the pid, after signal handlers are in place
@@ -792,7 +945,7 @@ for ( 1 .. $childlimit ) {
 }
 
 if ($scaling) {
-  $scaling->set_server_fh($server);
+  $scaling->set_server_fh($server_inet, $server_unix, $server_ssl);
 }
 
 while (1) {
@@ -817,12 +970,16 @@ while (1) {
     Mail::SpamAssassin::Logger::close_log();
     chdir($ORIG_CWD)
       || die "spamd: restart failed: chdir failed: ${ORIG_CWD}: $!\n";
-    exec( $ORIG_ARG0, @ORIG_ARGV );
+
+    # ensure we re-run spamd using the right perl interpreter, and
+    # with the right switches (taint mode and warnings) (bug 5255)
+    my $perl = Mail::SpamAssassin::Util::untaint_var($^X);
+    my @execs = ( $perl, "-T", "-w", $ORIG_ARG0, @ORIG_ARGV );
+    warn "spamd: restarting using '" . join (' ', @execs) . "'\n";
+    exec @execs;
 
     # should not get past that...
-    die "spamd: restart failed: exec failed: "
-      . join ( ' ', $ORIG_ARG0, @ORIG_ARGV )
-      . ": $!\n";
+    die "spamd: restart failed: exec failed: " . join (' ', @execs) . ": $!\n";
   }
 
   for (my $i = keys %children; $i < $childlimit; $i++) {
@@ -860,10 +1017,9 @@ sub spawn {
   else {
     ## CHILD
 
-    # Reset signal handling to default settings.
+    # Reset signal handling to default settings, and unblock.
+    # These lines must be as soon as possible after the fork (bug 4304)
     setup_child_sig_handlers();
-
-    # unblock signals
     sigprocmask( POSIX::SIG_UNBLOCK(), $sigset )
       or die "spamd: cannot unblock SIGINT/SIGCHLD for fork: $!\n";
 
@@ -879,9 +1035,6 @@ sub spawn {
       if ( $opt{'groupname'} ) {
         $ugid = getgrnam( $opt{'groupname'} ) || $ugid;
       }
-
-      $uuid =~ /^(\d+)$/ and $uuid = $1;    # de-taint
-      $ugid =~ /^(\d+)$/ and $ugid = $1;    # de-taint
 
       # Change GID
       $) = "$ugid $ugid";    # effective gid
@@ -962,7 +1115,7 @@ sub spawn {
 	# bug 4699: this is the alarm that often ends up with an empty $@
 
 	my $timer = Mail::SpamAssassin::Timeout->new({ secs => 20 });
-	my $err = $timer->run(sub {
+	my $err = $timer->run(sub {	
 
           while(my($k,$v) = each %msa_backup) {
             $spamtest->{$k} = $v;
@@ -990,22 +1143,51 @@ sub spawn {
   }
 }
 
+sub accept_from_any_server_socket {
+
+  my $fdvec = $server_select_mask;
+
+  if ($have_multiple_server_socks) {
+    # determine which of our server FDs is ready using select().
+    # We only need to do this if we have more than one server
+    # socket supported, since otherwise there can only be one socket
+    # with a client waiting.
+    # (TODO: we could extend the prefork protocol to pass this data)
+    my $nfound = select($fdvec, undef, undef, 0.1);
+    die "oops? accept_a_conn: no fds ready" unless $nfound;
+  }
+
+  if ($fd_inet && vec $fdvec, $fd_inet, 1) {
+    $client = $server_inet->accept;
+  }
+  elsif ($fd_unix && vec $fdvec, $fd_unix, 1) {
+    $client = $server_unix->accept;
+  }
+  elsif ($fd_ssl && vec $fdvec, $fd_ssl, 1) {
+    $client = $server_ssl->accept;
+  }
+  else {
+    die "accept_a_conn: no fds ready by vec: $fdvec";
+  }
+  return $client;
+}
+
 sub accept_a_conn {
-  $client = $server->accept();
+  $client = accept_from_any_server_socket();
 
   if ($scaling) {
     $scaling->update_child_status_busy();
   }
 
   # Bah!
-  if ( !$client ) {
+  if ( !$client  || !defined $client->connected() ) {
 
     # this can happen when interrupted by SIGCHLD on Solaris,
     # perl 5.8.0, and some other platforms with -m.
     if ( $! == &Errno::EINTR ) {
       return 0;
     }
-    elsif ( $! == 0 && $opt{'ssl'} ) {
+    elsif ( $! == 0 && $listen_ssl ) {
       warn("spamd: SSL failure: " . &IO::Socket::SSL::errstr());
       return 0;
     }
@@ -1020,8 +1202,7 @@ sub accept_a_conn {
   # keep track of start time
   my $start = time;
 
-  my $remote_hostname;
-  my $remote_hostaddr;
+  my ($remote_hostname, $remote_hostaddr);
   if ($opt{'socketpath'}) {
     $remote_hostname = 'localhost';
     $remote_hostaddr = '127.0.0.1';
@@ -1029,14 +1210,11 @@ sub accept_a_conn {
     info("spamd: got connection over " . $opt{'socketpath'});
   }
   else {
-    my ( $port, $ip ) = sockaddr_in( $client->peername );
-    
-    $remote_hostaddr = inet_ntoa($ip);
-    $remote_hostname = gethostbyaddr($ip, AF_INET)
-                    || $remote_hostaddr;
-    $remote_port = $port;
+    ($remote_port, $remote_hostaddr, $remote_hostname) =
+      peer_info_from_socket($client)
+      or die 'failed to obtain port and ip from socket';
 
-    my $msg = "connection from ${remote_hostname} [${remote_hostaddr}] at port ${port}";
+    my $msg = "connection from ${remote_hostname} [${remote_hostaddr}] at port ${remote_port}";
     if (ip_is_allowed($remote_hostaddr)) {
       info("spamd: $msg");
     }
@@ -1089,14 +1267,15 @@ sub accept_a_conn {
   # If we get the PROCESS command, the client is going to send a
   # message that we need to filter.
 
-  elsif (/(PROCESS|CHECK|SYMBOLS|REPORT|REPORT_IFSPAM) SPAMC\/(.*)/) {
+  elsif (/(PROCESS|CHECK|SYMBOLS|REPORT|HEADERS|REPORT_IFSPAM) SPAMC\/(.*)/) {
     my $method = $1;
+    my $version = $2;
     eval {
       Mail::SpamAssassin::Util::trap_sigalrm_fully(sub {
                           die "child processing timeout";
                         });
       alarm $timeout_child if ($timeout_child);
-      check($method, $2, $start, $remote_hostname, $remote_hostaddr);
+      check($method, $version, $start, $remote_hostname, $remote_hostaddr);
     };
     alarm 0;
 
@@ -1137,7 +1316,7 @@ sub accept_a_conn {
   # Looks like a client is just seeing if we're alive.
 
   elsif (/PING SPAMC\/(.*)/) {
-    syswrite( $client, "SPAMD/1.2 $resphash{EX_OK} PONG\r\n" );
+    syswrite( $client, "SPAMD/1.4 $resphash{EX_OK} PONG\r\n" );
   }
 
   # If it was none of the above, then we don't know what it was.
@@ -1156,28 +1335,49 @@ sub handle_setuid_to_user {
     die("spamd: in paranoid mode, still running as root: closing connection");
   }
   warn("spamd: still running as root: user not specified with -u, "
-       . "not found, or set to root, falling back to nobody" );
-  my ($uid, $gid) = (getpwnam('nobody'))[2,3];
-  $uid =~ /^(\d+)$/ and $uid = $1;    # de-taint
-  $gid =~ /^(\d+)$/ and $gid = $1;    # de-taint
+       . "not found, or set to root, falling back to nobody\n");
+
+  my ($name, $pwd, $uid, $gid, $quota, $comment, $gcos, $dir, $etc) =
+      getpwnam('nobody');
   
   $) = "$gid $gid";                   # eGID
   $> = $uid;                          # eUID
   if (!defined($uid) || ($> != $uid and $> != ($uid - 2**32))) {
     die("spamd: setuid to nobody failed");
   }
+
+  $spamtest->signal_user_changed(
+    {
+      username => $name,
+      user_dir => $dir
+    }
+  );
 }
 
 sub parse_body {
-  my ($client, $expected_length) = @_;
+  my ($client, $expected_length, $compress_zlib) = @_;
 
   my @msglines;
-  my $actual_length = 0;
+  my $actual_length;
 
-  while (defined($_ = $client->getline())) {
-    $actual_length += length($_);
-    push(@msglines, $_);    
-    last if (defined $expected_length && $actual_length >= $expected_length);
+  if ($compress_zlib && !defined($expected_length)) {
+    service_unavailable_error("Compress requires Content-length header");
+    return;
+  }
+
+  if ($compress_zlib) {
+    $actual_length = zlib_inflate_read($client, $expected_length, \@msglines);
+    if ($actual_length < 0) { return; }
+    $expected_length = $actual_length;
+  }
+  else {
+    @msglines = ();
+    $actual_length = 0;
+    while (defined($_ = $client->getline())) {
+      $actual_length += length($_);
+      push(@msglines, $_);    
+      last if (defined $expected_length && $actual_length >= $expected_length);
+    }
   }
   
   # Now parse *only* the message headers; the MIME tree won't be generated 
@@ -1185,6 +1385,54 @@ sub parse_body {
   my $mail = $spamtest->parse(\@msglines, 0);
 
   return ($mail, $actual_length);
+}
+
+sub zlib_inflate_read {
+  my ($client, $expected_length, $msglinesref) = @_;
+  my $out;
+  my $actual_length;
+
+  eval {
+    require Compress::Zlib;
+    my ($zlib, $status) = Compress::Zlib::inflateInit();
+    if (!$zlib) { die "inflateInit failed: $status"; }
+
+    my $red = 0;
+    my $buf;
+
+    # TODO: inflate in smaller buffers instead of at EOF
+    while (1) {
+      my $numbytes = $client->read($buf, (1024 * 64) + $red, $red);
+      if (!defined $numbytes) {
+        die "read of zlib data failed: $!";
+        return -1;
+      }
+      last if $numbytes == 0;
+      $red += $numbytes;
+    }
+
+    if ($red > $expected_length) {
+      warn "hmm, zlib read $red > expected_length $expected_length";
+      substr ($buf, $expected_length) = '';
+    }
+
+    ($out, $status) = $zlib->inflate($buf);
+    if ($status != Compress::Zlib::Z_STREAM_END()) {
+      die "failed to find end of zlib stream";
+    }
+  };
+
+  if ($@) { 
+    service_unavailable_error("zlib: $@");
+    return -1;
+  }
+
+  $actual_length = length($out);
+
+  # TODO: split during inflate, too
+  # note that this preserves line endings
+  @{$msglinesref} = map { s/$/\n/gs; $_; } split(/\n/, $out);
+  return $actual_length;
 }
 
 sub parse_msgids {
@@ -1212,6 +1460,7 @@ sub check {
   my ( $method, $version, $start_time, $remote_hostname, $remote_hostaddr ) = @_;
   local ($_);
   my $expected_length;
+  my $compress_zlib;
 
   # used to ensure we don't accidentally fork (bug 4370)
   my $starting_self_pid = $$;
@@ -1225,6 +1474,7 @@ sub check {
     return 0 unless (parse_headers($hdrs, $client));
 
     $expected_length = $hdrs->{expected_length};
+    $compress_zlib = $hdrs->{compress_zlib};
   }
 
   return 0 unless do_user_handling();
@@ -1233,7 +1483,13 @@ sub check {
   my $resp = "EX_OK";
 
   # generate mail object from input
-  my ($mail, $actual_length) = parse_body($client, $expected_length);
+  my ($mail, $actual_length) = parse_body($client, $expected_length,
+                $compress_zlib);
+  return 0 unless defined($mail);       # error
+
+  if ($compress_zlib) {
+    $expected_length = $actual_length;  # previously it was the gzipped length
+  }
 
   # attempt to fetch the message ids
   my ($msgid, $rmsgid) = parse_msgids($mail);
@@ -1256,7 +1512,9 @@ sub check {
   }
 
   # Go ahead and check the message
-  my $status = $spamtest->check($mail);
+  $spamtest->init(1);
+  my $status = Mail::SpamAssassin::PerMsgStatus->new($spamtest, $mail);
+  $status->check();
 
   my $msg_score     = sprintf( "%.1f", $status->get_score );
   my $msg_threshold = sprintf( "%.1f", $status->get_required_score );
@@ -1274,34 +1532,41 @@ sub check {
 
   my $spamhdr = "Spam: $response_spam_status ; $msg_score / $msg_threshold";
 
-  if ( $method eq 'PROCESS' ) {
+  if ( $method eq 'PROCESS' || $method eq 'HEADERS' ) {
 
     $status->set_tag('REMOTEHOSTNAME', $remote_hostname);
     $status->set_tag('REMOTEHOSTADDR', $remote_hostaddr);
 
     # Build the message to send back and measure it
     my $msg_resp        = $status->rewrite_mail();
+
+    if ($method eq 'HEADERS') {
+      # just the headers; delete everything after first \015\012\015\012
+      $msg_resp =~ s/(\015?\012\015?\012).*$/$1/gs;
+    }
+
     my $msg_resp_length = length($msg_resp);
+
     if ( $version >= 1.3 )    # Spamc protocol 1.3 means multi hdrs are OK
     {
-      syswrite( $client, "SPAMD/1.1 $resphash{$resp} $resp\r\n" .
+      syswrite_full_buffer( $client, "SPAMD/1.1 $resphash{$resp} $resp\r\n" .
         "Content-length: $msg_resp_length\r\n" . $spamhdr . "\r\n\r\n" .
         $msg_resp );
     }
     elsif (
       $version >= 1.2 )    # Spamc protocol 1.2 means it accepts content-length
     {
-      syswrite( $client, "SPAMD/1.1 $resphash{$resp} $resp\r\n" .
+      syswrite_full_buffer( $client, "SPAMD/1.1 $resphash{$resp} $resp\r\n" .
         "Content-length: $msg_resp_length\r\n\r\n" . $msg_resp );
     }
     else                   # Earlier than 1.2 didn't accept content-length
     {
-      syswrite( $client, "SPAMD/1.0 $resphash{$resp} $resp\r\n" . $msg_resp );
+      syswrite_full_buffer( $client, "SPAMD/1.0 $resphash{$resp} $resp\r\n" . $msg_resp );
     }
   }
   else                     # $method eq 'CHECK' et al
   {
-    syswrite( $client, "SPAMD/1.1 $resphash{$resp} $resp\r\n" );
+    syswrite_full_buffer( $client, "SPAMD/1.1 $resphash{$resp} $resp\r\n" );
 
     if ( $method eq "CHECK" ) {
       syswrite( $client, "$spamhdr\r\n\r\n" );
@@ -1329,12 +1594,12 @@ sub check {
       if ( $version >= 1.3 )    # Spamc protocol > 1.2 means multi hdrs are OK
       {
         my $msg_resp_length = length($msg_resp);
-        syswrite( $client,
+        syswrite_full_buffer( $client,
                   "Content-length: $msg_resp_length\r\n" . 
                   $spamhdr . "\r\n\r\n" . $msg_resp );
       }
       else {
-        syswrite( $client, $spamhdr . "\r\n\r\n" . $msg_resp );
+        syswrite_full_buffer( $client, $spamhdr . "\r\n\r\n" . $msg_resp );
       }
     }
   }
@@ -1359,16 +1624,31 @@ sub check {
     my $safe = $rmsgid; $safe =~ s/[\x00-\x20\s,]/_/gs; push(@extra, "rmid=$safe");
   }
   if (defined $status->{bayes_score}) {
-    push(@extra, "bayes=".$status->{bayes_score});
+    push(@extra, "bayes=".sprintf("%06f", $status->{bayes_score}));
   }
   push(@extra, "autolearn=".$status->get_autolearn_status());
+  push(@extra, $status->get_spamd_result_log_items());
 
   my $yorn = $status->is_spam() ? 'Y' : '.';
   my $score = $status->get_score();
   my $tests = join(",", sort(grep(length,$status->get_names_of_tests_hit())));
 
-  info(sprintf("spamd: result: %s %2d - %s %s", $yorn, $score,
-	       $tests, join(",", @extra)));
+  my $log = sprintf("spamd: result: %s %2d - %s %s", $yorn, $score,
+	       $tests, join(",", @extra));
+  info($log);
+
+  # bug 3808: log scan results to any listening plugins, too
+  $spamtest->call_plugins("log_scan_result", { result => $log });
+
+  # bug 3466: handle the bayes expiry bits after the results were returned to
+  # the client.  keeps clients from timing out.  if bayes_expiry_due is set,
+  # then the opportunistic check has already checked.  go ahead and do another
+  # sync/expire run.
+  if ($status->{'bayes_expiry_due'}) {
+    dbg("spamd: bayes expiry was marked as due, running post-check");
+    $spamtest->rebuild_learner_caches();
+    $spamtest->finish_learner();
+  }
 
   $status->finish();    # added by jm to allow GC'ing
   $mail->finish();
@@ -1385,13 +1665,13 @@ sub check {
 sub dotell {
   my ($method, $version, $start_time, $remote_hostname, $remote_hostaddr) = @_;
   local ($_);
-  my $expected_length;
 
   my $hdrs = {};
 
   return 0 unless (parse_headers($hdrs, $client));
 
-  $expected_length = $hdrs->{expected_length};
+  my $expected_length = $hdrs->{expected_length};
+  my $compress_zlib = $hdrs->{compress_zlib};
 
   return 0 unless do_user_handling();
   if ($> == 0) { die "spamd: still running as root! dying"; }
@@ -1425,7 +1705,13 @@ sub dotell {
   my $resp = "EX_OK";
 
   # generate mail object from input
-  my ($mail, $actual_length) = parse_body($client, $expected_length);
+  my ($mail, $actual_length) = parse_body($client, $expected_length,
+                $compress_zlib);
+  return 0 unless defined($mail);       # error
+
+  if ($compress_zlib) {
+    $expected_length = $actual_length;  # previously it was the gzipped length
+  }
 
   if ( $mail->get_header("X-Spam-Checker-Version") ) {
     my $new_mail = $spamtest->parse($spamtest->remove_spamassassin_markup($mail), 1);
@@ -1532,6 +1818,8 @@ sub do_user_handling {
 sub parse_headers {
   my ($hdrs, $client) = @_;
 
+  my $got_user_header;
+
   # max 255 headers
   for my $hcount ( 0 .. 255 ) {
     my $line = $client->getline;
@@ -1541,7 +1829,14 @@ sub parse_headers {
       return 0;
     }
     $line =~ s/\r\n$//;
-    return 1 unless ($line);
+
+    if (!length $line) {    # end of headers
+      if (!$got_user_header && $opt{'auth-ident'}) {
+        service_unavailable_error('User header required');
+        return 0;
+      }
+      return 1;
+    }
 
     my ($header, $value) = split (/:\s*/, $line, 2);
     unless (defined $value) {
@@ -1550,19 +1845,23 @@ sub parse_headers {
     }
 
     if ($header eq 'Content-length') {
-      return 0 unless &got_clen_header($hdrs, $header, $value);
+      return 0 unless got_clen_header($hdrs, $header, $value);
     }
     elsif ($header eq 'User') {
-      return 0 unless &got_user_header($hdrs, $header, $value);
+      return 0 unless got_user_header($hdrs, $header, $value);
+      $got_user_header++;
     }
     elsif ($header eq 'Message-class') {
-      return 0 unless &got_message_class_header($hdrs, $header, $value);
+      return 0 unless got_message_class_header($hdrs, $header, $value);
     }
     elsif ($header eq 'Set') {
-      return 0 unless &got_set_header($hdrs, $header, $value);
+      return 0 unless got_set_header($hdrs, $header, $value);
     }
     elsif ($header eq 'Remove') {
-      return 0 unless &got_remove_header($hdrs, $header, $value);
+      return 0 unless got_remove_header($hdrs, $header, $value);
+    }
+    elsif ($header eq 'Compress') {
+      return 0 unless &got_compress_header($hdrs, $header, $value);
     }
   }
 
@@ -1689,6 +1988,25 @@ sub got_remove_header {
   return 1;
 }
 
+sub got_compress_header {
+  my ($hdrs, $header, $value) = @_;
+
+  if ($value =~ /zlib/i) {
+    eval { require Compress::Zlib; };
+    if ($@) {
+      protocol_error("(compression not supported, Compress::Zlib not installed: $@)");
+      return 0;
+    }
+    $hdrs->{compress_zlib} = 1;
+  }
+  else {
+    protocol_error("(compression type not supported)");
+    return 0;
+  }
+
+  return 1;
+}
+
 sub protocol_error {
   my ($err) = @_;
   my $resp = "EX_PROTOCOL";
@@ -1754,11 +2072,6 @@ sub handle_user_setuid_basic {
   }
 
   if ($setuid_to_user) {
-
-    # not sure if this is required, the documentation says it isn't
-    $uid =~ /^(\d+)$/ and $uid = $1;    # de-taint
-    $gid =~ /^(\d+)$/ and $gid = $1;    # de-taint
-
     $) = "$gid $gid";                 # change eGID
     $> = $uid;                        # change eUID
     if ( !defined($uid) || ( $> != $uid and $> != ( $uid - 2**32 ) ) ) {
@@ -1799,30 +2112,14 @@ sub handle_user_set_user_prefs {
   }
   my $cf_file = $dir . "/.spamassassin/user_prefs";
 
-  #
-  # If vpopmail config enabled then pass virtual homedir onto create_default_cf_needed
-  #
-  if ( $opt{'vpopmail'} ) {
-    create_default_cf_if_needed( $cf_file, $username, $dir );
-    $spamtest->read_scoreonly_config($cf_file);
-    $spamtest->signal_user_changed(
-      {
-        username => $username,
-        user_dir => $dir
-      }
-    );
-
-  }
-  else {
-    create_default_cf_if_needed( $cf_file, $username );
-    $spamtest->read_scoreonly_config($cf_file);
-    $spamtest->signal_user_changed(
-      {
-        username => $username,
-        user_dir => $dir
-      }
-    );
-  }
+  create_default_cf_if_needed( $cf_file, $username, $dir );
+  $spamtest->read_scoreonly_config($cf_file);
+  $spamtest->signal_user_changed(
+    {
+      username => $username,
+      user_dir => $dir
+    }
+  );
 
   return 1;
 }
@@ -1913,9 +2210,6 @@ sub handle_user_setuid_with_sql {
     info("spamd: handle_user unable to find user: $username\n");
     return 0;
   }
-
-  $uid =~ /^(\d+)$/ and $uid = $1;    # de-taint
-  $gid =~ /^(\d+)$/ and $gid = $1;    # de-taint
 
   if ($setuid_to_user) {
     $) = "$gid $gid";                 # change eGID
@@ -2025,7 +2319,9 @@ sub setup_child_sig_handlers {
 sub kill_handler {
   my ($sig) = @_;
   info("spamd: server killed by SIG$sig, shutting down");
-  $server->close;
+  $server_inet and $server_inet->close;
+  $server_unix and $server_unix->close;
+  $server_ssl  and $server_ssl->close;
 
   if (defined($opt{'pidfile'})) {
     unlink($opt{'pidfile'}) || warn "spamd: cannot unlink $opt{'pidfile'}: $!\n";
@@ -2096,16 +2392,25 @@ sub restart_handler {
   }
   %children = ();
 
-  unless ( $server->eof ) {
-    $server->shutdown(2);
-    $server->close;
+  unless ( !$server_inet || $server_inet->eof ) {
+    $server_inet->shutdown(2);
+    $server_inet->close;
+    info("spamd: server INET socket closed");
+  }
 
-    # the UNIX domain socket
+  unless ( !$server_unix || $server_unix->eof ) {
+    $server_unix->shutdown(2);
+    $server_unix->close;
     if (defined($opt{'socketpath'})) {
       unlink($opt{'socketpath'}) || warn "spamd: cannot unlink $opt{'socketpath'}: $!\n";
     }
+    info("spamd: server UNIX socket closed");
+  }
 
-    info("spamd: server socket closed");
+  unless ( !$server_ssl || $server_ssl->eof ) {
+    $server_ssl->shutdown(2);
+    $server_ssl->close;
+    info("spamd: server SSL socket closed");
   }
   $got_sighup = 1;
 }
@@ -2171,6 +2476,14 @@ sub preload_modules_with_tmp_homedir {
 
   dbg("spamd: Preloading modules with HOME=$tmphome");
 
+  # bug 5379: spamd won't start if the temp preloading dir exists;
+  # be sure to remove it just in case 
+  if (-d $tmpsadir) {
+    rmdir( $tmpsadir ) or die "spamd: $tmpsadir not empty: $!";
+  }
+  if (-d $tmphome) {
+    rmdir( $tmphome ) or die "spamd: $tmphome not empty: $!";
+  }
   mkdir( $tmphome,  0700 ) or die "spamd: cannot create $tmphome: $!";
   mkdir( $tmpsadir, 0700 ) or die "spamd: cannot create $tmpsadir: $!";
   $ENV{HOME} = $tmphome;
@@ -2205,6 +2518,61 @@ sub preload_modules_with_tmp_homedir {
   }
 }
 
+# Keep calling syswrite until the entire buffer is written out
+# Retry if EAGAIN/EWOULDBLOCK or when partial buffer is written
+# Limit the number of retries to keep the execution time bounded
+sub syswrite_full_buffer {
+  my ($sock, $buf, $numretries) = @_;
+  $numretries ||= 10;       # default 10 retries
+  my $length = length($buf);
+  my $written = 0;
+  my $try = 0;
+
+  while (($try < $numretries) && ($length > $written)) {
+      my $nbytes = syswrite($sock, $buf, $length - $written, $written);
+      if (!defined $nbytes) {
+	  unless ((exists &Errno::EAGAIN && $! == &Errno::EAGAIN)
+		  || (exists &Errno::EWOULDBLOCK && $! == &Errno::EWOULDBLOCK))
+	  {
+	      # an error that wasn't non-blocking I/O-related.  that's serious
+	      return undef;
+	  }
+	  # errcode says to try again
+      }
+      else {
+
+	  if ($nbytes == 0) {
+	      return $written;  # return early if no error but nothing was written
+	  }
+
+	  $written += $nbytes;
+      }
+      $try++;
+  }
+
+  return $written;      # it's complete, we can return
+}
+
+sub map_server_sockets {
+  $fd_inet = $server_inet ? $server_inet->fileno : undef;
+  $fd_unix = $server_unix ? $server_unix->fileno : undef;
+  $fd_ssl  = $server_ssl  ? $server_ssl->fileno  : undef;
+
+  $server_select_mask = '';
+  $server_inet and vec($server_select_mask, $fd_inet, 1) = 1;
+  $server_unix and vec($server_select_mask, $fd_unix, 1) = 1;
+  $server_ssl  and vec($server_select_mask, $fd_ssl,  1) = 1;
+
+  my $back_selector = $server_select_mask;
+  $backchannel->set_selector(\$back_selector);
+
+  # and set a boolean indicating whether or not we have > 1 server socket
+  $have_multiple_server_socks =
+      ((defined $fd_inet ? 1 : 0) +
+      (defined $fd_unix ? 1 : 0) +
+      (defined $fd_ssl  ? 1 : 0)) > 1;
+}
+
 __DATA__
 
 =head1 NAME
@@ -2221,15 +2589,17 @@ Options:
  -c, --create-prefs                Create user preferences files
  -C path, --configpath=path        Path for default config files
  --siteconfigpath=path             Path for site configs
+ --cf='config line'                Additional line of configuration
  -d, --daemonize                   Daemonize
- -h, --help                        Print usage message.
+ -h, --help                        Print usage message
  -i [ipaddr], --listen-ip=ipaddr   Listen on the IP ipaddr
+ --ipv4only, --ipv4-only, --ipv4   Disable attempted use of ipv6 for DNS
  -p port, --port=port              Listen on specified port
  -m num, --max-children=num        Allow maximum num children
  --min-children=num                Allow minimum num children
  --min-spare=num                Lower limit for number of spare children
  --max-spare=num                Upper limit for number of spare children
- --max-conn-per-child=num          Maximum connections accepted by child 
+ --max-conn-per-child=num	   Maximum connections accepted by child 
                                    before it is respawned
  --round-robin                     Use traditional prefork algorithm
  --timeout-tcp=secs                Connection timeout for client headers
@@ -2257,12 +2627,15 @@ Options:
  -P, --paranoid                    Die upon user errors
  -H [dir], --helper-home-dir[=dir]  Specify a different HOME directory
  --ssl                             Run an SSL server
+ --ssl-port port                   Listen on port for SSL connections
+ --ssl-version sslversion          Specify SSL protocol version to use
  --server-key keyfile              Specify an SSL keyfile
  --server-cert certfile            Specify an SSL certificate
  --socketpath=path                 Listen on given UNIX domain socket
  --socketowner=name                Set UNIX domain socket file's owner
  --socketgroup=name                Set UNIX domain socket file's group
  --socketmode=mode                 Set UNIX domain socket file's mode
+ -V, --version                     Print version and exit
 
 =head1 DESCRIPTION
 
@@ -2324,6 +2697,12 @@ Ignore the default directories (usually C</usr/share/spamassassin> or similar).
 Use the specified path for locating site-specific configuration files.  Ignore
 the default directories (usually C</etc/mail/spamassassin> or similar).
 
+=item B<--cf='config line'>
+
+Add additional lines of configuration directly from the command-line, parsed
+after the configuration files are read.   Multiple B<--cf> arguments can be
+used, and each will be considered a separate line of configuration.
+
 =item B<-d>, B<--daemonize>
 
 Detach from starting process and run in background (daemonize).
@@ -2331,6 +2710,10 @@ Detach from starting process and run in background (daemonize).
 =item B<-h>, B<--help>
 
 Print a brief help message, then exit without further action.
+
+=item B<-V>, B<--version>
+
+Print version information, then exit without further action.
 
 =item B<-i> [I<ipaddress>], B<--listen-ip>[=I<ipaddress>], B<--ip-address>[=I<ipaddress>]
 
@@ -2342,6 +2725,13 @@ will make spamd listen on the first address that name resolves to.
 =item B<-p> I<port>, B<--port>=I<port>
 
 Optionally specifies the port number for the server to listen on (default: 783).
+
+If the B<--ssl> switch is used, and B<--ssl-port> is not supplied, then this
+port will be used to accept SSL connections instead of unencrypted connections.
+If the B<--ssl> switch is used, and B<--ssl-port> is set, then unencrypted
+connections will be accepted on the B<--port> at the same time as encrypted
+connections are accepted at B<--ssl-port>.
+
 
 =item B<-q>, B<--sql-config>
 
@@ -2556,6 +2946,11 @@ please see the documentation at:
 
 	C<http://wiki.apache.org/spamassassin/DebugChannels>
 
+=item B< --ipv4only>, B<--ipv4-only>, B<--ipv4>
+
+Do not use IPv6 for DNS tests. Use if the existing tests
+for IPv6 availablity produce incorrect results or crashes.
+
 =item B<-L>, B<--local>
 
 Perform only local tests on all mail.  In other words, skip DNS and other
@@ -2642,8 +3037,29 @@ home directory instead.
 
 =item B<--ssl>
 
-Accept only SSL connections.  The B<IO::Socket::SSL> perl module must be
-installed.
+Accept only SSL connections on the associated port.
+The B<IO::Socket::SSL> perl module must be installed.
+
+If the B<--ssl> switch is used, and B<--ssl-port> is not supplied, then
+B<--port> port will be used to accept SSL connections instead of unencrypted
+connections.  If the B<--ssl> switch is used, and B<--ssl-port> is set, then
+unencrypted connections will be accepted on the B<--port>, at the same time as
+encrypted connections are accepted at B<--ssl-port>.
+
+=item B<--ssl-port>=I<port>
+
+Optionally specifies the port number for the server to listen on for
+SSL connections (default: whatever --port uses).  See B<--ssl> for
+more details.
+
+=item B<--ssl-version>=I<sslversion>
+
+Specify the SSL protocol version to use, one of
+B<sslv2>, B<sslv3>, B<tlsv1>, or B<sslv23>.
+The default, B<sslv23>, is the most flexible, accepting a SSLv2 or higher
+hello handshake, then negotiating use of SSLv3 or TLSv1 protocol if the client
+can accept it.
+Specifying B<--ssl-version> implies B<--ssl>.
 
 =item B<--server-key> I<keyfile>
 
@@ -2662,6 +3078,10 @@ have a bug regarding paths of over 100 bytes or so (SpamAssassin bug 4380).  If
 you see a 'could not find newly-created UNIX socket' error message, and the
 path appears truncated, this may be the cause.  Try using a shorter path
 to the socket.
+
+By default, use of B<--socketpath> will inhibit SSL connections and unencrypted
+TCP connections.  To enable them, specify B<--port> and/or B<--ssl-port>
+explicitly.
 
 =item B<--socketowner> I<name>
 

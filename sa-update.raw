@@ -18,7 +18,7 @@
 # </@LICENSE>
 
 my $VERSION = 'svn' . (split(/\s+/,
-	'$Id: sa-update.raw 507100 2007-02-13 17:02:35Z felicity $'))[2];
+	'$Id: sa-update.raw 540384 2007-05-22 01:01:44Z duncf $'))[2];
 
 my $PREFIX          = '@@PREFIX@@';             # substituted at 'make' time
 my $DEF_RULES_DIR   = '@@DEF_RULES_DIR@@';      # substituted at 'make' time
@@ -47,49 +47,37 @@ use Config;
 use strict;
 use warnings;
 
-BEGIN {
-  # Locate locally installed SA libraries *without* using FindBin, which generates
-  # warnings and causes more trouble than its worth.  We don't need to be too
-  # smart about this BTW.
+BEGIN {                          # see comments in "spamassassin.raw" for doco
   my @bin = File::Spec->splitpath($0);
-  my $bin = ($bin[0] ? File::Spec->catpath(@bin[0..1]) : $bin[1])  # /home/jm/foo -> /home/jm
-            || File::Spec->curdir;                                 # foo          -> .
+  my $bin = ($bin[0] ? File::Spec->catpath(@bin[0..1]) : $bin[1])
+            || File::Spec->curdir;
 
-  # check to make sure it wasn't just installed in the normal way.
-  # note that ./lib/Mail/SpamAssassin.pm takes precedence, for
-  # building SpamAssassin on a machine where an old version is installed.
   if (-e $bin.'/lib/Mail/SpamAssassin.pm'
-        || !-e '@@INSTALLSITELIB@@/Mail/SpamAssassin.pm')
+        || !-e '@@INSTALLSITELIB@@/Mail/SpamAssassin.pm' )
   {
-    # Firstly, are we running "make test" in the "t" dir?  the test files
-    # *need* to use 'blib', so that 'use bytes' is removed for pre-5.6 perls
-    # beforehand by the preproc.  However, ./spamassassin does not, as the
-    # preproc will have stripped out the "use rule files from cwd" code from
-    # Mail::SpamAssassin.  So we want to use blib just for the t scripts.
-    if ( $bin eq '../' && -e '../blib/lib/Mail/SpamAssassin.pm' ) {
-      unshift(@INC, '../blib/lib');
-    }
-    else {
-      # These are common paths where the SA libs might be found.
-      foreach (qw(lib ../lib/site_perl
-                  ../lib/spamassassin ../share/spamassassin/lib))
+    my $searchrelative;
+    $searchrelative = 1;    # disabled during "make install": REMOVEFORINST
+    if ($searchrelative && $bin eq '../' && -e '../blib/lib/Mail/SpamAssassin.pm')
+    {
+      unshift ( @INC, '../blib/lib' );
+    } else {
+      foreach ( qw(lib ../lib/site_perl
+                ../lib/spamassassin ../share/spamassassin/lib))
       {
-        my $dir = File::Spec->catdir($bin, split('/', $_));
-        if(-f File::Spec->catfile($dir, "Mail", "SpamAssassin.pm")) {
-          unshift(@INC, $dir); last;
-        }
+        my $dir = File::Spec->catdir( $bin, split ( '/', $_ ) );
+        if ( -f File::Spec->catfile( $dir, "Mail", "SpamAssassin.pm" ) )
+        { unshift ( @INC, $dir ); last; }
       }
     }
   }
 }
 
 # These are the non-standard required modules
-# Use the evals to avoid the annoying RPM requirement check
-eval { use Net::DNS; };
-eval { use LWP::UserAgent; };
-eval { use HTTP::Date qw(time2str); };
-eval { use Archive::Tar 1.23; };
-eval { use IO::Zlib 1.04; };
+use Net::DNS;
+use LWP::UserAgent;
+use HTTP::Date qw(time2str);
+use Archive::Tar 1.23;
+use IO::Zlib 1.04;
 
 # These should already be available
 use Mail::SpamAssassin;
@@ -735,114 +723,172 @@ ENDOFVALIDATIONERR
 
   dbg("channel: lint check succeeded, extracting archive to $UPDDir...");
 
-  if (-d $UPDDir) {
-    # ok that worked, too late to stop now!   At this stage, if there are
-    # errors, we have to attempt to carry on regardless, since we've already
-    # blown away the old ruleset.
-    dbg("channel: point of no return for existing $UPDDir");
+  my @totry = (
+    {
+      'try' => sub {
+        if (-d $UPDDir) {
+          # ok that worked, too late to stop now!   At this stage, if there are
+          # errors, we have to attempt to carry on regardless, since we've already
+          # blown away the old ruleset.
+          dbg("channel: point of no return for existing $UPDDir");
 
-    # clean out the previous channel files, if they exist
-    if (-f $PREFile && ! unlink $PREFile ) {
-      warn("channel: attempt to rm channel pre file failed, attempting to continue anyway");
-    }
-    if (-f $CFFile && ! unlink $CFFile ) {
-      warn("channel: attempt to rm channel cf file failed, attempting to continue anyway");
-    }
-    if (!clean_update_dir($UPDDir)) {
-      warn("channel: attempt to rm channel directory failed, attempting to continue anyway");
+          # clean out the previous channel files, if they exist
+          if (-f $PREFile && ! unlink $PREFile ) {
+            warn("channel: attempt to rm channel pre file failed, attempting to continue anyway");
+          }
+          if (-f $CFFile && ! unlink $CFFile ) {
+            warn("channel: attempt to rm channel cf file failed, attempting to continue anyway");
+          }
+          if (!clean_update_dir($UPDDir)) {
+            warn("channel: attempt to rm channel directory failed, attempting to continue anyway");
+          }
+        }
+        else {
+          # create the dir, if it doesn't exist
+          dbg("channel: creating $UPDDir");
+          if (!mkpath([$UPDDir], 0, 0777)) {
+            warn "channel: can't create channel directory $UPDDir: $!\n";
+	    return 0;
+          }
+
+          # ok, that test worked.  it's now likely that the .cf's will
+          # similarly be ok to rename, too.   Too late to stop from here on
+          dbg("channel: point of no return for new $UPDDir");
+        }
+
+	return 1;
+      },
+
+      'rollback' => sub {
+	dbg("channel: attempting to remove the channel and update directories");
+
+        # bug 4941: try to get rid of the empty directories to avoid leaving SA
+        # with no rules.
+        rmdir $UPDDir;
+        rmdir $opt{'updatedir'};
+      },
+    },
+
+    {
+      'try' => sub {
+        # extract the files again for the last time
+        if (!taint_safe_archive_extract($UPDDir, $content_file)) {
+          channel_failed("channel: archive extraction failed");
+	  return 0;
+        }
+
+	return 1;
+      },
+
+      'rollback' => sub {
+	dbg("channel: attempting to clean out the channel update directory");
+
+        # bug 4941: try to get rid of the empty directories to avoid leaving SA
+        # with no rules.
+        if (!clean_update_dir($UPDDir)) {
+          warn "channel: attempt to clean up failed extraction also failed!\n";
+        }
+      },
+    },
+
+    {
+      'try' => sub {
+        # Write out the mirby file, not fatal if it doesn't work
+        dbg("channel: creating MIRRORED.BY file");
+        if (open(MBY, ">$mirby_path")) {
+          print MBY $mirby;
+          close(MBY);
+        }
+        else {
+          warn "error: can't write new MIRRORED.BY file: $!\n";
+        }
+
+	return 1;
+      },
+
+      'rollback' => sub {
+      },
+    },
+
+    {
+      'try' => sub {
+        # the last step is to create the .cf and .pre files to include the
+        # channel files
+        my @CF = ();
+        my @PRE = ();
+
+        dbg("channel: creating update cf/pre files");
+
+        # Put in whatever metadata we need
+        push(@CF, "# UPDATE version $newV\n");
+
+
+        # Find all of the cf and pre files
+        unless (opendir(DIR, $UPDDir)) {
+          die "fatal: can't access $UPDDir: $!\n";
+        }
+
+        my @files = ();
+        while(my $file = readdir(DIR)) {
+	  local ($1);	# avoid random taint flagging of $1
+          $file =~ /^(.+)$/;       # untaint
+          $file = $1;
+          my $path = File::Spec->catfile($UPDDir, $file);
+          next unless (-f $path);   # shouldn't ever happen
+          push(@files, $file);
+        }
+
+        # bug 5371: ensure files are sorted
+        foreach my $file ( sort @files ) {
+          if ($file =~ /\.cf$/) {
+            push(@CF, "include $nicechannel/$file\n");
+          }
+          elsif ($file =~ /\.pre$/) {
+            push(@PRE, "include $nicechannel/$file\n");
+          }
+          else {
+            next;
+          }
+
+          dbg("channel: adding $file");
+        }
+        closedir(DIR);
+
+        # Finally, write out the files to include the update files
+        if (!write_channel_file($PREFile, \@PRE)) {
+          channel_failed("channel: writing of $PREFile failed");
+          return 0;
+        }
+        if (!write_channel_file($CFFile, \@CF)) {
+          channel_failed("channel: writing of $CFFile failed");
+          return 0;
+        }
+
+        $exit = 0;            # "exit 0" means an update occurred
+        dbg("channel: update complete");
+
+	return 1;
+      },
+
+      'rollback' => sub {
+      },
+    },
+
+  );
+
+  my $error;
+  for(my $elem = 0; $elem <= $#totry; $elem++) {
+    if (!&{$totry[$elem]->{'try'}}()) {
+      $error = $elem;
+      last;
     }
   }
-  else {
-    # create the dir, if it doesn't exist
-    dbg("channel: creating $UPDDir");
-    if (!mkpath([$UPDDir], 0, 0777)) {
-      # bug 4941: try to get rid of the empty directories to avoid leaving SA
-      # with no rules.
-      rmdir $UPDDir;
-      rmdir $opt{'updatedir'};
-      die "fatal: can't create $UPDDir: $!\n";
+  if (defined $error) {
+    dbg("channel: channel failed, attempting rollback");
+    for(my $elem = $error; $elem >= 0; $elem--) {
+      &{$totry[$elem]->{'rollback'}}();
     }
-
-    # ok, that test worked.  it's now likely that the .cf's will
-    # similarly be ok to rename, too.   Too late to stop from here on
-    dbg("channel: point of no return for new $UPDDir");
   }
-
-  # extract the files again for the last time
-  if (!taint_safe_archive_extract($UPDDir, $content_file)) {
-    channel_failed("channel: archive extraction failed");
-
-    # bug 4941: try to get rid of the empty directories to avoid leaving SA
-    # with no rules.
-    if (!clean_update_dir($UPDDir)) {
-      warn "channel: attempt to clean up failed extraction also failed!\n";
-    }
-    else {
-      rmdir $UPDDir;
-      rmdir $opt{'updatedir'};
-    }
-
-    next;
-  }
-
-  # Write out the mirby file, not fatal if it doesn't work
-  dbg("channel: creating MIRRORED.BY file");
-  if (open(MBY, ">$mirby_path")) {
-    print MBY $mirby;
-    close(MBY);
-  }
-  else {
-    warn "error: can't write new MIRRORED.BY file: $!\n";
-  }
-
-  # the last step is to create the .cf and .pre files to include the
-  # channel files
-  my @CF = ();
-  my @PRE = ();
-
-  dbg("channel: creating update cf/pre files");
-
-  # Put in whatever metadata we need
-  push(@CF, "# UPDATE version $newV\n");
-
-  # Find all of the cf and pre files
-  unless (opendir(DIR, $UPDDir)) {
-    die "fatal: can't access $UPDDir: $!\n";
-  }
-  while(my $file = readdir(DIR)) {
-    local ($1);	# avoid random taint flagging of $1
-    $file =~ /^(.+)$/;       # untaint
-    $file = $1;
-    my $path = File::Spec->catfile($UPDDir, $file);
-    next unless (-f $path);   # shouldn't ever happen
-
-    if ($file =~ /\.cf$/) {
-      push(@CF, "include $nicechannel/$file\n");
-    }
-    elsif ($file =~ /\.pre$/) {
-      push(@PRE, "include $nicechannel/$file\n");
-    }
-    else {
-      next;
-    }
-
-    dbg("channel: adding $file");
-  }
-  closedir(DIR);
-
-  # Finally, write out the files to include the update files
-  if (!write_channel_file($PREFile, \@PRE)) {
-    channel_failed("channel: writing of $PREFile failed");
-    next;
-  }
-  if (!write_channel_file($CFFile, \@CF)) {
-    channel_failed("channel: writing of $CFFile failed");
-    next;
-  }
-
-  $exit = 0;            # "exit 0" means an update occurred
-
-  dbg("channel: update complete");
 }
 
 ##############################################################################
@@ -1260,9 +1306,6 @@ B<sa-update> [options]
 
 Options:
 
-  --updatedir path        Directory to place updates, defaults to the
-                          SpamAssassin site rules directory
-                          (default: /var/lib/spamassassin/<version>)
   --channel channel       Retrieve updates from this channel
                           Use multiple times for multiple channels
   --channelfile file      Retrieve updates from the channels in the file
@@ -1277,6 +1320,9 @@ Options:
                           --gpgkey and --gpgkeyfile options)
   --import file           Import GPG key(s) from file into sa-update's
                           keyring. Use multiple times for multiple files
+  --updatedir path        Directory to place updates, defaults to the
+                          SpamAssassin site rules directory
+                          (default: /var/lib/spamassassin/<version>)
   -D, --debug [area=n,...]  Print debugging messages
   -V, --version           Print version
   -h, --help              Print usage message
@@ -1288,19 +1334,20 @@ configuration, based on channels.  The default channel is
 I<updates.spamassassin.org>, which has updated rules since the previous
 release.
 
-Update archives are verified by default using SHA1 hashes and GPG signatures.
+Update archives are verified using SHA1 hashes and GPG signatures, by default.
+
+Note that C<sa-update> will not restart C<spamd> or otherwise cause
+a scanner to reload the now-updated ruleset automatically.  Instead,
+C<sa-update> is typically used in something like the following manner:
+
+        sa-update && /etc/init.d/spamassassin reload
+
+This works because C<sa-update> only returns an exit status of C<0> if
+it has successfully downloaded and installed an updated ruleset.
 
 =head1 OPTIONS
 
 =over 4
-
-=item B<--updatedir>
-
-By default, C<sa-update> will use the system-wide rules update directory:
-
-  @@LOCAL_STATE_DIR@@/spamassassin/@@VERSION@@
-
-If the updates should be stored in another location, specify it here.
 
 =item B<--channel>
 
@@ -1314,7 +1361,7 @@ multiple times, once per channel.  i.e.:
 =item B<--channelfile>
 
 Similar to the B<--channel> option, except specify the additional channels in a
-file instead of on the commandline.  This is extremely useful when there are a
+file instead of on the commandline.  This is useful when there are a
 lot of additional channels.
 
 =item B<--checkonly>
@@ -1390,6 +1437,19 @@ To import multiple keys, use the option multiple times.  i.e.:
 
 Note: use of this option automatically enables GPG verification.
 
+=item B<--updatedir>
+
+By default, C<sa-update> will use the system-wide rules update directory:
+
+        @@LOCAL_STATE_DIR@@/spamassassin/@@VERSION@@
+
+If the updates should be stored in another location, specify it here.
+
+Note that use of this option is not recommended; if you're just using sa-update
+to download updated rulesets for a scanner, and sa-update is placing updates in
+the wrong directory, you probably need to rebuild SpamAssassin with different
+C<Makefile.PL> arguments, instead of overriding sa-update's runtime behaviour.
+
 =item B<-D> [I<area,...>], B<--debug> [I<area,...>]
 
 Produce debugging output.  If no areas are listed, all debugging information is
@@ -1399,10 +1459,9 @@ diagnostic output on channel, gpg, and http, use:
 
         sa-update -D channel,gpg,http
 
-For more information about which areas (also known as channels) are available,
-please see the documentation at:
-
-	C<http://wiki.apache.org/spamassassin/DebugChannels>
+For more information about which areas (also known as channels) are
+available, please see the documentation at
+L<http://wiki.apache.org/spamassassin/DebugChannels>.
 
 =item B<-h>, B<--help>
 

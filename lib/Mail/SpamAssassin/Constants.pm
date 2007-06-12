@@ -35,10 +35,10 @@ use base qw( Exporter );
 );
 # These are generic constants that may be used across several modules
 @SA_VARS = qw(
-	META_TEST_MIN_PRIORITY HARVEST_DNSBL_PRIORITY MBX_SEPARATOR
+	HARVEST_DNSBL_PRIORITY MBX_SEPARATOR
 	MAX_BODY_LINE_LENGTH MAX_HEADER_KEY_LENGTH MAX_HEADER_VALUE_LENGTH
 	MAX_HEADER_LENGTH ARITH_EXPRESSION_LEXER AI_TIME_UNKNOWN
-	MAX_URI_LENGTH
+	CHARSETS_LIKELY_TO_FP_AS_CAPS MAX_URI_LENGTH
 );
 
 %EXPORT_TAGS = (
@@ -261,8 +261,7 @@ use constant IP_ADDRESS => qr/
 
 # ---------------------------------------------------------------------------
 
-use constant META_TEST_MIN_PRIORITY => 500;
-use constant HARVEST_DNSBL_PRIORITY => 500;
+use constant HARVEST_DNSBL_PRIORITY =>  500;
 
 # regular expression that matches message separators in The University of
 # Washington's MBX mailbox format
@@ -285,7 +284,7 @@ use constant MAX_HEADER_VALUE_LENGTH => 8192;
 use constant MAX_HEADER_LENGTH => 65536;
 
 # maximum byte length of any given URI
-use constant MAX_URI_LENGTH => 1024;
+use constant MAX_URI_LENGTH => 8192;
 
 # used for meta rules and "if" conditionals in Conf::Parser
 use constant ARITH_EXPRESSION_LEXER => qr/(?:
@@ -311,5 +310,10 @@ use constant ARITH_EXPRESSION_LEXER => qr/(?:
 # second pass (when the message is actually read + processed) the received
 # date is calculated.  this value signifies "unknown" from the first pass.
 use constant AI_TIME_UNKNOWN => 0;
+
+# Charsets which use capital letters heavily in their encoded representation.
+use constant CHARSETS_LIKELY_TO_FP_AS_CAPS => qr{[-_a-z0-9]*(?:
+	  koi|jp|jis|euc|gb|big5|isoir|cp1251|georgianps|pt154|tis
+	)[-_a-z0-9]*}ix;
 
 1;

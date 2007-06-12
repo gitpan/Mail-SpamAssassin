@@ -284,6 +284,20 @@ sub untaint_var {
 
 ###########################################################################
 
+sub taint_var {
+  my ($v) = @_;
+  return $v unless defined $v;      # can't taint "undef"
+
+  # $^X is apparently "always tainted".  We can use this to render
+  # a string tainted as follows:
+  my $tainter = substr ($^X."_", 0, 1);     # get 1 tainted char
+  $v .= $tainter; chop $v;      # then add and remove it
+
+  return $v;
+}
+
+###########################################################################
+
 # timezone mappings: in case of conflicts, use RFC 2822, then most
 # common and least conflicting mapping
 my %TZ = (
@@ -350,13 +364,18 @@ my %TZ = (
 my %MONTH = (jan => 1, feb => 2, mar => 3, apr => 4, may => 5, jun => 6,
 	     jul => 7, aug => 8, sep => 9, oct => 10, nov => 11, dec => 12);
 
+my $LOCALTZ;
+
 sub local_tz {
+  return $LOCALTZ if defined($LOCALTZ);
+
   # standard method for determining local timezone
   my $time = time;
   my @g = gmtime($time);
   my @t = localtime($time);
   my $z = $t[1]-$g[1]+($t[2]-$g[2])*60+($t[7]-$g[7])*1440+($t[5]-$g[5])*525600;
-  return sprintf("%+.2d%.2d", $z/60, $z%60);
+  $LOCALTZ = sprintf("%+.2d%.2d", $z/60, $z%60);
+  return $LOCALTZ;
 }
 
 sub parse_rfc822_date {
@@ -413,17 +432,6 @@ sub parse_rfc822_date {
 
   $hh ||= 0; $mm ||= 0; $ss ||= 0; $dd ||= 0; $mmm ||= 0; $yyyy ||= 0;
 
-  # Time::Local (v1.10 at least) throws warnings when the dates cause
-  # a 32-bit overflow.  So force a min/max for year.
-  if ($yyyy > 2037) {
-    dbg("util: year after supported range, forcing year to 2037: $date");
-    $yyyy = 2037;
-  }
-  elsif ($yyyy < 1970) {
-    dbg("util: year before supported range, forcing year to 1970: $date");
-    $yyyy = 1971;
-  }
-
   # Fudge invalid times so that we get a usable date.
   if ($ss > 59) { 
     dbg("util: second after supported range, forcing second to 59: $date");  
@@ -438,6 +446,34 @@ sub parse_rfc822_date {
   if ($hh > 23) { 
     dbg("util: hour after supported range, forcing hour to 23: $date"); 
     $hh = 23;
+  }
+
+  my $max_dd = 31;
+  if ($mmm == 4 || $mmm == 6 || $mmm == 9 || $mmm == 11) {
+    $max_dd = 30;
+  }
+  elsif ($mmm == 2) {
+    $max_dd = (!($yyyy % 4) && (($yyyy % 100) || !($yyyy % 400))) ? 29 : 28;
+  }
+  if ($dd > $max_dd) {
+    dbg("util: day is too high, incrementing date to next valid date: $date");
+    $dd = 1;
+    $mmm++;
+    if ($mmm > 12) {
+      $mmm = 1;
+      $yyyy++;
+    }
+  }
+
+  # Time::Local (v1.10 at least) throws warnings when the dates cause
+  # a 32-bit overflow.  So force a min/max for year.
+  if ($yyyy > 2037) {
+    dbg("util: year after supported range, forcing year to 2037: $date");
+    $yyyy = 2037;
+  }
+  elsif ($yyyy < 1970) {
+    dbg("util: year before supported range, forcing year to 1970: $date");
+    $yyyy = 1971;
   }
 
   my $time;
@@ -807,16 +843,27 @@ sub parse_content_type {
   # Get the actual MIME type out ...
   # Note: the header content may not be whitespace unfolded, so make sure the
   # REs do /s when appropriate.
+  # correct:
+  # Content-type: text/plain; charset=us-ascii
+  # missing a semi-colon, CT shouldn't have whitespace anyway:
+  # Content-type: text/plain charset=us-ascii
   #
-  $ct =~ s/^\s+//;			# strip leading whitespace
-  $ct =~ s/;.*$//s;			# strip everything after first ';'
-  $ct =~ s@^([^/]+(?:/[^/]*)?).*$@$1@s;	# only something/something ...
-  # strip inappropriate chars
-  $ct =~ tr/\000-\040\177-\377\042\050\051\054\056\072-\077\100\133-\135//d;
+  $ct =~ s/^\s+//;				# strip leading whitespace
+  $ct =~ s/;.*$//s;				# strip everything after first ';'
+  $ct =~ s@^([^/]+(?:/[^/\s]*)?).*$@$1@s;	# only something/something ...
   $ct = lc $ct;
 
-  # bug 4298: If at this point we don't have a content-type, assume text/plain
-  $ct ||= "text/plain";
+  # bug 4298: If at this point we don't have a content-type, assume text/plain;
+  # also, bug 5399: if the content-type *starts* with "text", and isn't in a 
+  # list of known bad/non-plain formats, do likewise.
+  if (!$ct ||
+        ($ct =~ /^text\b/ && $ct !~ /^text\/(?:x-vcard|calendar|html)$/))
+  {
+    $ct = "text/plain";
+  }
+
+  # strip inappropriate chars (bug 5399: after the text/plain fixup)
+  $ct =~ tr/\000-\040\177-\377\042\050\051\054\056\072-\077\100\133-\135//d;
 
   # Now that the header has been parsed, return the requested information.
   # In scalar context, just the MIME type, in array context the
@@ -901,7 +948,8 @@ If it cannot open a file after 20 tries, it returns C<undef>.
 
 # thanks to http://www2.picante.com:81/~gtaylor/autobuse/ for this code
 sub secure_tmpfile {
-  my $tmpdir = Mail::SpamAssassin::Util::untaint_file_path(File::Spec->tmpdir());
+  my $tmpdir = Mail::SpamAssassin::Util::untaint_file_path(
+                $ENV{'TMPDIR'} || File::Spec->tmpdir());
 
   if (!$tmpdir) {
     # Note: we would prefer to keep this fatal, as not being able to
@@ -924,6 +972,7 @@ sub secure_tmpfile {
     # instead, we require O_EXCL|O_CREAT to guarantee us proper
     # ownership of our file, read the open(2) man page
     if (sysopen($tmpfile, $reportfile, O_RDWR|O_CREAT|O_EXCL, 0600)) {
+      binmode $tmpfile;
       last;
     }
 
@@ -1168,14 +1217,15 @@ sub uri_list_canonify {
       #    both hex (0x) and oct (0+) encoded octets, etc.
 
       if ($host =~ /^
-        ((?:0x[0-9a-f]{2,}|\d+)\.)
-	((?:0x[0-9a-f]{2,}|\d+)\.)
-	((?:0x[0-9a-f]{2,}|\d+)\.)
-	(0x[0-9a-f]{2,}|\d+)
-	$/ix) {
+                    ((?:0x[0-9a-f]+|\d+)\.)
+                    ((?:0x[0-9a-f]+|\d+)\.)
+                    ((?:0x[0-9a-f]+|\d+)\.)
+                    (0x[0-9a-f]+|\d+)
+                    $/ix)
+      {
         my @chunk = ($1,$2,$3,$4);
         foreach my $octet (@chunk) {
-          $octet =~ s/^0x0*([0-9a-f][0-9a-f])/sprintf "%d",hex($1)/gei;
+          $octet =~ s/^0x([0-9a-f]+)/sprintf "%d",hex($1)/gei;
           $octet =~ s/^0+([1-3][0-7]{0,2}|[4-7][0-7]?)\b/sprintf "%d",oct($1)/ge;
 	  $octet =~ s/^0+//;
         }
@@ -1444,6 +1494,68 @@ sub trap_sigalrm_fully {
     # may be using "safe" signals with %SIG; use POSIX to avoid it
     POSIX::sigaction POSIX::SIGALRM(), new POSIX::SigAction $handler;
   }
+}
+
+###########################################################################
+
+# Removes any normal perl-style regexp delimiters at
+# the start and end, and modifiers at the end (if present).
+# If modifiers are found, they are inserted into the pattern using
+# the /(?i)/ idiom.
+
+sub regexp_remove_delimiters {
+  my ($re) = @_;
+
+  my $delim;
+  if (!defined $re || $re eq '') {
+    warn "cannot remove delimiters from null regexp";
+    return undef;   # invalid
+  }
+  elsif ($re =~ s/^m{//) {              # m{foo/bar}
+    $delim = '}';
+  }
+  elsif ($re =~ s/^m\(//) {             # m(foo/bar)
+    $delim = ')';
+  }
+  elsif ($re =~ s/^m<//) {              # m<foo/bar>
+    $delim = '>';
+  }
+  elsif ($re =~ s/^m(\W)//) {           # m#foo/bar#
+    $delim = $1;
+  } else {                              # /foo\/bar/ or !foo/bar!
+    $re =~ s/^(\W)//; $delim = $1;
+  }
+
+  $re =~ s/\Q${delim}\E([imsx]*)$// or warn "unbalanced re: $re";
+
+  my $mods = $1;
+  if ($mods) {
+    $re = "(?".$mods.")".$re;
+  }
+
+  return $re;
+}
+
+# turn "/foobar/i" into qr/(?i)foobar/
+
+sub make_qr {
+  my ($re) = @_;
+  $re = regexp_remove_delimiters($re);
+  return qr/$re/;
+}
+
+###########################################################################
+
+sub get_my_locales {
+  my ($ok_locales) = @_;
+
+  my @locales = split(' ', $ok_locales);
+  my $lang = $ENV{'LC_ALL'};
+  $lang ||= $ENV{'LANGUAGE'};
+  $lang ||= $ENV{'LC_MESSAGES'};
+  $lang ||= $ENV{'LANG'};
+  push (@locales, $lang) if defined($lang);
+  return @locales;
 }
 
 ###########################################################################
