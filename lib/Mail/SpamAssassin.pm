@@ -94,7 +94,7 @@ use vars qw{
   @site_rules_path
 };
 
-$VERSION = "3.002001";      # update after release (same format as perl $])
+$VERSION = "3.002002";      # update after release (same format as perl $])
 # $IS_DEVEL_BUILD = 1;        # change for release versions
 
 # Used during the prerelease/release-candidate part of the official release
@@ -105,11 +105,11 @@ $VERSION = "3.002001";      # update after release (same format as perl $])
 @ISA = qw();
 
 # SUB_VERSION is now just <yyyy>-<mm>-<dd>
-$SUB_VERSION = (split(/\s+/,'$LastChangedDate: 2007-05-02 05:02:21 -0700 (Wed, 02 May 2007) $ updated by SVN'))[1];
+$SUB_VERSION = (split(/\s+/,'$LastChangedDate: 2007-07-23 07:45:44 -0700 (Mon, 23 Jul 2007) $ updated by SVN'))[1];
 
 if (defined $IS_DEVEL_BUILD && $IS_DEVEL_BUILD) {
   push(@EXTRA_VERSION,
-       ('r' . qw{$LastChangedRevision: 534406 $ updated by SVN}[1]));
+       ('r' . qw{$LastChangedRevision: 558751 $ updated by SVN}[1]));
 }
 
 sub Version {
@@ -1101,10 +1101,8 @@ sub read_scoreonly_config {
 
   $self->{conf}->{main} = $self;
   $self->{conf}->parse_scores_only ($text);
-  if ($self->{conf}->{allow_user_rules}) {
-      dbg("config: finishing parsing!");
-      $self->{conf}->finish_parsing();
-  }
+  $self->{conf}->finish_parsing(1);
+
   delete $self->{conf}->{main};	# to allow future GC'ing
 }
 
@@ -1469,7 +1467,7 @@ sub init {
   # Go and parse the config!
   $self->{conf}->{main} = $self;
   $self->{conf}->parse_rules ($self->{config_text});
-  $self->{conf}->finish_parsing ();
+  $self->{conf}->finish_parsing(0);
   delete $self->{conf}->{main};	# to allow future GC'ing
 
   undef $self->{config_text};   # ensure it's actually freed

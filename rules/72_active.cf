@@ -2062,7 +2062,7 @@ body TVD_SECTION		/\bSection (?:27A|21B)/i
 ##} TVD_SECTION
 
 ##{ TVD_SILLY_URI_OBFU
-body TVD_SILLY_URI_OBFU	m!https?://[a-z0-9-]+\.[a-z0-9-]*\.?[^a-z0-9.:/\s"'\@?\)>-]+[a-z0-9.-]*[a-z]{3}(?:\s|$)!i
+body TVD_SILLY_URI_OBFU		m!https?://[a-z0-9-]+\.[a-z0-9-]*\.?[^a-z0-9.:/\s"'\@?\)>-]+[a-z0-9.-]*[a-z]{3}(?:\s|$)!i
 ##} TVD_SILLY_URI_OBFU
 
 ##{ TVD_SPACED_SUBJECT_WORD3
@@ -2977,6 +2977,8 @@ redirector_pattern m'^http:/*(?:\w+\.)?google(?:\.\w{2,3}){1,2}/url\?.*?(?<=[?&]
 redirector_pattern m'^http:/*(?:\w+\.)?google(?:\.\w{2,3}){1,2}/search\?.*?(?<=[?&])q=[^&]*?(?<=%20|..[=+\s])site:(.*?)(?:$|%20|[\s+&\#])'i
 redirector_pattern m'^http:/*(?:\w+\.)?google(?:\.\w{2,3}){1,2}/search\?.*?(?<=[?&])q=[^&]*?(?<=%20|..[=+\s])(?:"|%22)(.*?)(?:$|%22|["\s+&\#])'i
 redirector_pattern m'^http:/*(?:\w+\.)?google(?:\.\w{2,3}){1,2}/translate\?.*?(?<=[?&])u=(.*?)(?:$|[&\#])'i
+redirector_pattern m'^http:/*(?:\w+\.)?aol\.com/redir\.adp\?.*(?<=[?&])_url=(.*?)(?:$|[&\#])'i
+redirector_pattern m'^http:/*rd\.yahoo\.co\.jp/\*(.*)'i
 ##} redirector_pattern_sandbox
 
 
@@ -3192,6 +3194,11 @@ mimeheader __PART_STOCK_CL Content-Location =~ /./
 endif
 body     __PHD			/PhD/i
 body     __PREAPPROVEDFVGT	/pre-approved/i
+
+ifplugin Mail::SpamAssassin::Plugin::DNSEval
+header	__RCVD_IN_DNSWL		eval:check_rbl('dnswl-firsttrusted', 'list.dnswl.org.')
+tflags	__RCVD_IN_DNSWL		nice net
+endif
 
 ifplugin Mail::SpamAssassin::Plugin::DNSEval
 header __RCVD_IN_DOB            eval:check_rbl('dob', 'dob.sibl.support-intelligence.net.', '255')

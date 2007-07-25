@@ -101,6 +101,8 @@ use File::Spec 0.8;
 use File::Path;
 use Carp ();
 
+use constant RUNNING_ON_MACOS => ($^O =~ /^darwin/oi);
+
 # Check to make sure the script version and the module version matches.
 # If not, die here!  Also, deal with unchanged VERSION macro.
 if ($Mail::SpamAssassin::VERSION ne '@@VERSION@@' && '@@VERSION@@' ne "\@\@VERSION\@\@") {
@@ -202,6 +204,8 @@ my @ORIG_ARGV = Mail::SpamAssassin::Util::untaint_var( \@ARGV );
 # daemonize() switches to the root later on and we need to come back here
 # somehow -- untaint the dir to be on the safe side.
 my $ORIG_CWD = Mail::SpamAssassin::Util::untaint_var( Cwd::cwd() );
+
+prepare_for_sighup_restart();
 
 # Parse the command line
 Getopt::Long::Configure("bundling");
@@ -959,28 +963,7 @@ while (1) {
     $scaling->main_server_poll($opt{'server-scale-period'});
   }
 
-  if ( defined $got_sighup ) {
-    if (defined($opt{'pidfile'})) {
-      unlink($opt{'pidfile'}) || warn "spamd: cannot unlink $opt{'pidfile'}: $!\n";
-    }
-
-    # leave Client fds active, and do not kill children; they can still
-    # service clients until they exit.  But restart the listener anyway.
-    # And close the logfile, so the new instance can reopen it.
-    Mail::SpamAssassin::Logger::close_log();
-    chdir($ORIG_CWD)
-      || die "spamd: restart failed: chdir failed: ${ORIG_CWD}: $!\n";
-
-    # ensure we re-run spamd using the right perl interpreter, and
-    # with the right switches (taint mode and warnings) (bug 5255)
-    my $perl = Mail::SpamAssassin::Util::untaint_var($^X);
-    my @execs = ( $perl, "-T", "-w", $ORIG_ARG0, @ORIG_ARGV );
-    warn "spamd: restarting using '" . join (' ', @execs) . "'\n";
-    exec @execs;
-
-    # should not get past that...
-    die "spamd: restart failed: exec failed: " . join (' ', @execs) . ": $!\n";
-  }
+  ( defined $got_sighup ) and do_sighup_restart();
 
   for (my $i = keys %children; $i < $childlimit; $i++) {
     spawn();
@@ -1036,24 +1019,13 @@ sub spawn {
         $ugid = getgrnam( $opt{'groupname'} ) || $ugid;
       }
 
-      # Change GID
-      $) = "$ugid $ugid";    # effective gid
-      $( = $ugid;            # real gid
+      # bug 5518: assignments to $) and $( don't always work on all platforms
+      # bug 3900: assignments to $> and $< problems with BSD perl bug
+      # use the POSIX functions to hide the platform specific workarounds 
+      POSIX::setgid($ugid);  # set effective and real gid
+      POSIX::setuid($uuid);  # set effective and real UID
 
-      # Change UID
-      $> = $uuid;            # effective uid
-      $< = $uuid;            # real uid. we now cannot setuid anymore
-
-      # bug 3900: BSD perl bug. see comment in setuid_to_euid() in
-      # Mail::SA::Util on the same issue.
-      if ($< != $uuid) {
-        dbg("spamd: initial attempt to change real uid failed, trying BSD workaround");
-
-        $> = $<;              # revert euid to ruid
-        $< = $uuid;           # change ruid to target
-        $> = $uuid;           # change euid back to target
-      }
-
+      # keep the sanity check to catch problems like bug 3900 just in case
       if ( $> != $uuid and $> != ( $uuid - 2**32 ) ) {
         die "spamd: setuid to uid $uuid failed\n";
       }
@@ -2047,12 +2019,11 @@ sub auth_ident {
 sub handle_user_setuid_basic {
   my $username = shift;
 
-  #
-  # If vpopmail config enabled then look up userinfo for vpopmail uid
-  # as defined by $opt{'username'} or as passed via $username
+  # If $opt{'username'} in use, then look up userinfo for that uid;
+  # otherwise use what was passed via $username
   #
   my $userid = '';
-  if ( $opt{'vpopmail'} && $opt{'username'} ) {
+  if ( $opt{'username'} ) {
     $userid = $opt{'username'};
   }
   else {
@@ -2571,6 +2542,51 @@ sub map_server_sockets {
       ((defined $fd_inet ? 1 : 0) +
       (defined $fd_unix ? 1 : 0) +
       (defined $fd_ssl  ? 1 : 0)) > 1;
+}
+
+# do this in advance, since we want to minimize work when SIGHUP
+# is received
+my $perl_from_hashbang_line;
+sub prepare_for_sighup_restart {
+  # it'd be great if we could introspect the interpreter to figure this
+  # out, but bizarrely it seems unavailable.
+  if (open (IN, "<$ORIG_ARG0")) {
+    my $l = <IN>;
+    close IN;
+    if ($l && $l =~ /^#!\s*(\S+)\s*.*?$/) {
+      $perl_from_hashbang_line = $1;
+    }
+  }
+}
+
+sub do_sighup_restart {
+  if (defined($opt{'pidfile'})) {
+    unlink($opt{'pidfile'}) || warn "spamd: cannot unlink $opt{'pidfile'}: $!\n";
+  }
+
+  # leave Client fds active, and do not kill children; they can still
+  # service clients until they exit.  But restart the listener anyway.
+  # And close the logfile, so the new instance can reopen it.
+  Mail::SpamAssassin::Logger::close_log();
+  chdir($ORIG_CWD)
+    or die "spamd: restart failed: chdir failed: ${ORIG_CWD}: $!\n";
+
+  # ensure we re-run spamd using the right perl interpreter, and
+  # with the right switches (taint mode and warnings) (bug 5255)
+  my $perl = Mail::SpamAssassin::Util::untaint_var($^X);
+  my @execs = ( $perl, "-T", "-w", $ORIG_ARG0, @ORIG_ARGV );
+
+  if ($perl eq $perl_from_hashbang_line) {
+    # we're using the same perl as the script uses on the #! line;
+    # we can safely just exec the script
+    @execs = ( $ORIG_ARG0, @ORIG_ARGV );
+  }
+
+  warn "spamd: restarting using '" . join (' ', @execs) . "'\n";
+  exec @execs;
+
+  # should not get past that...
+  die "spamd: restart failed: exec failed: " . join (' ', @execs) . ": $!\n";
 }
 
 __DATA__
