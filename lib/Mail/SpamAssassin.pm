@@ -94,7 +94,7 @@ use vars qw{
   @site_rules_path
 };
 
-$VERSION = "3.002002";      # update after release (same format as perl $])
+$VERSION = "3.002003";      # update after release (same format as perl $])
 # $IS_DEVEL_BUILD = 1;        # change for release versions
 
 # Used during the prerelease/release-candidate part of the official release
@@ -105,11 +105,11 @@ $VERSION = "3.002002";      # update after release (same format as perl $])
 @ISA = qw();
 
 # SUB_VERSION is now just <yyyy>-<mm>-<dd>
-$SUB_VERSION = (split(/\s+/,'$LastChangedDate: 2007-07-23 07:45:44 -0700 (Mon, 23 Jul 2007) $ updated by SVN'))[1];
+$SUB_VERSION = (split(/\s+/,'$LastChangedDate: 2007-08-08 06:16:52 -0700 (Wed, 08 Aug 2007) $ updated by SVN'))[1];
 
 if (defined $IS_DEVEL_BUILD && $IS_DEVEL_BUILD) {
   push(@EXTRA_VERSION,
-       ('r' . qw{$LastChangedRevision: 558751 $ updated by SVN}[1]));
+       ('r' . qw{$LastChangedRevision: 563848 $ updated by SVN}[1]));
 }
 
 sub Version {

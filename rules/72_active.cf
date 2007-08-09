@@ -90,7 +90,7 @@ score CORRUPT_FROM_LINE_IN_HDRS 0.001
 ##} CORRUPT_FROM_LINE_IN_HDRS
 
 ##{ CTYPE_001C_A
-header CTYPE_001C_A Content-Type =~ /multipart.{0,200}boundary=\"----=_NextPart_000_0001_01C[0-9A-F]{5}\.[0-9A-F]{7}0\"/
+meta CTYPE_001C_A  (0)      # obsolete
 ##} CTYPE_001C_A
 
 ##{ CTYPE_001C_B
