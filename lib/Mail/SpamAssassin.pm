@@ -74,6 +74,7 @@ use Mail::SpamAssassin::Message;
 use Mail::SpamAssassin::PluginHandler;
 use Mail::SpamAssassin::DnsResolver;
 
+use Errno qw(ENOENT EACCES);
 use File::Basename;
 use File::Path;
 use File::Spec 0.8;
@@ -94,7 +95,7 @@ use vars qw{
   @site_rules_path
 };
 
-$VERSION = "3.002003";      # update after release (same format as perl $])
+$VERSION = "3.002004";      # update after release (same format as perl $])
 # $IS_DEVEL_BUILD = 1;        # change for release versions
 
 # Used during the prerelease/release-candidate part of the official release
@@ -105,11 +106,11 @@ $VERSION = "3.002003";      # update after release (same format as perl $])
 @ISA = qw();
 
 # SUB_VERSION is now just <yyyy>-<mm>-<dd>
-$SUB_VERSION = (split(/\s+/,'$LastChangedDate: 2007-08-08 06:16:52 -0700 (Wed, 08 Aug 2007) $ updated by SVN'))[1];
+$SUB_VERSION = (split(/\s+/,'$LastChangedDate: 2008-01-01 20:59:55 +0000 (Tue, 01 Jan 2008) $ updated by SVN'))[1];
 
 if (defined $IS_DEVEL_BUILD && $IS_DEVEL_BUILD) {
   push(@EXTRA_VERSION,
-       ('r' . qw{$LastChangedRevision: 563848 $ updated by SVN}[1]));
+       ('r' . qw{$LastChangedRevision: 607910 $ updated by SVN}[1]));
 }
 
 sub Version {
@@ -1718,7 +1719,12 @@ sub first_existing_path {
   my $path;
   foreach my $p (@_) {
     $path = $self->sed_path ($p);
-    if (defined $path && -e $path) { return $path; }
+    if (defined $path) {
+      my($errn) = stat($path) ? 0 : 0+$!;
+      if    ($errn == ENOENT) { }  # does not exist
+      elsif ($errn) { warn "config: path \"$path\" is inaccessible: $!\n" }
+      else { return $path }
+    }
   }
   return;
 }
