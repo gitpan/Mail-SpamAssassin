@@ -44,6 +44,7 @@ package Mail::SpamAssassin::Message::Metadata;
 use strict;
 use warnings;
 use bytes;
+use re 'taint';
 
 use Mail::SpamAssassin::Dns;
 use Mail::SpamAssassin::PerMsgStatus;
@@ -88,12 +89,12 @@ sub parse_received_headers {
 
   unless ($did_user_specify_trust && $did_user_specify_internal) {
     if (!$did_user_specify_trust && !$did_user_specify_internal) {
-      dbg('conf: trusted_networks are not configured; it is recommended that '.
-	  'you configure trusted_networks manually');
+      dbg('config: trusted_networks are not configured; it is recommended '.
+	  'that you configure trusted_networks manually');
     } elsif (!$did_user_specify_internal) {
       # use 'trusted' for 'internal'; compatibility with SpamAssassin 2.60
       $internal = $trusted;
-      dbg('conf: internal_networks not configured, using trusted_networks '.
+      dbg('config: internal_networks not configured, using trusted_networks '.
 	  'configuration for internal_networks; if you really want '.
 	  'internal_networks to only contain the required 127/8 add '.
 	  "'internal_networks !0/0' to your configuration");
@@ -101,7 +102,7 @@ sub parse_received_headers {
       # use 'internal' for 'trusted'; I don't know why we let people define
       # internal without trusted, but we do... and we rely on trusted being set
       $trusted = $internal;
-      dbg('conf: trusted_networks not configured, using internal_networks '.
+      dbg('config: trusted_networks not configured, using internal_networks '.
 	  'configuration for trusted_networks');
     }
   }
@@ -259,7 +260,7 @@ sub parse_received_headers {
     $self->{msg}->delete_header ("X-Spam-Relays-Untrusted");
     $self->{msg}->delete_header ("X-Spam-Relays-Internal");
     $self->{msg}->delete_header ("X-Spam-Relays-External");
- 
+
     if ($self->{msg}->can ("put_metadata")) {
       $self->{msg}->put_metadata ("X-Spam-Relays-Trusted",
 			$self->{relays_trusted_str});
@@ -372,8 +373,12 @@ sub parse_received_line {
     $id = $1;
   }
 
-  if (/\bhelo=([-A-Za-z0-9\.]+)(?:[^-A-Za-z0-9\.]|$)/) { $helo = $1; }
-  elsif (/\b(?:HELO|EHLO) ([-A-Za-z0-9\.]+)(?:[^-A-Za-z0-9\.]|$)/) { $helo = $1; }
+  if (/\bhelo=([-A-Za-z0-9\.\^+_&:=?!@%*\$\\\/]+)(?:[^-A-Za-z0-9\.\^+_&:=?!@%*\$\\\/]|$)/) {
+      $helo = $1;
+  }
+  elsif (/\b(?:HELO|EHLO) ([-A-Za-z0-9\.\^+_&:=?!@%*\$\\\/]+)(?:[^-A-Za-z0-9\.\^+_&:=?!@%*\$\\\/]|$)/) {
+      $helo = $1;
+  }
   if (/ by (\S+)(?:[^-A-Za-z0-9\;\.]|$)/) { $by = $1; }
 
 # ---------------------------------------------------------------------------
@@ -383,7 +388,8 @@ sub parse_received_line {
   # with ESMTPA, ESMTPSA, LMTPA, LMTPSA should cover RFC 3848 compliant MTAs
   # with ASMTP (Authenticated SMTP) is used by Earthlink, Exim 4.34, and others
   # with HTTP should only be authenticated webmail sessions
-  if (/ by / && / with (ESMTPA|ESMTPSA|LMTPA|LMTPSA|ASMTP|HTTP)(?: |$)/i) {
+  # with HTTPU is used by Communigate Pro with Pronto! webmail interface
+  if (/ by / && / with (ESMTPA|ESMTPSA|LMTPA|LMTPSA|ASMTP|HTTPU?)(?: |$)/i) {
     $auth = $1;
   }
   # Courier v0.47 and possibly others
@@ -401,6 +407,14 @@ sub parse_received_line {
   # Postfix 2.3 and later with "smtpd_sasl_authenticated_header yes"
   elsif (/\) \(Authenticated sender: \S+\) by \S+ \(Postfix\) with /) {
     $auth = 'Postfix';
+  }
+  # Communigate Pro
+  elsif (/CommuniGate Pro SMTP/ && / \(account /) {
+    $auth = 'Communigate';
+  }
+  # Microsoft Exchange (complete with syntax error)
+  elsif (/ with Microsoft Exchange Server HTTP-DAV /) {
+    $auth = 'HTTP-DAV';
   }
 
 # ---------------------------------------------------------------------------
@@ -573,6 +587,14 @@ sub parse_received_line {
     elsif (/\(Scalix SMTP Relay/) {
       # from DPLAPTOP ( 72.242.176.162) by mail.puryear-it.com (Scalix SMTP Relay 10.0.1.3) via ESMTP; Fri, 23 Jun 2006 16:39:47 -0500 (CDT)
       if (/^(\S+) \( ?(${IP_ADDRESS})\) by (\S+)/) {
+	$helo = $1; $ip = $2; $by = $3; goto enough;
+      }
+    }
+
+    elsif (/ \(Lotus Domino /) {
+      # it seems Domino never records the rDNS: bug 5926
+      if (/^(\S+) \(\[(${IP_ADDRESS})\]\) by (\S+) \(Lotus/) {
+        $mta_looked_up_dns = 0;
 	$helo = $1; $ip = $2; $by = $3; goto enough;
       }
     }
@@ -924,6 +946,14 @@ sub parse_received_line {
       $ip = $1; $helo = $2; $by = $3; goto enough;
     }
 
+    # Received: from host.example.com ([192.0.2.1] verified)
+    # by mail.example.net (CommuniGate Pro SMTP 5.1.13)
+    # with ESMTP id 9786656 for user@example.net; Thu, 27 Mar 2008 15:08:17 +0600
+    if (/ \(CommuniGate Pro/ && /^(\S+) \(\[(${IP_ADDRESS})\] verified\) by (\S+) \(/) {
+      $mta_looked_up_dns = 1;
+      $rdns = $1; $helo = $1; $ip = $2; $by = $3; goto enough;
+    }
+
     # Received: from ([10.0.0.6]) by mail0.ciphertrust.com with ESMTP ; Thu,
     # 13 Mar 2003 06:26:21 -0500 (EST)
     if (/^\(\[(${IP_ADDRESS})\]\) by (\S+) with /) {
@@ -1205,12 +1235,6 @@ enough:
     dbg("received-header: could not parse IP address from: $_");
   }
 
-  $ip = Mail::SpamAssassin::Util::extract_ipv4_addr_from_string ($ip);
-  if (!$ip) {
-    dbg("received-header: could not parse IPv4 address, assuming IPv6");
-    return 0;   # ignore IPv6 handovers
-  }
-
   # DISABLED: if we cut out localhost-to-localhost SMTP handovers,
   # we will give FPs on SPF checks -- since the SMTP "MAIL FROM" addr
   # will be recorded, but we won't have the relays handover recorded
@@ -1226,6 +1250,14 @@ enough:
   if ($rdns =~ /^unknown$/i) {
     $rdns = '';		# some MTAs seem to do this
   }
+  
+  $ip =~ s/^\[//; $ip =~ s/\]$//;
+
+  $ip =~ s/^ipv6://i;   # remove optional "IPv6:" prefix
+
+  # remove "::ffff:" prefix from IPv4-mapped-in-IPv6 addresses,
+  # so we can treat them as simply IPv4 addresses
+  $ip =~ s/^0*:0*:(?:0*:)*ffff:(\d+\.\d+\.\d+\.\d+)$/$1/i;
 
   $envfrom =~ s/^\s*<*//gs; $envfrom =~ s/>*\s*$//gs;
   $by =~ s/\;$//;

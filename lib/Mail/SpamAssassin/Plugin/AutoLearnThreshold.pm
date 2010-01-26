@@ -56,6 +56,7 @@ use Mail::SpamAssassin::Logger;
 use strict;
 use warnings;
 use bytes;
+use re 'taint';
 
 use vars qw(@ISA);
 @ISA = qw(Mail::SpamAssassin::Plugin);
@@ -75,7 +76,7 @@ sub new {
 
 sub set_config {
   my($self, $conf) = @_;
-  my @cmds = ();
+  my @cmds;
 
 =head1 USER OPTIONS
 

@@ -39,6 +39,7 @@ use Mail::SpamAssassin::Timeout;
 use strict;
 use warnings;
 use bytes;
+use re 'taint';
 
 use vars qw(@ISA);
 @ISA = qw(Mail::SpamAssassin::Plugin);
@@ -73,7 +74,7 @@ sub new {
 
 sub set_config {
   my($self, $conf) = @_;
-  my @cmds = ();
+  my @cmds;
 
 =head1 USER SETTINGS
 
@@ -81,9 +82,10 @@ sub set_config {
 
 =item whitelist_from_spf add@ress.com
 
-Use this to supplement the whitelist_from addresses with a check against the
-domain's SPF record. Aside from the name 'whitelist_from_spf', the syntax is
-exactly the same as the syntax for 'whitelist_from'.
+Works similarly to whitelist_from, except that in addition to matching
+a sender address, a check against the domain's SPF record must pass.
+The first parameter is an address to whitelist, and the second is a string
+to match the relay's rDNS.
 
 Just like whitelist_from, multiple addresses per line, separated by spaces,
 are OK. Multiple C<whitelist_from_spf> lines are also OK.
@@ -91,7 +93,7 @@ are OK. Multiple C<whitelist_from_spf> lines are also OK.
 The headers checked for whitelist_from_spf addresses are the same headers
 used for SPF checks (Envelope-From, Return-Path, X-Envelope-From, etc).
 
-Since this whitelist requires an SPF check to be made network tests must be
+Since this whitelist requires an SPF check to be made, network tests must be
 enabled. It is also required that your trust path be correctly configured.
 See the section on C<trusted_networks> for more info on trust paths.
 
@@ -288,6 +290,8 @@ sub check_for_def_spf_whitelist_from {
 sub _check_spf {
   my ($self, $scanner, $ishelo) = @_;
 
+  my $timer = $self->{main}->time_method("check_spf");
+
   # we can re-use results from any *INTERNAL* Received-SPF header in the message...
   # we can't use results from trusted but external hosts since (i) spf checks are
   # supposed to be done "on the domain boundary", (ii) even if an external header 
@@ -314,7 +318,7 @@ sub _check_spf {
     }
 
     foreach my $hdr (@internal_hdrs) {
-      if ($hdr =~ /^received-spf: /i) {
+      if ($hdr =~ /^received-spf:/i) {
 	dbg("spf: found a Received-SPF header added by an internal host: $hdr");
 
 	# old version:
@@ -333,7 +337,7 @@ sub _check_spf {
 
 	# http://www.openspf.org/RFC_4408#header-field
 	# wtf - for some reason something is sticking an extra space between the header name and field value
-	if ($hdr =~ /^received-spf:\s+(pass|neutral|(?:soft)?fail|none)\b(?:.*\bidentity=(\S+?);?\b)?/i) {
+	if ($hdr =~ /^received-spf:\s*(pass|neutral|(?:soft)?fail|none)\b(?:.*\bidentity=(\S+?);?\b)?/i) {
 	  my $result = lc($1);
 
 	  my $identity = '';	# we assume it's a mfrom check if we can't tell otherwise
@@ -363,7 +367,8 @@ sub _check_spf {
 
 	  # and the result
 	  $scanner->{"spf_${identity}${result}"} = 1;
-	  dbg("spf: re-using ".($identity ? 'helo' : 'mfrom')." result from Received-SPF header: $result");
+	  dbg("spf: re-using %s result from Received-SPF header: %s",
+              ($identity ? 'helo' : 'mfrom'), $result);
 
 	  # if we've got *both* the mfrom and helo results we're done
 	  return if ($scanner->{spf_checked} && $scanner->{spf_helo_checked});
@@ -384,6 +389,7 @@ sub _check_spf {
 
   # select the SPF module we're going to use
   unless (defined $self->{has_mail_spf}) {
+    my $eval_stat;
     eval {
       die("Mail::SPF disabled by admin setting\n") if $scanner->{conf}->{do_not_use_mail_spf};
 
@@ -396,18 +402,22 @@ sub _check_spf {
       $self->{spf_server} = Mail::SPF::Server->new(
 				hostname     => $scanner->get_tag('HOSTNAME'),
 				dns_resolver => $self->{main}->{resolver} );
+      1;
+    } or do {
+      $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
     };
 
-    unless ($@) {
+    if (!defined($eval_stat)) {
       dbg("spf: using Mail::SPF for SPF checks");
       $self->{has_mail_spf} = 1;
     } else {
       # strip the @INC paths... users are going to see it and think there's a problem even though
       # we're going to fall back to Mail::SPF::Query (which will display the same paths if it fails)
-      $@ =~ s#^Can't locate Mail/SPFd.pm in \@INC .*#Can't locate Mail/SPFd.pm#;
-      dbg("spf: cannot load Mail::SPF module or create Mail::SPF::Server object: $@");
+      $eval_stat =~ s#^Can't locate Mail/SPFd.pm in \@INC .*#Can't locate Mail/SPFd.pm#;
+      dbg("spf: cannot load Mail::SPF module or create Mail::SPF::Server object: $eval_stat");
       dbg("spf: attempting to use legacy Mail::SPF::Query module instead");
 
+      undef $eval_stat;
       eval {
 	die("Mail::SPF::Query disabled by admin setting\n") if $scanner->{conf}->{do_not_use_mail_spf_query};
 
@@ -416,13 +426,16 @@ sub _check_spf {
 	  die "Mail::SPF::Query 1.996 or later required, this is ".
 	    (defined $Mail::SPF::Query::VERSION ? $Mail::SPF::Query::VERSION : 'unknown')."\n";
 	}
+        1;
+      } or do {
+        $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
       };
 
-      unless ($@) {
+      if (!defined($eval_stat)) {
 	dbg("spf: using Mail::SPF::Query for SPF checks");
 	$self->{has_mail_spf} = 0;
       } else {
-	dbg("spf: cannot load Mail::SPF::Query module: $@");
+	dbg("spf: cannot load Mail::SPF::Query module: $eval_stat");
 	dbg("spf: one of Mail::SPF or Mail::SPF::Query is required for SPF checks, SPF checks disabled");
 	$self->{no_spf_module} = 1;
 	return;
@@ -456,7 +469,8 @@ sub _check_spf {
 
   my $lasthop = $self->_get_relay($scanner);
   if (!defined $lasthop) {
-    dbg("spf: no suitable relay for spf use found, skipping SPF". ($ishelo ? '-helo' : '') ." check");
+    dbg("spf: no suitable relay for spf use found, skipping SPF%s check",
+        $ishelo ? '-helo' : '');
     return;
   }
 
@@ -482,7 +496,8 @@ sub _check_spf {
       # we already dbg'd that we couldn't get an Envelope-From and can't do SPF
       return;
     }
-    dbg("spf: checking EnvelopeFrom (helo=".($helo ? $helo : '').", ip=$ip, envfrom=$scanner->{sender})");
+    dbg("spf: checking EnvelopeFrom (helo=%s, ip=%s, envfrom=%s)",
+        ($helo ? $helo : ''), $ip, $scanner->{sender});
   }
 
   # this test could probably stand to be more strict, but try to test
@@ -507,8 +522,8 @@ sub _check_spf {
     my $identity = $ishelo ? $helo : ($scanner->{sender}); # || $helo);
 
     unless ($identity) {
-      dbg("spf: cannot determine ".($ishelo ? 'helo' : 'mfrom').
-	  " identity, skipping ".($ishelo ? 'helo' : 'mfrom')." SPF check");
+      dbg("spf: cannot determine %s identity, skipping %s SPF check",
+          ($ishelo ? 'helo' : 'mfrom'),  ($ishelo ? 'helo' : 'mfrom') );
       return;
     }
     $helo ||= 'unknown';  # only used for macro expansion in the mfrom explanation
@@ -519,16 +534,17 @@ sub _check_spf {
 					  identity      => $identity,
 					  ip_address    => $ip,
 					  helo_identity => $helo );
-    };
-
-    if ($@) {
-      dbg("spf: cannot create Mail::SPF::Request object ($@)");
+      1;
+    } or do {
+      my $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
+      dbg("spf: cannot create Mail::SPF::Request object: $eval_stat");
       return;
-    }
+    };
 
     my $timeout = $scanner->{conf}->{spf_timeout};
 
-    my $timer = Mail::SpamAssassin::Timeout->new({ secs => $timeout });
+    my $timer = Mail::SpamAssassin::Timeout->new(
+                { secs => $timeout, deadline => $scanner->{master_deadline} });
     $err = $timer->run_and_catch(sub {
 
       my $query = $self->{spf_server}->process($request);
@@ -556,16 +572,17 @@ sub _check_spf {
 				    helo => $helo,
 				    debug => 0,
 				    trusted => 0);
-    };
-
-    if ($@) {
-      dbg("spf: cannot create Mail::SPF::Query object ($@)");
+      1;
+    } or do {
+      my $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
+      dbg("spf: cannot create Mail::SPF::Query object: $eval_stat");
       return;
-    }
+    };
 
     my $timeout = $scanner->{conf}->{spf_timeout};
 
-    my $timer = Mail::SpamAssassin::Timeout->new({ secs => $timeout });
+    my $timer = Mail::SpamAssassin::Timeout->new(
+                { secs => $timeout, deadline => $scanner->{master_deadline} });
     $err = $timer->run_and_catch(sub {
 
       ($result, $comment) = $query->result();
@@ -644,7 +661,7 @@ sub _get_sender {
     # from the Return-Path, X-Envelope-From, or whatever header.
     # it's better to get it from Received though, as that is updated
     # hop-by-hop.
-    $sender = $scanner->get ("EnvelopeFrom:addr");
+    $sender = $scanner->get("EnvelopeFrom:addr");
   }
 
   if (!$sender) {

@@ -21,34 +21,42 @@
 
 package Mail::SpamAssassin::Constants;
 
-use vars qw (
-	@BAYES_VARS @IP_VARS @SA_VARS
-);
+use strict;
+use warnings;
+use re 'taint';
 
-use base qw( Exporter );
+BEGIN {
+  use Exporter ();
+  use vars qw(@ISA);
+  @ISA = qw(Exporter);
 
-@IP_VARS = qw(
+  use vars qw (
+	@BAYES_VARS @IP_VARS @SA_VARS %EXPORT_TAGS @EXPORT_OK
+  );
+
+  @IP_VARS = qw(
 	IP_IN_RESERVED_RANGE IP_PRIVATE LOCALHOST IPV4_ADDRESS IP_ADDRESS
-);
-@BAYES_VARS = qw(
+  );
+  @BAYES_VARS = qw(
 	DUMP_MAGIC DUMP_TOKEN DUMP_BACKUP 
-);
-# These are generic constants that may be used across several modules
-@SA_VARS = qw(
+  );
+  # These are generic constants that may be used across several modules
+  @SA_VARS = qw(
 	HARVEST_DNSBL_PRIORITY MBX_SEPARATOR
 	MAX_BODY_LINE_LENGTH MAX_HEADER_KEY_LENGTH MAX_HEADER_VALUE_LENGTH
 	MAX_HEADER_LENGTH ARITH_EXPRESSION_LEXER AI_TIME_UNKNOWN
 	CHARSETS_LIKELY_TO_FP_AS_CAPS MAX_URI_LENGTH
-);
+  );
 
-%EXPORT_TAGS = (
+  %EXPORT_TAGS = (
 	bayes => [ @BAYES_VARS ],
         ip => [ @IP_VARS ],
         sa => [ @SA_VARS ],
         all => [ @BAYES_VARS, @IP_VARS, @SA_VARS ],
-);
+  );
 
-@EXPORT_OK = ( @BAYES_VARS, @IP_VARS, @SA_VARS );
+  @EXPORT_OK = ( @BAYES_VARS, @IP_VARS, @SA_VARS );
+}
 
 # BAYES_VARS
 use constant DUMP_MAGIC  => 1;
@@ -72,29 +80,102 @@ use constant DUMP_BACKUP => 8;
 #   3330  = <ftp://ftp.rfc-editor.org/in-notes/rfc3330.txt>
 #   CYMRU = <http://www.cymru.com/Documents/bogon-list.html>
 #
-# Last update
-#   2005-01-10 Daniel Quinlan - reduced to standard private IP addresses
+# This also includes IPv6 link-local space, fe80::/10, the IPv4
+# spaces mapped in IPv6, and the IPv6 host-local address, ::1.
 #
 use constant IP_PRIVATE => qr{^(?:
-  10|				   # 10/8:             Private Use (3330)
-  127|				   # 127/8:            Private Use (localhost)
-  169\.254|			   # 169.254/16:       Private Use (APIPA)
-  172\.(?:1[6-9]|2[0-9]|3[01])|	   # 172.16-172.31/16: Private Use (3330)
-  192\.168			   # 192.168/16:       Private Use (3330)
-)\.}ox;
+  (?:   # IPv4 addresses
+    10|				    # 10/8:             Private Use (3330)
+    127|                            # 127/8:            Private Use (localhost)
+    169\.254|			    # 169.254/16:       Private Use (APIPA)
+    172\.(?:1[6-9]|2[0-9]|3[01])|   # 172.16-172.31/16: Private Use (3330)
+    192\.168 			    # 192.168/16:       Private Use (3330)
+    )\..*
+|
+  (?:   # IPv6 addresses
+    # don't use \b here, it hits on :'s
+    (?:IPv6:    # with optional prefix
+      | (?<![a-f0-9:])
+    )
+    (?:
+      # IPv4 mapped in IPv6
+      # note the colon after the 12th byte in each here
+      (?:
+        # first 6 (12 bytes) non-zero
+        (?:0{1,4}:){5}		ffff:
+        |
+        # leading zeros omitted (note {0,5} not {1,5})
+        ::(?:0{1,4}:){0,4}		ffff:
+        |
+        # trailing zeros (in the first 6) omitted
+        (?:0{1,4}:){1,4}:		ffff:
+        |
+        # 0000 in second up to (including) fifth omitted
+        0{1,4}::(?:0{1,4}:){1,3}	ffff:
+        |
+        # 0000 in third up to (including) fifth omitted
+        (?:0{1,4}:){2}:0{1,2}:	ffff:
+        |
+        # 0000 in fourth up to (including) fifth omitted
+        (?:0{1,4}:){3}:0:		ffff:
+        |
+        # 0000 in fifth omitted
+        (?:0{1,4}:){4}:		ffff:
+      )
+      # and the IPv4 address appended to all of the 12 bytes above
+      (?:
+        10|
+        127|			    
+        169\.254|			    
+        172\.(?:1[6-9]|2[0-9]|3[01])|   
+        192\.168
+      )\..*
+
+    | # or IPv6 link-local address space, fe80::/10
+      fe[89ab][0-9a-f]:.*
+
+    | # or the host-local ::1 addr, as a pure IPv6 address
+
+      # all 8 (16 bytes) of them present
+      (?:0{1,4}:){7}			0{0,3}1
+      |
+      # leading zeros omitted
+      :(?::0{1,4}){0,6}:		0{0,3}1
+      |
+      # 0000 in second up to (including) seventh omitted
+      0{1,4}:(?::0{1,4}){0,5}:	0{0,3}1
+      |
+      # 0000 in third up to (including) seventh omitted
+      (?:0{1,4}:){2}(?::0{1,4}){0,4}:	0{0,3}1
+      |
+      # 0000 in fouth up to (including) seventh omitted
+      (?:0{1,4}:){3}(?::0{1,4}){0,3}:	0{0,3}1
+      |
+      # 0000 in fifth up to (including) seventh omitted
+      (?:0{1,4}:){4}(?::0{1,4}){0,2}:	0{0,3}1
+      |
+      # 0000 in sixth up to (including) seventh omitted
+      (?:0{1,4}:){5}(?::0{1,4}){0,1}:	0{0,3}1
+      |
+      # 0000 in seventh omitted
+      (?:0{1,4}:){6}:			0{0,3}1
+    )
+    (?![a-f0-9:])
+  )
+)}oxi;
 
 # backward compatibility
 use constant IP_IN_RESERVED_RANGE => IP_PRIVATE;
 
 # ---------------------------------------------------------------------------
 # match the various ways of saying "localhost".
-# 
+
 use constant LOCALHOST => qr/
 		    (?:
 		      # as a string
 		      localhost(?:\.localdomain)?
 		    |
-		      \b(?<!:)	# ensure no "::" IPv4 marker before this one
+		      \b(?<!:)	# ensure no "::" IPv6 marker before this one
 		      # plain IPv4
 		      127\.0\.0\.1 \b
 		    |
@@ -145,7 +226,7 @@ use constant LOCALHOST => qr/
 			# 0000 in third up to (including) seventh omitted
 			(?:0{1,4}:){2}(?::0{1,4}){0,4}:	0{0,3}1
 			|
-			# 0000 in fouth up to (including) seventh omiited
+			# 0000 in fouth up to (including) seventh omitted
 			(?:0{1,4}:){3}(?::0{1,4}){0,3}:	0{0,3}1
 			|
 			# 0000 in fifth up to (including) seventh omitted
@@ -237,7 +318,7 @@ use constant IP_ADDRESS => qr/
 			# 0000 in third up to (including) seventh omitted
 			(?:[a-f0-9]{1,4}:){2}(?::[a-f0-9]{1,4}){1,5}
 			|
-			# 0000 in fouth up to (including) seventh omiited
+			# 0000 in fouth up to (including) seventh omitted
 			(?:[a-f0-9]{1,4}:){3}(?::[a-f0-9]{1,4}){1,4}
 			|
 			# 0000 in fifth up to (including) seventh omitted
@@ -249,7 +330,7 @@ use constant IP_ADDRESS => qr/
 			# 0000 in seventh omitted
 			(?:[a-f0-9]{1,4}:){6}:[a-f0-9]{1,4}
 			|
-			# :: (the unspecified addreess 0:0:0:0:0:0:0:0)
+			# :: (the unspecified address 0:0:0:0:0:0:0:0)
 			# dos: I don't expect to see this address in a header, and
 			# it may cause non-address strings to match, but we'll
 			# include it for now since it is valid
@@ -265,7 +346,7 @@ use constant HARVEST_DNSBL_PRIORITY =>  500;
 
 # regular expression that matches message separators in The University of
 # Washington's MBX mailbox format
-use constant MBX_SEPARATOR => qr/^([\s|\d]\d-[a-zA-Z]{3}-\d{4}\s\d{2}:\d{2}:\d{2}.*),(\d+);([\da-f]{12})-(\w{8})\r?$/;
+use constant MBX_SEPARATOR => qr/^([\s\d]\d-[a-zA-Z]{3}-\d{4}\s\d{2}:\d{2}:\d{2}.*),(\d+);([\da-f]{12})-(\w{8})\r?$/;
 # $1 = datestamp (str)
 # $2 = size of message in bytes (int)
 # $3 = message status - binary (hex)

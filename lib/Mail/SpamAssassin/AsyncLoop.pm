@@ -36,18 +36,19 @@ package Mail::SpamAssassin::AsyncLoop;
 use strict;
 use warnings;
 use bytes;
+use re 'taint';
+
+use Time::HiRes qw(time);
 
 use Mail::SpamAssassin;
 use Mail::SpamAssassin::Logger;
 
 our @ISA = qw();
 
-# Load Time::HiRes if it's available
+# obtain timer resolution if possible
 BEGIN {
   use vars qw($timer_resolution);
   eval {
-    require Time::HiRes or die "Error loading Time::HiRes: $@, $!";
-    Time::HiRes->import( qw(time) );
     $timer_resolution = Time::HiRes->can('clock_getres')
       ? Time::HiRes::clock_getres(Time::HiRes::CLOCK_REALTIME())
       : 0.001;  # wild guess, assume resolution is better than 1s
@@ -135,7 +136,7 @@ The code reference will be called with one argument, the C<$ent> object.
 
 A zone specification (typically a DNS zone name - e.g. host, domain, or RBL)
 which may be used as a key to look up per-zone settings. No semantics on this
-parameter is imposed by this module.
+parameter is imposed by this module. Currently used to fetch by-zone timeouts.
 
 =item timeout_initial (optional)
 
@@ -167,11 +168,11 @@ C<$obj> is returned by this method.
 =cut
 
 sub start_lookup {
-  my ($self, $ent) = @_;
+  my ($self, $ent, $master_deadline) = @_;
 
-  die "oops, no id"  unless $ent->{id};
-  die "oops, no key" unless $ent->{key};
-  die "oops, no type" unless $ent->{type};
+  die "oops, no id"   unless $ent->{id}   ne '';
+  die "oops, no key"  unless $ent->{key}  ne '';
+  die "oops, no type" unless $ent->{type} ne '';
 
   my $now = time;
   my $key = $ent->{key};
@@ -209,8 +210,17 @@ sub start_lookup {
   $t_end = $settings->{rbl_timeout_min}  if $settings && !defined $t_end;
   $t_end = 0.2 * $t_init  if !defined $t_end;
   $t_end = 0  if $t_end < 0;  # just in case
-
   $t_init = $t_end  if $t_init < $t_end;
+
+  my $clipped_by_master_deadline = 0;
+  if (defined $master_deadline) {
+    my $time_avail = $master_deadline - time;
+    $time_avail = 0.5  if $time_avail < 0.5;  # give some slack
+    if ($t_init > $time_avail) {
+      $t_init = $time_avail; $clipped_by_master_deadline = 1;
+      $t_end  = $time_avail  if $t_end > $time_avail;
+    }
+  }
   $ent->{timeout_initial} = $t_init;
   $ent->{timeout_min} = $t_end;
 
@@ -223,8 +233,9 @@ sub start_lookup {
   $self->{total_queries_started}++;
   $self->{pending_lookups}->{$key} = $ent;
 
-  dbg("async: starting: %s (timeout %.1fs, min %.1fs)",
-      $ent->{display_id}, $ent->{timeout_initial}, $ent->{timeout_min});
+  dbg("async: starting: %s (timeout %.1fs, min %.1fs)%s",
+      $ent->{display_id}, $ent->{timeout_initial}, $ent->{timeout_min},
+      !$clipped_by_master_deadline ? '' : ', capped by time limit');
   $ent;
 }
 
@@ -297,7 +308,6 @@ sub complete_lookups {
   my ($self, $timeout, $allow_aborting_of_expired) = @_;
   my $alldone = 0;
   my $anydone = 0;
-  my $waiting_time = 0;
   my $allexpired = 1;
   my %typecount;
 
@@ -417,11 +427,11 @@ sub complete_lookups {
 
   } or do {
     my $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
-    dbg("async: caught complete_lookups death, aborting: $eval_stat");
+    dbg("async: caught complete_lookups death, aborting: %s", $eval_stat);
     $alldone = 1;      # abort remaining
   };
 
-  return wantarray ? ($alldone,$anydone,$waiting_time) : $alldone;
+  return wantarray ? ($alldone,$anydone) : $alldone;
 }
 
 # ---------------------------------------------------------------------------
@@ -452,12 +462,8 @@ sub abort_remaining_lookups {
       $ent->{finish_time} = $now  if !defined $ent->{finish_time};
       $ent->{response_packet} = undef;
       $ent->{status} = 'ABORTING';
-    # to avoid breaking third-party plugins which may not test for undefined
-    # 'response_packet', avoid the callback on aborts for now (3.2.4);
-    # the following call will be enabled for 3.3.0 :
-    # $ent->{completed_callback}->($ent);
+      $ent->{completed_callback}->($ent);
     }
-
     delete $pending->{$key};
   }
   dbg("async: aborted %d remaining lookups", $foundcnt)  if $foundcnt > 0;

@@ -17,12 +17,12 @@
 
 =head1 NAME
 
-Mail::SpamAssassin::BayesStore - Bayesian Storage Module
+Mail::SpamAssassin::BayesStore - Storage Module for default Bayes classifier
 
 =head1 DESCRIPTION
 
 This is the public API for the Bayesian store methods.  Any implementation of
-the storage module must implement these methods.
+the storage module for the default Bayes classifier must implement these methods.
 
 =cut
 
@@ -31,6 +31,7 @@ package Mail::SpamAssassin::BayesStore;
 use strict;
 use warnings;
 use bytes;
+use re 'taint';
 use Mail::SpamAssassin::Logger;
 
 # TODO: if we ever get tuits, it'd be good to make these POD
@@ -42,12 +43,12 @@ use Mail::SpamAssassin::Logger;
 
 =item new
 
-public class (Mail::SpamAssassin::BayesStore) new (Mail::SpamAssassin::Bayes $bayes)
+public class (Mail::SpamAssassin::BayesStore) new (Mail::SpamAssassin::Plugin::Bayes $bayes)
 
 Description:
 This method creates a new instance of the Mail::SpamAssassin::BayesStore
-object.  You must pass in an instance of the Mail::SpamAssassin:Bayes object,
-which is stashed for use throughout the module.
+object.  You must pass in an instance of the Mail::SpamAssassin::Plugin::Bayes
+object, which is stashed for use throughout the module.
 
 =cut
 
@@ -88,7 +89,7 @@ public instance () read_db_configs ()
 
 Description:
 This method reads any needed config variables from the configuration
-object and then calls the Mail::SpamAssassin::Bayes read_db_configs method.
+object and then calls the Mail::SpamAssassin::Plugin::Plugin::Bayes read_db_configs method.
 
 =cut
 
@@ -209,20 +210,23 @@ sub expire_old_tokens {
   my ($self, $opts) = @_;
   my $ret;
 
+  my $eval_stat;
   eval {
     local $SIG{'__DIE__'};	# do not run user die() traps in here
     if ($self->tie_db_writable()) {
       $ret = $self->expire_old_tokens_trapped ($opts);
     }
+    1;
+  } or do {
+    $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
   };
-  my $err = $@;
 
   if (!$self->{bayes}->{main}->{learn_caller_will_untie}) {
     $self->untie_db();
   }
 
-  if ($err) {		# if we died, untie the dbs.
-    warn "bayes: expire_old_tokens: $err\n";
+  if (defined $eval_stat) {	# if we died, untie the dbs.
+    warn "bayes: expire_old_tokens: $eval_stat\n";
     return 0;
   }
   $ret;
@@ -378,9 +382,11 @@ sub expire_old_tokens_trapped {
   if ($opts->{verbose}) {
     my $hapax_pc = ($num_hapaxes * 100) / $kept;
     my $lowfreq_pc = ($num_lowfreq * 100) / $kept;
-    print "$msg\n$msg2\n";
-    printf "token frequency: 1-occurrence tokens: %3.2f%%\n", $hapax_pc;
-    printf "token frequency: less than 8 occurrences: %3.2f%%\n", $lowfreq_pc;
+    print "$msg\n$msg2\n"  or die "Error writing: $!";
+    printf "token frequency: 1-occurrence tokens: %3.2f%%\n", $hapax_pc
+      or die "Error writing: $!";
+    printf "token frequency: less than 8 occurrences: %3.2f%%\n", $lowfreq_pc
+      or die "Error writing: $!";
   }
   else {
     dbg("bayes: $msg: $msg2");
@@ -630,8 +636,8 @@ sub tok_get {
 public instance (\@) tok_get_all (@ @tokens)
 
 Description:
-This method retrieves the specified tokens (C<@tokens>) from storage and returns
-an array ref of arrays spam count, ham acount and last access time.
+This method retrieves the specified tokens (C<@tokens>) from storage and
+returns an array ref of arrays spam count, ham count and last access time.
 
 =cut
 
@@ -682,7 +688,7 @@ sub multi_tok_count_change {
 public instance (Integer, Integer) nspam_nham_get ()
 
 Description:
-This method retrieves the total number of spam and the total number of spam
+This method retrieves the total number of spam and the total number of ham
 currently under storage.
 
 =cut
@@ -821,7 +827,7 @@ sub clear_database {
 public instance (Boolean) backup_database ()
 
 Description:
-This method will dump the users database in a marchine readable format.
+This method will dump the users database in a machine readable format.
 
 =cut
 

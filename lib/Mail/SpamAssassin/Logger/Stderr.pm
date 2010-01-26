@@ -32,6 +32,10 @@ package Mail::SpamAssassin::Logger::Stderr;
 use strict;
 use warnings;
 use bytes;
+use re 'taint';
+
+use POSIX ();
+use Time::HiRes ();
 
 use vars qw(@ISA);
 @ISA = ();
@@ -49,7 +53,14 @@ sub new {
 sub log_message {
   my ($self, $level, $msg) = @_;
 
-  print STDERR "[$$] $level: $msg\n";
+  my $now = Time::HiRes::time;
+  printf STDERR ("%s:%06.3f [%d] %s: %s\n",
+    POSIX::strftime("%b %e %H:%M",localtime($now)), $now-int($now/60)*60,
+    $$, $level, $msg)  or warn "Error writing to log file: $!";
+
+# print STDERR "[$$] $level: $msg\n"
+#   or warn "Error writing to log file: $!";
+
 }
 
 sub close_log {

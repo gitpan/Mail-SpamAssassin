@@ -37,6 +37,7 @@ use Mail::SpamAssassin::Plugin;
 use strict;
 use warnings;
 use bytes;
+use re 'taint';
 
 use vars qw(@ISA);
 @ISA = qw(Mail::SpamAssassin::Plugin);
@@ -54,14 +55,16 @@ sub new {
   # the important bit!
   $self->register_eval_rule ("check_test_plugin");
 
-  print "registered Mail::SpamAssassin::Plugin::Test: $self\n";
+  print "registered Mail::SpamAssassin::Plugin::Test: $self\n"
+    or die "Error writing: $!";
   return $self;
 }
 
 # and the eval rule itself
 sub check_test_plugin {
   my ($self, $permsgstatus) = @_;
-  print "Mail::SpamAssassin::Plugin::Test eval test called: $self\n";
+  print "Mail::SpamAssassin::Plugin::Test eval test called: $self\n"
+    or die "Error writing: $!";
   # ... hard work goes here...
   return 1;
 }

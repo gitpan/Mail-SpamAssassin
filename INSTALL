@@ -2,7 +2,8 @@ Upgrading SpamAssassin?
 -----------------------
 
 Please be sure to read the UPGRADE file for important changes that
-have been made since previous versions.
+have been made since previous versions.  In particular, 3.3.0 no
+longer includes a default ruleset.
 
 
 Installing or Upgrading SpamAssassin
@@ -31,6 +32,10 @@ usually as simple as:
 	[option: add -DSPAMC_SSL to $CFLAGS to build an SSL-enabled spamc]
 	make
 	make install                            [as root]
+
+After installing SpamAssassin, you need to download and install the
+SpamAssassin ruleset using "sa-update".  See the "Installing Rules"
+section below.
 
 Please make sure to read this whole document before installing, especially
 the prerequisite information further down.
@@ -77,15 +82,22 @@ http://wiki.apache.org/spamassassin/SingleUserUnixInstall
    and "Setting further options on the command line" for more informations
    on available command line variables.
 
-4. If you already use procmail, skip to step 6.  If not, ensure procmail
+4. Install the SpamAssassin ruleset using "sa-update":
+
+        $HOME/bin/sa-update
+
+   See the "Installing Rules" section below if you do not wish to download
+   the rules directly from the internet.
+
+5. If you already use procmail, skip to step 7.  If not, ensure procmail
    is installed using "which procmail" or install it from www.procmail.org.
 
-5. Create a .forward file in your home directory containing the below
+6. Create a .forward file in your home directory containing the below
    lines:
 
 "|IFS=' ' && exec /usr/bin/procmail -f- || exit 75 #user"
 
-6. Edit or create a .procmailrc file in your home directory containing the
+7. Edit or create a .procmailrc file in your home directory containing the
    below lines.  If you already have a .procmailrc file, add the lines to
    the top of your .procmailrc file:
 
@@ -105,7 +117,7 @@ caughtspam
 Also, see the file procmailrc.example and
 http://wiki.apache.org/spamassassin/UsedViaProcmail
 
-7. Now, you should be ready to send some test emails and ensure everything
+8. Now, you should be ready to send some test emails and ensure everything
    works as expected.  First, send yourself a test email that doesn't
    contain anything suspicious.  You should receive it normally, but there
    will be a header containing "X-Spam-Status: No".  If you are only
@@ -122,7 +134,59 @@ http://wiki.apache.org/spamassassin/UsedViaProcmail
    Note: one possible cause for this is the use of smrsh on the MTA system;
    see http://wiki.spamassassin.org/w/ProcmailVsSmrsh for details.
 
-8. You can now customize SpamAssassin.  See README for more information.
+9. You can now customize SpamAssassin.  See README for more information.
+
+
+Installing Rules
+----------------
+
+Rules are normally installed by running a sa-update command.
+The version of sa-update program should match the version of SpamAssassin
+modules, so invoking sa-update should be performed only after installing
+or upgrading SpamAssassin code, not before.
+
+Installing rules from network is done with a single command:
+
+        sa-update
+
+This is normally run as root.
+
+If you wish to install rules from downloaded files, rather than "live" from
+the latest online ruleset, here is how to do it.
+
+Obtain all the following files:
+
+    Mail-SpamAssassin-rules-xxx.tgz
+    Mail-SpamAssassin-rules-xxx.tgz.asc
+    Mail-SpamAssassin-rules-xxx.tgz.md5
+    Mail-SpamAssassin-rules-xxx.tgz.sha1
+      (where xxx may look something like '3.3.0-rc1.r893295')
+
+Save them all to the current directory.
+Obtain a rules-signing public key:
+
+    curl -O http://spamassassin.apache.org/updates/GPG.KEY
+
+Import the signing key to the SpamAssassin gpg keyring, so that the rules
+files can be verified safely:
+
+    sa-update --import GPG.KEY
+
+Install rules from a compressed tar archive:
+
+    sa-update --install Mail-SpamAssassin-rules-xxx.tgz
+
+Note that the ".tgz.asc", ".tgz.md5" and ".tgz.sha1" files all need to
+be in the same directory, otherwise sa-update will fail.
+
+
+If the intended rules destination directory differs from a default location
+as assumed by sa-update and SpamAssassin, such as when running a content
+filter within a Unix jail or on an unusual installation, please supply the
+rules destination directory to sa-update through its option --updatedir,
+such as:
+
+    sa-update --updatedir /var/jail/var/db/spamassassin/3.003000
 
 
 CPAN
@@ -154,7 +218,11 @@ through those mechanisms, too, if you prefer.
 Required Perl Interpreter
 -------------------------
 
-Perl 5.6.1 or a later version is required.
+Perl 5.8.1 or a later version is required.
+Preferred versions are 5.8.8, or 5.10.1 or later.
+
+Most of the functions might still work with Perl 5.6.1 or 5.6.2,
+but 5.6.* is no longer a supported version.
 
 
 Required Perl Modules
@@ -171,13 +239,20 @@ SpamAssassin build directory.
 The list of required modules that do not ship with Perl and must be
 installed:
 
-  - Digest::SHA1 (from CPAN)
+  - Digest::SHA1 (from CPAN),
+    or the newer Digest::SHA which is a perl base module since Perl 5.10.0
 
     The Digest::SHA1 module is used as a cryptographic hash for some
-    tests and the Bayes subsystem.
+    tests and the Bayes subsystem if Digest::SHA module is not available.
+
+    An external perl module razor-agents-2.84 as used by a Razor2 plugin
+    seems to be the only remaining component depending on Digest::SHA1
+    (note that a packager may ship a patched version of razor-agents which
+    can use Digest::SHA instead)
 
     Debian: apt-get install libdigest-sha1-perl
     Gentoo: emerge dev-perl/Digest-SHA1
+    Fedora: yum install perl-Digest-SHA1
 
   - HTML::Parser >= 3.43 (from CPAN)
 
@@ -186,6 +261,7 @@ installed:
 
     Debian: apt-get install libhtml-parser-perl
     Gentoo: emerge dev-perl/HTML-Parser
+    Fedora: yum install perl-HTML-Parser
 
   - Net::DNS (from CPAN)
 
@@ -198,10 +274,28 @@ installed:
       - version 0.34 or higher on Unix systems
       - version 0.46 or higher on Windows systems
 
+    Debian/Ubuntu: apt-get install libnet-dns-perl
+    Fedora: yum install perl-Net-DNS
+
+  - NetAddr::IP (from CPAN)
+
+    Used to parse IP addresses and IP address ranges for
+    "trusted_networks".
+
+    Debian/Ubuntu: apt-get install libnetaddr-ip-perl
+    Fedora: yum install perl-NetAddr-IP
+
+  - Time::HiRes (from CPAN)
+
+    Used by asynchronous DNS lookups to operate timeouts with subsecond
+    precision and to report processing times accurately.
+
   - LWP (aka libwww-perl) (from CPAN)
 
     This set of modules will include both the LWP::UserAgent and
     HTTP::Date modules, used by sa-update to retrieve update archives.
+
+    Fedora: yum install perl-libwww-perl
 
   - HTTP::Date (from CPAN)
 
@@ -212,10 +306,14 @@ installed:
     Used by sa-update to uncompress update archives.
     Version 1.04 or later is required.
 
+    Fedora: yum install perl-IO-Zlib
+
   - Archive::Tar (from CPAN)
 
     Used by sa-update to expand update archives.
     Version 1.23 or later is required.
+
+    Fedora: yum install perl-Archive-Tar
 
 
 Optional Modules
@@ -252,21 +350,17 @@ version is too low for them to be used.
     Used when manually reporting spam to SpamCop.
 
 
-  - Mail::SPF (from CPAN) or Mail::SPF::Query (from CPAN)
+  - Mail::SPF (from CPAN)
 
     Used to check DNS Sender Policy Framework (SPF) records to fight email
-    address forgery and make it easier to identify spams.
+    address forgery and make it easier to identify spams.  This module
+    makes Mail::SPF::Query obsolete.
 
-    Either of Mail::SPF or Mail::SPF::Query can be used but Mail::SPF is
-    preferred as it is the current reference implementation for RFC 4408.
+    Net::DNS version 0.58 or higher is required.
 
-    Net::DNS version 0.58 or higher is required to use Mail::SPF.
-    Net::DNS version 0.34 or higher is required to use Mail::SPF::Query.
-
-    If using Mail::SPF note that NetAddr::IP (required by Mail::SPF)
-    versions up to and including version 4.006 include a bug that will
-    slow down the entire perl interpreter.  NetAddr::IP version 4.007 or
-    later fixes this.
+    Note that NetAddr::IP (required by Mail::SPF) versions up to and
+    including version 4.006 include a bug that will slow down the entire
+    perl interpreter.  NetAddr::IP version 4.007 or later fixes this.
 
 
   - IP::Country::Fast (from CPAN)
@@ -287,6 +381,8 @@ version is too low for them to be used.
     configuration or /etc/resolv.conf file is available only via an IPv6
     address.
 
+    Fedora: yum install perl-IO-Socket-INET6
+
 
   - IO::Socket::SSL (from CPAN)
 
@@ -296,6 +392,8 @@ version is too low for them to be used.
     ENABLE_SSL="yes" argument to Makefile.PL to build and run an SSL
     compatibile spamc.)
 
+    Fedora: yum install perl-IO-Socket-SSL
+
 
   - Compress::Zlib (from CPAN)
 
@@ -304,36 +402,20 @@ version is too low for them to be used.
     long-distance use of spamc over the internet, you need to install
     this module.
 
-
-  - Time::HiRes (from CPAN)
-
-    If this module is installed, the processing times are logged/reported
-    more precisely.
+    Fedora: yum install perl-Compress-Zlib
 
 
   - Mail::DKIM (from CPAN)
 
     If this module is installed, and you enable the DKIM plugin,
     SpamAssassin will perform DKIM lookups when a DKIM-Signature header is
-    present in the message headers.  If Mail::DKIM version 0.20 or later
-    is installed, this will also perform Domain Key lookups on
-    DomainKey-Signature headers, without requiring the Mail::DomainKeys
-    module.
+    present in the message headers.  Current versions of Mail::DKIM (0.20
+    or later) also perform Domain Key lookups on DomainKey-Signature headers,
+    without requiring the Mail::DomainKeys module, which is now obsolete.
+    Version 0.37 or later is preferred, the absolute minimal version is 0.31.
     
-    Note that the Mail::DKIM module in turn requres the OpenSSL libraries.
-
-
-  - Mail::DomainKeys (from CPAN)
-
-    If this module is installed, and you enable the DomainKeys plugin,
-    SpamAssassin will perform Domain Key lookups when Domain Key
-    information is present in the message headers.
-
-    Note that Mail::DKIM version 0.20 or later will perform Domain Key
-    lookups, so this may be redundant.
-    
-    Note that the Mail::DomainKeys module in turn requres the OpenSSL
-    libraries and the CPAN module Crypt::OpenSSL::Bignum.
+    Note that the Mail::DKIM module in turn requires the Digest::SHA module
+    and OpenSSL libraries.
 
 
   - DBI *and* DBD driver/modules for your database (from CPAN)

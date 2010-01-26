@@ -36,6 +36,7 @@ package Mail::SpamAssassin::Message::Node;
 
 use strict;
 use warnings;
+use re 'taint';
 
 use Mail::SpamAssassin;
 use Mail::SpamAssassin::Constants qw(:sa);
@@ -97,7 +98,7 @@ sub find_parts {
   my ($self, $re, $onlyleaves, $recursive) = @_;
 
   # Didn't pass an RE?  Just abort.
-  return () unless $re;
+  return () unless defined $re && $re ne '';
 
   $onlyleaves = 0 unless defined $onlyleaves;
 
@@ -106,7 +107,7 @@ sub find_parts {
     $depth = 1;
   }
   
-  my @ret = ();
+  my @ret;
   my @search = ( $self );
 
   while (my $part = shift @search) {
@@ -151,7 +152,7 @@ sub header {
   my $self   = shift;
   my $rawkey = shift;
 
-  return unless ( defined $rawkey );
+  return unless defined $rawkey;
 
   # we're going to do things case insensitively
   my $key    = lc($rawkey);
@@ -172,8 +173,8 @@ sub header {
 
     my $dec_value = $raw_value;
     $dec_value =~ s/\n[ \t]+/ /gs;
-    $dec_value =~ s/\s*$//s;
-    $dec_value =~ s/^\s*//s;
+    $dec_value =~ s/\s+$//s;
+    $dec_value =~ s/^\s+//s;
     push @{ $self->{'headers'}->{$key} },     $self->_decode_header($dec_value);
 
     push @{ $self->{'raw_headers'}->{$key} }, $raw_value;
@@ -268,10 +269,15 @@ sub raw {
   # NOTE: that "ref undef" works, so don't bother checking for a defined var
   # first.
   if (ref $self->{'raw'} eq 'GLOB') {
-    my @array;
     my $fd = $self->{'raw'};
-    seek $fd, 0, 0;
-    @array = <$fd>;
+    seek($fd, 0, 0)  or die "message: cannot rewind file: $!";
+
+    my($inbuf,$nread,$raw_str); $raw_str = '';
+    while ( $nread=sysread($fd,$inbuf,16384) ) { $raw_str .= $inbuf }
+    defined $nread  or die "error reading: $!";
+    my @array = split(/^/m, $raw_str, -1);
+
+    dbg("message: empty message read")  if $raw_str eq '';
     return \@array;
   }
 
@@ -302,9 +308,13 @@ sub decode {
     # if the part is held in a temp file, read it into the scalar
     if (ref $self->{'raw'} eq 'GLOB') {
       my $fd = $self->{'raw'};
-      seek $fd, 0, 0;
-      local $/ = undef;
-      $raw = <$fd>;
+      seek($fd, 0, 0)  or die "message: cannot rewind file: $!";
+
+      my($inbuf,$nread,$raw_str); $raw = '';
+      while ( $nread=sysread($fd,$inbuf,16384) ) { $raw .= $inbuf }
+      defined $nread  or die "error reading: $!";
+
+      dbg("message: empty message read from a temp file")  if $raw eq '';
     }
     else {
       # create a new scalar from the raw array in memory
@@ -385,7 +395,7 @@ sub _normalize {
 
   if ($charset && $charset !~ /^us-ascii$/i &&
       ($detected || 'none') !~ /^(?:UTF|EUC|ISO-2022|Shift_JIS|Big5|GB)/i) {
-      dbg("Using labeled charset $charset");
+      dbg("message: Using labeled charset $charset");
       $converter = Encode::find_encoding($charset);
   }
 
@@ -393,7 +403,7 @@ sub _normalize {
 
   return $data unless $converter;
 
-  dbg("Converting...");
+  dbg("message: Converting...");
 
   my $rv = $converter->decode($data, 0);
   utf8::downgrade($rv, 1);
@@ -513,7 +523,7 @@ sub content_summary {
   my($self) = @_;
 
   my @ret = ( [ $self->{'type'} ] );
-  my @search = ( );
+  my @search;
 
   if (exists $self->{'body_parts'}) {
     my $count = @{$self->{'body_parts'}};
@@ -579,7 +589,7 @@ sub __decode_header {
 sub _decode_header {
   my($self, $header) = @_;
 
-  return '' unless $header;
+  return '' unless defined $header && $header ne '';
 
   # deal with folding and cream the newlines and such
   $header =~ s/\n[ \t]+/\n /g;
@@ -613,6 +623,10 @@ ie: If 'Subject' is specified as the header, and there are 2 Subject
 headers in a message, the last/bottom one in the message is returned in
 scalar context or both are returned in array context.
 
+Btw, returning the last header field (not the first) happens to be consistent
+with DKIM signatures, which search for and cover multiple header fields
+bottom-up according to the 'h' tag. Let's keep it this way.
+
 =cut
 
 sub get_header {
@@ -627,12 +641,12 @@ sub get_header {
   my @hdrs;
   if ( $raw ) {
     if (@hdrs = $self->raw_header($hdr)) {
-      @hdrs = map { s/\015?\012\s+/ /gs; $_; } @hdrs;
+      s/\015?\012\s+/ /gs  for @hdrs;
     }
   }
   else {
     if (@hdrs = $self->header($hdr)) {
-      @hdrs = map { "$_\n" } @hdrs;
+      $_ .= "\n"  for @hdrs;
     }
   }
 
@@ -640,7 +654,7 @@ sub get_header {
     return @hdrs;
   }
   else {
-     return @hdrs ? $hdrs[-1] : undef;
+    return @hdrs ? $hdrs[-1] : undef;
   }
 }
 
@@ -663,7 +677,7 @@ sub get_all_headers {
   $raw ||= 0;
   $include_mbox ||= 0;
 
-  my @lines = ();
+  my @lines;
 
   # precalculate destination positions based on order of appearance
   my $i = 0;

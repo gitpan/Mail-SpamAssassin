@@ -86,8 +86,7 @@ C<parse_config()> method:
 
 =head1 METHODS
 
-The following methods can be overridden by subclasses to handle events
-that SpamAssassin will call back to:
+The following methods can be overridden by subclasses to handle events.
 
 =over 4
 
@@ -101,6 +100,7 @@ use Mail::SpamAssassin::Logger;
 use strict;
 use warnings;
 use bytes;
+use re 'taint';
 
 use vars qw{
   @ISA $VERSION
@@ -123,9 +123,9 @@ superclass constructor, like so:
   my $self = $class->SUPER::new($mailsaobject);
 
 Lifecycle note: plugins that will need to store per-scan state should not store
-that on the Plugin object; see C<check_start()> below.  It is also likewise
-recommended that configuration settings be stored on the Conf object; see
-C<parse_config()>.
+that on the Plugin object; instead this should be stored on the PerMsgStatus
+object, see C<check_start()> below.  It is also likewise recommended that
+configuration settings be stored on the Conf object; see C<parse_config()>.
 
 =cut
 
@@ -194,9 +194,33 @@ message to the user if no plugin understands it.
 
 Lifecycle note: it is suggested that configuration be stored on the
 C<Mail::SpamAssassin::Conf> object in use, instead of the plugin object itself.
-That can be found as C<$plugin-E<gt>{main}-E<gt>{conf}>.   This allows per-user and
-system-wide configuration to be dealt with correctly, with per-user overriding
-system-wide.
+That can be found as C<$plugin-E<gt>{main}-E<gt>{conf}>, or as "conf" in the
+C<$options> hash reference above.   By storing it on C<conf>, this allows
+per-user and system-wide configuration precedence to be dealt with correctly.
+
+=item $plugin->finish_parsing_start ( { options ... } )
+
+Signals that the system-wide configuration has been completely read,
+but internal data structures are not yet created. It is possible to
+use this hook to dynamically change the configuration already read in
+or add new config options.
+
+C<options> is a reference to a hash containing these options:
+
+=over 4
+
+=item conf
+
+The C<Mail::SpamAssassin::Conf> object on which the configuration
+data should be stored.
+
+=back
+
+Note: there are no guarantees that the internal data structures of
+SpamAssassin will not change from release to release.  In particular to
+this plugin hook, if you modify the rules data structures in a
+third-party plugin, all bets are off until such time that an API is
+present for modifying that configuration data.
 
 =item $plugin->finish_parsing_end ( { options ... } )
 
@@ -220,13 +244,38 @@ this plugin hook, if you modify the rules data structures in a
 third-party plugin, all bets are off until such time that an API is
 present for modifying that configuration data.
 
+=item $plugin->user_conf_parsing_start ( { options ... } )
+
+Signals that the per-user configuration has been completely read, but
+not converted to internal data structures. It is possible to use this
+hook to dynamically change the configuration already read in or add
+new config options.
+
+If C<allow_user_rules> is enabled in the configuration, it is possible
+that additional rules have been added since the C<finish_parsing_start>
+plugin hook invocation was called.
+
+=over 4
+
+=item conf
+
+The C<Mail::SpamAssassin::Conf> object on which the configuration
+data should be stored.
+
+=back
+
+Note: there are no guarantees that the internal data structures of
+SpamAssassin will not change from release to release.  In particular to
+this plugin hook, if you modify the rules data structures in a
+third-party plugin, all bets are off until such time that an API is
+present for modifying that configuration data.
+
 =item $plugin->user_conf_parsing_end ( { options ... } )
 
 Signals that the per-user configuration parsing has just finished, and
-SpamAssassin is nearly ready to check messages.   If C<allow_user_rules>
-is enabled in the configuration, it is possible that additional rules
-have been added in the user configuration file, since the
-C<finish_parsing_end> plugin hook invocation was called.
+SpamAssassin is nearly ready to check messages.   If C<allow_user_rules> is
+enabled in the configuration, it is possible that additional rules have been
+added since the C<finish_parsing_end> plugin hook invocation was called.
 
 C<options> is a reference to a hash containing these options:
 
@@ -238,6 +287,12 @@ The C<Mail::SpamAssassin::Conf> object on which the configuration
 data should be stored.
 
 =back
+
+Note: there are no guarantees that the internal data structures of
+SpamAssassin will not change from release to release.  In particular to
+this plugin hook, if you modify the rules data structures in a
+third-party plugin, all bets are off until such time that an API is
+present for modifying that configuration data.
 
 =item $plugin->signal_user_changed ( { options ... } )
 
@@ -419,8 +474,8 @@ using the public APIs on this object.
 
 =item $plugin->finish_tests ( { options ... } )
 
-Called via SpamAssassin::finish and should clear up any tests that a plugin
-has added to the namespace.
+Called via C<Mail::SpamAssassin::finish>.  This should clear up any tests that
+a plugin has added to the namespace.
 
 In certain circumstances, plugins may find it useful to compile
 perl functions from the ruleset, on the fly.  It is important to
@@ -435,6 +490,10 @@ Each plugin is responsible for its own generated perl functions.
 
 The C<Mail::SpamAssassin::Conf> object on which the configuration
 data should be stored.
+
+=back
+
+See also the C<register_generated_rule_method> helper API, below.
 
 =item $plugin->extract_metadata ( { options ... } )
 
@@ -609,11 +668,10 @@ to the SHA1 hashed value.
 Reference to hash returned by call to tokenize.  The hash takes the
 format of:
 
-{
-
-  'SHA1 Hash Value' => 'raw (original) value'
-
-}
+  {
+    'SHA1 Hash Value' => 'raw (original) value',
+    ...
+  }
 
 NOTE: This data structure has changed since it was originally introduced
 in version 3.0.0.  The values are no longer perl anonymous hashes, they
@@ -684,21 +742,14 @@ documentation for additional information on the format.
 Reference to hash of calculated probabilities for tokens found in
 the database.
 
-{
-
-  'SHA1 Hash Value' => {
-
-                         'prob' => 'calculated probability',
-
-                         'spam_count' => 'Total number of spam msgs w/ token',
-
-                         'ham_count' => 'Total number of ham msgs w/ token',
-
-                         'atime' => 'Atime value for token in database'
-
-                       }
-
-}
+  {
+    'SHA1 Hash Value' => {
+            'prob' => 'calculated probability',
+            'spam_count' => 'Total number of spam msgs w/ token',
+            'ham_count' => 'Total number of ham msgs w/ token',
+            'atime' => 'Atime value for token in database'
+          }
+  }
 
 =item score
 
@@ -719,15 +770,15 @@ this message.
 =item $plugin->plugin_report ( { options ... } )
 
 Called if the message is to be reported as spam.  If the reporting system is
-available, the variable C<$options-<gt>{report}-><gt>report_available}> should
+available, the variable C<$options-E<gt>{report}-E<gt>report_available}> should
 be set to C<1>; if the reporting system successfully reported the message, the
-variable C<$options-<gt>{report}-><gt>report_return}> should be set to C<1>.
+variable C<$options-E<gt>{report}-E<gt>report_return}> should be set to C<1>.
 
 =over 4
 
 =item report
 
-Reference to the Reporter object (C<$options-<gt>{report}> in the
+Reference to the Reporter object (C<$options-E<gt>{report}> in the
 paragraph above.)
 
 =item text
@@ -744,15 +795,15 @@ Reference to the original message object.
 
 Called if the message is to be reported as ham (revokes a spam report). If the
 reporting system is available, the variable
-C<$options-<gt>{revoke}-><gt>revoke_available}> should be set to C<1>; if the
+C<$options-E<gt>{revoke}-E<gt>revoke_available}> should be set to C<1>; if the
 reporting system successfully revoked the message, the variable
-C<$options-<gt>{revoke}-><gt>revoke_return}> should be set to C<1>.
+C<$options-E<gt>{revoke}-E<gt>revoke_return}> should be set to C<1>.
 
 =over 4
 
 =item revoke
 
-Reference to the Reporter object (C<$options-<gt>{revoke}> in the
+Reference to the Reporter object (C<$options-E<gt>{revoke}> in the
 paragraph above.)
 
 =item text
@@ -776,6 +827,10 @@ persistent address list.
 
 Address you wish to add.
 
+=item cli_p
+
+Indicate if the call is being made from a command line interface.
+
 =back
 
 =item $plugin->blacklist_address( { options ... } )
@@ -789,6 +844,10 @@ persistent address list.
 
 Address you wish to add.
 
+=item cli_p
+
+Indicate if the call is being made from a command line interface.
+
 =back
 
 =item $plugin->remove_address( { options ... } )
@@ -801,6 +860,10 @@ persistent address list.
 =item address
 
 Address you wish to remove.
+
+=item cli_p
+
+Indicate if the call is being made from a command line interface.
 
 =back
 
@@ -841,6 +904,106 @@ sub finish {
   my ($self) = @_;
   %{$self} = ();
 }
+
+=item $plugin->learner_new ()
+
+Used to support human-trained probabilistic classifiers like the BAYES_* ruleset.
+Called when a new C<Mail::SpamAssassin::Bayes> object has been created; typically
+when a new user's scan is about to start.
+
+=item $plugin->learn_message ()
+
+Train the classifier with a training message.
+
+=over 4
+
+=item isspam
+
+1 if the message is spam, 0 if it's non-spam.
+
+=item msg
+
+The message's C<Mail::SpamAssassin::Message> object.
+
+=item id
+
+An optional message-identification string, used internally to tag the message.
+If it is C<undef>, one will be generated.  It should be unique to that message.
+
+=back
+
+=item $plugin->forget_message ()
+
+Tell the classifier to 'forget' its training about a specific message.
+
+=over 4
+
+=item msg
+
+The message's C<Mail::SpamAssassin::Message> object.
+
+=item id
+
+An optional message-identification string, used internally to tag the message.
+If it is C<undef>, one will be generated.  It should be unique to that message.
+
+=back
+
+=item $plugin->learner_sync ()
+
+Tell the classifier to 'sync' any pending changes against the current 
+user's training database.  This is called by C<sa-learn --sync>.
+
+If you do not need to implement these for your classifier, create an
+implementation that just contains C<return 1>.
+
+=item $plugin->learner_expire_old_training ()
+
+Tell the classifier to perform infrequent, time-consuming cleanup of
+the current user's training database.  This is called by C<sa-learn
+--force-expire>.
+
+If you do not need to implement these for your classifier, create an
+implementation that just contains C<return 1>.
+
+=item $plugin->learner_is_scan_available ()
+
+Should return 1 if it is possible to use the current user's training data for
+a message-scan operation, or 0 otherwise.
+
+=item $plugin->learner_dump_database ()
+
+Dump information about the current user's training data to C<stdout>.
+This is called by C<sa-learn --dump>.
+
+=over 4
+
+=item magic
+
+Set to 1 if "magic" name-value metadata should be dumped.
+
+=item toks
+
+Set to 1 if the database of tokens should be dumped.
+
+=item regex
+
+Either C<undef> to dump all tokens, or a value which specifies a regular expression
+subset of the tokens to dump.
+
+=back
+
+=item $plugin->learner_close ()
+
+Close any open databases.
+
+=over 4
+
+=item quiet
+
+Set to 1 if warning messages should be suppressed.
+
+=back
 
 =head1 HELPER APIS
 
@@ -923,7 +1086,12 @@ sub inhibit_further_callbacks {
   $self->{_inhibit_further_callbacks} = 1;
 }
 
-=item dbg($message)
+1;
+__END__
+
+=head1 LOGGING
+
+=item Mail::SpamAssassin::Plugin::dbg($message)
 
 Output a debugging message C<$message>, if the SpamAssassin object is running
 with debugging turned on.
@@ -933,7 +1101,7 @@ of general plugins and can't be called via $self->dbg().  If a
 plugin wishes to output debug information, it should call
 C<Mail::SpamAssassin::Plugin::dbg($msg)>.
 
-=item info($message)
+=item Mail::SpamAssassin::Plugin::info($message)
 
 Output an informational message C<$message>, if the SpamAssassin object
 is running with informational messages turned on.
@@ -943,9 +1111,12 @@ of general plugins and can't be called via $self->info().  If a
 plugin wishes to output debug information, it should call
 C<Mail::SpamAssassin::Plugin::info($msg)>.
 
-=cut
+In general, it is better for plugins to use the C<Mail::SpamAssassin::Logger>
+module to import C<dbg> and C<info> directly, like so:
 
-1;
+  use Mail::SpamAssassin::Logger;
+  dbg("some message");
+  info("some other message");
 
 =back
 
@@ -993,7 +1164,7 @@ configuration may be accessed through C<$permsgstatus-E<gt>{main}-E<gt>{conf}>.
 The eval rule should return C<1> for a hit, or C<0> if the rule
 is not hit.
 
-State for a single message being scanned should be stored on the C<$checker>
+State for a single message being scanned should be stored on the C<$permsgstatus>
 object, not on the C<$self> object, since C<$self> persists between scan
 operations.  See the 'lifecycle note' on the C<check_start()> method above.
 

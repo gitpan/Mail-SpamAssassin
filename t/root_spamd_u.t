@@ -10,7 +10,7 @@ use constant TEST_ENABLED => conf_bool('run_root_tests');
 use constant IS_ROOT => eval { ($> == 0); };
 use constant RUN_TESTS => (TEST_ENABLED && IS_ROOT);
 
-BEGIN { plan tests => (RUN_TESTS ? 14 : 0) };
+BEGIN { plan tests => (RUN_TESTS ? 11 : 0) };
 exit unless RUN_TESTS;
 
 # ---------------------------------------------------------------------------
@@ -33,16 +33,10 @@ $spamc = "sudo -u nobody $spamc";
 
 ok(start_spamd("-L -u nobody"));
 
+$SIG{ALRM} = sub { die "timed out"; };
+alarm 10;
 ok(spamcrun("< data/spam/001", \&patterns_run_cb));
-ok_all_patterns();
-
-%patterns = (
-q{ X-Spam-Status: Yes, score=}, 'status',
-q{ X-Spam-Flag: YES}, 'flag',
-             );
-
-
-ok (spamcrun("< data/spam/018", \&patterns_run_cb));
+alarm 0;
 ok_all_patterns();
 
 ok(stop_spamd());

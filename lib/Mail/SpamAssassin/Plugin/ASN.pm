@@ -76,8 +76,6 @@ SpamAssassin Issue #4770 concerning this plugin
 
 =head1 STATUS
 
-Experimental - Dec. 18, 2006
-
 No in-depth analysis of the usefulness of bayes tokenization of ASN data has
 been performed.
 
@@ -86,6 +84,7 @@ been performed.
 package Mail::SpamAssassin::Plugin::ASN;
 
 use strict;
+use re 'taint';
 use Mail::SpamAssassin;
 use Mail::SpamAssassin::Plugin;
 use Mail::SpamAssassin::Logger;
@@ -108,7 +107,7 @@ sub new {
 
 sub set_config {
   my ($self, $conf) = @_;
-  my @cmds = ();
+  my @cmds;
 
 =head1 ADMINISTRATOR SETTINGS
 
@@ -116,9 +115,9 @@ sub set_config {
 
 =item asn_lookup asn-zone.example.com [ _ASNTAG_ _ASNCIDRTAG_ ]
 
-Use this to lookup the ASN info for first external IP address in the specified
-zone and add the AS number to the first specified tag and routing info to the
-second specified tag.
+Use this to lookup the ASN info in the specified zone for the first external
+IP address and add the AS number to the first specified tag and routing info
+to the second specified tag.
 
 If no tags are specified the AS number will be added to the _ASN_ tag and the
 routing info will be added to the _ASNCIDR_ tag.  You must specify either none
@@ -152,6 +151,7 @@ Examples:
       unless (defined $value && $value !~ /^$/) {
         return $Mail::SpamAssassin::Conf::MISSING_REQUIRED_VALUE;
       }
+      local($1,$2,$3);
       unless ($value =~ /^(\S+?)\.?(?:\s+_(\S+)_\s+_(\S+)_)?$/) {
         return $Mail::SpamAssassin::Conf::INVALID_VALUE;
       }
@@ -188,9 +188,10 @@ sub parsed_metadata {
   } elsif ($relay->{ip_private}) {
     dbg("asn: first external relay is a private IP, skipping ASN check");
   } else {
+    local($1,$2,$3,$4);
     if (defined $relay->{ip} && $relay->{ip} =~ /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/) {
       $reversed_ip_quad = "$4.$3.$2.$1";
-      dbg("asn: using first external relay IP for lookups: $relay->{ip}");
+      dbg("asn: using first external relay IP for lookups: %s", $relay->{ip});
     } else {
       dbg("asn: could not parse IP from first external relay, skipping ASN check");
     }
@@ -210,7 +211,8 @@ sub parsed_metadata {
     }
     next unless $reversed_ip_quad;
   
-    # do the DNS query, have the callback process the result rather than poll for them later
+    # do the DNS query, have the callback process the result
+    # rather than poll for them later
     my $zone_index = $index;
     my $zone = $reversed_ip_quad . '.' . $entry->{zone};
     my $key = "asnlookup-${zone_index}-$entry->{zone}";
@@ -223,8 +225,9 @@ sub parsed_metadata {
       key=>$key, id=>$id, type=>'TXT',
       zone => $zone,  # serves to fetch other per-zone settings
     };
-    $scanner->{async}->start_lookup($ent);
-    dbg("asn: launched DNS TXT query for $reversed_ip_quad.$entry->{zone} in background");
+    $scanner->{async}->start_lookup($ent, $scanner->{master_deadline});
+    dbg("asn: launched DNS TXT query for %s.%s in background",
+        $reversed_ip_quad, $entry->{zone});
 
     $index++;
   }
@@ -242,21 +245,23 @@ sub process_dns_result {
   my @answer = !defined $response ? () : $response->answer;
 
   foreach my $rr (@answer) {
-    dbg("asn: $zone: lookup result packet: '".$rr->string."'");
+    dbg("asn: %s: lookup result packet: '%s'", $zone, $rr->string);
     if ($rr->type eq 'TXT') {
       my @items = split(/ /, $rr->txtdata);
-      unless ($#items == 2) {
-        dbg("asn: TXT query response format unknown, ignoring zone: $zone response: '".$rr->txtdata."'");
+      unless (@items == 3) {
+        dbg("asn: TXT query response format unknown, ignoring zone: %s, ".
+            "response: '%s'", $zone, $rr->txtdata);
         next;
       }
-      unless ($scanner->{tag_data}->{$asn_tag} =~ /\bAS$items[0]\b/) {
+      unless ($scanner->{tag_data}->{$asn_tag} =~ /\b\QAS$items[0]\E\b/) {
         if ($scanner->{tag_data}->{$asn_tag}) {
           $scanner->{tag_data}->{$asn_tag} .= " AS$items[0]";
         } else {
           $scanner->{tag_data}->{$asn_tag} = "AS$items[0]";
         }
       }
-      unless ($scanner->{tag_data}->{$route_tag} =~ m{\b$items[1]/$items[2]\b}) {
+      unless ($scanner->{tag_data}->{$route_tag} =~
+              m{\b\Q$items[1]/$items[2]\E\b}) {
         if ($scanner->{tag_data}->{$route_tag}) {
           $scanner->{tag_data}->{$route_tag} .= " $items[1]/$items[2]";
         } else {

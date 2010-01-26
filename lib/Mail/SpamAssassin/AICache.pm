@@ -38,9 +38,12 @@ package Mail::SpamAssassin::AICache;
 use File::Spec;
 use File::Path;
 use File::Basename;
+use Mail::SpamAssassin::Logger;
 
 use strict;
 use warnings;
+use re 'taint';
+use Errno qw(EBADF);
 
 =item new()
 
@@ -69,7 +72,9 @@ sub new {
                 File::Spec->rel2abs($self->{path}),
                 '.spamassassin_cache');
 
-    $self->{cache_mtime} = (stat($self->{cache_file}))[9] || 0;
+    my @stat = stat($self->{cache_file});
+    @stat  or dbg("AIcache: no access to %s: %s", $self->{cache_file}, $!);
+    $self->{cache_mtime} = $stat[9] || 0;
   }
   else {
     my @split = File::Spec->splitpath($self->{path});
@@ -78,24 +83,37 @@ sub new {
                 File::Spec->rel2abs($split[1]),
                 join('_', '.spamassassin_cache', $self->{type}, $split[2]));
 
-    $self->{cache_mtime} = (stat($self->{cache_file}))[9] || 0;
+    my @stat = stat($self->{cache_file});
+    @stat  or dbg("AIcache: no access to %s: %s", $self->{cache_file}, $!);
+    $self->{cache_mtime} = $stat[9] || 0;
 
     # for mbox and mbx, verify whether mtime on cache file is >= mtime of
     # messages file.  if it is, use it, otherwise don't.
-    if ((stat($self->{path}))[9] > $self->{cache_mtime}) {
+    @stat = stat($self->{path});
+    @stat  or dbg("AIcache: no access to %s: %s", $self->{path}, $!);
+    if ($stat[9] > $self->{cache_mtime}) {
       $use_cache = 0;
     }
   }
   $self->{cache_file} = File::Spec->canonpath($self->{cache_file});
 
   # go ahead and read in the cache information
-  if ($use_cache && open(CACHE, $self->{cache_file})) {
-    while(defined($_=<CACHE>)) {
+  local *CACHE;
+  if (!$use_cache) {
+    # not in use
+  } elsif (!open(CACHE, $self->{cache_file})) {
+    dbg("AIcache: cannot open AI cache file (%s): %s", $self->{cache_file},$!);
+  } else {
+    for ($!=0; defined($_=<CACHE>); $!=0) {
       my($k,$v) = split(/\t/, $_);
       next unless (defined $k && defined $v);
       $self->{cache}->{$k} = $v;
     }
-    close(CACHE);
+    defined $_ || $!==0  or
+      $!==EBADF ? dbg("AIcache: error reading from AI cache file: $!")
+                : warn "error reading from AI cache file: $!";
+    close CACHE
+      or die "error closing AI cache file (".$self->{cache_file}."): $!";
   }
 
   bless($self,$class);
@@ -112,7 +130,10 @@ sub check {
 
   return $self->{cache} unless $name;
 
-  return if ($self->{type} eq 'dir' && (stat($name))[9] > $self->{cache_mtime});
+  # for dir collections: just use the info on a file, if an entry
+  # exists for that file.  it's very unlikely that a file will be
+  # changed to contain a different Date header, and it's slow to check.
+  # return if ($self->{type} eq 'dir' && (stat($name))[9] > $self->{cache_mtime});
 
   $name = $self->canon($name);
   return $self->{cache}->{$name};
@@ -134,25 +155,39 @@ sub update {
 sub finish {
   my ($self) = @_;
 
-  # Cache is dirty, so write out new file
-  if ($self->{dirty})
-  {
-    # create enclosing dir tree, if required
-    eval {
-      mkpath(dirname($self->{cache_file}));
-    };
-    if ($@) {
-      warn "Can't mkpath for AI cache file (".$self->{cache_file}."): $@ $!";
-    }
+  return undef unless $self->{dirty};
 
-    if (open(CACHE, ">" . $self->{cache_file})) {
-      while(my($k,$v) = each %{$self->{cache}}) {
-	print CACHE "$k\t$v\n";
-      }
-      close(CACHE);
+  # Cache is dirty, so write out new file
+
+  # create enclosing dir tree, if required
+  eval {
+    mkpath(dirname($self->{cache_file}));
+    1;
+  } or do {
+    my $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
+    warn "cannot mkpath for AI cache file ($self->{cache_file}): $eval_stat\n";
+  };
+
+  my $towrite = '';
+  while(my($k,$v) = each %{$self->{cache}}) {
+    $towrite .= "$k\t$v\n";
+  }
+
+  {
+    # ignore signals while we're writing this file
+    local $SIG{'INT'} = 'IGNORE';
+    local $SIG{'TERM'} = 'IGNORE';
+
+    if (!open(CACHE, ">".$self->{cache_file}))
+    {
+      warn "creating AI cache file failed (".$self->{cache_file}."): $!";
+      # TODO: should we delete it/clean it up?
     }
     else {
-      warn "Can't write AI cache file (".$self->{cache_file}."): $!";
+      print CACHE $towrite
+        or warn "error writing to AI cache file: $!";
+      close CACHE
+        or warn "error closing AI cache file (".$self->{cache_file}."): $!";
     }
   }
 

@@ -18,21 +18,18 @@
 # HTML decoding TODOs
 # - add URIs to list for faster URI testing
 
+package Mail::SpamAssassin::HTML;
+
 use strict;
 use warnings;
-
-package Mail::SpamAssassin::HTML;
+use re 'taint';
 
 use HTML::Parser 3.43 ();
 use Mail::SpamAssassin::Logger;
 use Mail::SpamAssassin::Constants qw(:sa);
+use Mail::SpamAssassin::Util qw(untaint_var);
 
-use vars qw($re_loose $re_strict $re_other @ISA @EXPORT @EXPORT_OK);
-
-require Exporter;
-@ISA = qw(HTML::Parser Exporter);
-@EXPORT = qw(get_results name_to_rgb);
-@EXPORT_OK = qw();
+our @ISA = qw(HTML::Parser);
 
 # elements defined by the HTML 4.01 and XHTML 1.0 DTDs (do not change them!)
 # does not include XML
@@ -60,7 +57,8 @@ my %elements_text_style = map {; $_ => 1 }
 
 # elements that insert whitespace
 my %elements_whitespace = map {; $_ => 1 }
-  qw( br div li th td dt dd p hr blockquote pre embed listing plaintext xmp ),
+  qw( br div li th td dt dd p hr blockquote pre embed listing plaintext xmp title 
+    h1 h2 h3 h4 h5 h6 ),
 ;
 
 # elements that push URIs
@@ -123,7 +121,7 @@ sub html_end {
 
   delete $self->{text_style};
 
-  my @uri = ();
+  my @uri;
 
   # add the canonified version of each uri to the detail list
   if (defined $self->{uri}) {
@@ -223,8 +221,7 @@ sub parse {
   $self->{closed_body} = 0;
   $self->{closed_extra} = 0;
   $self->{text} = [];		# rendered text
-
-  $self->{length} += $1 if (length($text) =~ m/^(\d+)$/);	# untaint
+  $self->{length} += untaint_var(length($text));
 
   # NOTE: We *only* need to fix the rendering when we verify that it
   # differs from what people see in their MUA.  Testing is best done with
@@ -302,10 +299,10 @@ sub html_whitespace {
   if ($tag eq "br" || $tag eq "div") {
     $self->display_text("\n", whitespace => 1);
   }
-  elsif ($tag =~ /^(?:li|t[hd]|d[td]|embed)$/) {
+  elsif ($tag =~ /^(?:li|t[hd]|d[td]|embed|h\d)$/) {
     $self->display_text(" ", whitespace => 1);
   }
-  elsif ($tag =~ /^(?:p|hr|blockquote|pre|listing|plaintext|xmp)$/) {
+  elsif ($tag =~ /^(?:p|hr|blockquote|pre|listing|plaintext|xmp|title)$/) {
     $self->display_text("\n\n", whitespace => 1);
   }
 }
@@ -672,17 +669,21 @@ sub display_text {
 
   if ($display{whitespace}) {
     # trim trailing whitespace from previous element if it was not whitespace
+    # and it was not invisible
     if (@{ $self->{text} } &&
 	(!defined $self->{text_whitespace} ||
-	 !vec($self->{text_whitespace}, $#{$self->{text}}, 1)))
+	 !vec($self->{text_whitespace}, $#{$self->{text}}, 1)) &&
+	(!defined $self->{text_invisible} ||
+	 !vec($self->{text_invisible}, $#{$self->{text}}, 1)))
     {
       $self->{text}->[-1] =~ s/ $//;
     }
   }
   else {
     $text =~ s/[ \t\n\r\f\x0b\xa0]+/ /g;
-    # trim leading whitespace if previous element was whitespace
-    if (@{ $self->{text} } &&
+    # trim leading whitespace if previous element was whitespace 
+    # and current element is not invisible
+    if (@{ $self->{text} } && !$display{invisible} &&
 	defined $self->{text_whitespace} &&
 	vec($self->{text_whitespace}, $#{$self->{text}}, 1))
     {
@@ -961,7 +962,7 @@ sub name_to_rgb {
   my $length = length($color) / 3;
   my @colors = ($color =~ /(.{$length})(.{$length})(.{$length})/);
   # truncate each color to a DWORD, take MSB, left pad nibbles
-  @colors = map { s/.*(.{8})$/$1/; s/(..).*/$1/; s/^(.)$/0$1/; $_; } @colors;
+  foreach (@colors) { s/.*(.{8})$/$1/; s/(..).*/$1/; s/^(.)$/0$1/ };
   # the color
   $color = join("", @colors);
   # replace non-hex characters with 0

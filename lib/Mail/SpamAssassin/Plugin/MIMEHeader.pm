@@ -57,12 +57,15 @@ including pristine whitespace, instead.
 
 package Mail::SpamAssassin::Plugin::MIMEHeader;
 
-use Mail::SpamAssassin::Plugin;
-use Mail::SpamAssassin::Conf;
-use Mail::SpamAssassin::Logger;
 use strict;
 use warnings;
 use bytes;
+use re 'taint';
+
+use Mail::SpamAssassin::Plugin;
+use Mail::SpamAssassin::Conf;
+use Mail::SpamAssassin::Logger;
+use Mail::SpamAssassin::Util qw(untaint_var);
 
 use vars qw(@ISA @TEMPORARY_METHODS);
 @ISA = qw(Mail::SpamAssassin::Plugin);
@@ -90,7 +93,7 @@ sub new {
 
 sub set_config {
   my($self, $conf) = @_;
-  my @cmds = ();
+  my @cmds;
 
   my $pluginobj = $self;        # allow use inside the closure below
 
@@ -99,11 +102,13 @@ sub set_config {
     is_priv => 1,
     code => sub {
       my ($self, $key, $value, $line) = @_;
+      local ($1,$2,$3,$4);
       if ($value !~ /^(\S+)\s+(\S+)\s*([\=\!]\~)\s*(.+)$/) {
         return $Mail::SpamAssassin::Conf::INVALID_VALUE;
       }
 
-      my $rulename = $1;
+      # provide stricter syntax for rule name!?
+      my $rulename = untaint_var($1);
       my $hdrname = $2;
       my $negated = ($3 eq '!~') ? 1 : 0;
       my $pattern = $4;
@@ -141,11 +146,13 @@ sub set_config {
         }
       ';
 
-      eval $evalcode;
-      if ($@) {
-        warn "mimeheader: plugin error: $@";
+      eval
+        $evalcode . '; 1'
+      or do {
+        my $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
+        warn "mimeheader: plugin error: $eval_stat\n";
         return $Mail::SpamAssassin::Conf::INVALID_VALUE;
-      }
+      };
 
       $pluginobj->register_eval_rule($evalfn);
 

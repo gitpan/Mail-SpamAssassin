@@ -20,6 +20,7 @@ package Mail::SpamAssassin::Locker::Flock;
 use strict;
 use warnings;
 use bytes;
+use re 'taint';
 
 use Mail::SpamAssassin;
 use Mail::SpamAssassin::Locker;
@@ -52,8 +53,9 @@ sub safe_lock {
   my @stat;
 
   $max_retries ||= 30;
-  $mode ||= 0600;
-  $mode = oct $mode;
+  $mode ||= "0700";
+  $mode = (oct $mode) & 0666;
+  dbg ("locker: mode is $mode");
 
   my $lock_file = "$path.mutex";
   my $umask = umask(~$mode);
@@ -72,6 +74,7 @@ sub safe_lock {
 
   # use a SIGALRM-based timer -- more efficient than second-by-second
   # sleeps
+  my $eval_stat;
   eval {
     local $SIG{ALRM} = sub { die "alarm\n" };
     dbg("locker: safe_lock: trying to get lock on $path with $max_retries timeout");
@@ -80,7 +83,9 @@ sub safe_lock {
     $oldalarm = alarm $max_retries;
 
     # HELLO!?! IO::File doesn't have a flock() method?!
-    if (flock ($fh, LOCK_EX)) {
+    if (!flock($fh, LOCK_EX)) {
+      warn "locker: safe_lock: cannot obtain a lock on log file: $!";
+    } else {
       alarm $oldalarm;
       $unalarmed = 1; # avoid calling alarm(0) twice
 
@@ -88,24 +93,26 @@ sub safe_lock {
       $is_locked = 1;
 
       # just to be nice: let people know when it was locked
-      $fh->print ("$$\n");
-      $fh->flush ();
+      $fh->print("$$\n")  or die "error writing to lock file: $!";
+      $fh->flush  or die "cannot flush lock file: $!";
 
       # keep the FD around - we need to keep the lockfile open or the lock
       # is unlocked!
       $self->{lock_fhs} ||= { };
       $self->{lock_fhs}->{$path} = $fh;
     }
+    1;
+  } or do {
+    $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
   };
 
-  my $err = $@;
-
   $unalarmed or alarm $oldalarm; # if we die'd above, need to reset here
-  if ($err) {
-    if ($err =~ /alarm/) {
+
+  if (defined $eval_stat) {
+    if ($eval_stat =~ /alarm/) {
       dbg("locker: safe_lock: timed out after $max_retries seconds");
     } else {
-      die "locker: safe_lock: $err";
+      die "locker: safe_lock: $eval_stat\n";
     }
   }
 
@@ -125,8 +132,8 @@ sub safe_unlock {
   my $fh = $self->{lock_fhs}->{$path};
   delete $self->{lock_fhs}->{$path};
 
-  flock ($fh, LOCK_UN);
-  $fh->close();
+  flock($fh, LOCK_UN)  or die "cannot unlock a log file: $!";
+  $fh->close  or die "error closing a lock file: $!";
 
   dbg("locker: safe_unlock: unlocked $path.mutex");
 
@@ -159,8 +166,8 @@ sub refresh_lock {
   }
 
   my $fh = $self->{lock_fhs}->{$path};
-  $fh->print ("$$\n");
-  $fh->flush ();
+  $fh->print("$$\n")  or die "error writing to lock file: $!";
+  $fh->flush  or die "cannot flush lock file: $!";
 
   dbg("locker: refresh_lock: refresh $path.mutex");
 }

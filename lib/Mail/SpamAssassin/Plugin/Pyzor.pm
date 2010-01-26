@@ -37,9 +37,12 @@ package Mail::SpamAssassin::Plugin::Pyzor;
 use Mail::SpamAssassin::Plugin;
 use Mail::SpamAssassin::Logger;
 use Mail::SpamAssassin::Timeout;
+use Mail::SpamAssassin::Util qw(untaint_var untaint_file_path
+                                proc_status_ok exit_status_str);
 use strict;
 use warnings;
 use bytes;
+use re 'taint';
 
 use vars qw(@ISA);
 @ISA = qw(Mail::SpamAssassin::Plugin);
@@ -71,7 +74,7 @@ sub new {
 
 sub set_config {
   my ($self, $conf) = @_;
-  my @cmds = ();
+  my @cmds;
 
 =head1 USER OPTIONS
 
@@ -153,6 +156,7 @@ characters in the range [0-9A-Za-z ,._/-] are allowed for security reasons.
     setting => 'pyzor_options',
     is_admin => 1,
     default => '',
+    type => $Mail::SpamAssassin::Conf::CONF_TYPE_STRING,
     code => sub {
       my ($self, $key, $value, $line) = @_;
       if ($value !~ m{^([0-9A-Za-z ,._/-]+)$}) {
@@ -175,12 +179,13 @@ you should use this, as the current PATH will have been cleared.
     setting => 'pyzor_path',
     is_admin => 1,
     default => undef,
+    type => $Mail::SpamAssassin::Conf::CONF_TYPE_STRING,
     code => sub {
       my ($self, $key, $value, $line) = @_;
       if (!defined $value || !length $value) {
 	return $Mail::SpamAssassin::Conf::MISSING_REQUIRED_VALUE;
       }
-      $value = Mail::SpamAssassin::Util::untaint_file_path($value);
+      $value = untaint_file_path($value);
       if (!-x $value) {
 	info("config: pyzor_path \"$value\" isn't an executable");
 	return $Mail::SpamAssassin::Conf::INVALID_VALUE;
@@ -236,6 +241,8 @@ sub check_pyzor {
   # initialize valid tags
   $permsgstatus->{tag_data}->{PYZOR} = "";
 
+  my $timer = $self->{main}->time_method("check_pyzor");
+
   $self->get_pyzor_interface();
   return 0 unless $self->{pyzor_available};
 
@@ -257,13 +264,13 @@ sub pyzor_lookup {
   my $tmpf = $permsgstatus->create_fulltext_tmpfile($fulltext);
 
   # note: not really tainted, this came from system configuration file
-  my $path = Mail::SpamAssassin::Util::untaint_file_path($self->{main}->{conf}->{pyzor_path});
-
-  my $opts = $self->{main}->{conf}->{pyzor_options} || '';
+  my $path = untaint_file_path($self->{main}->{conf}->{pyzor_path});
+  my $opts = untaint_var($self->{main}->{conf}->{pyzor_options}) || '';
 
   $permsgstatus->enter_helper_run_mode();
 
-  my $timer = Mail::SpamAssassin::Timeout->new({ secs => $timeout });
+  my $timer = Mail::SpamAssassin::Timeout->new(
+           { secs => $timeout, deadline => $permsgstatus->{master_deadline} });
   my $err = $timer->run_and_catch(sub {
 
     local $SIG{PIPE} = sub { die "__brokenpipe__ignore__\n" };
@@ -274,20 +281,30 @@ sub pyzor_lookup {
 	$tmpf, 1, $path, split(' ', $opts), "check");
     $pid or die "$!\n";
 
-    @response = <PYZOR>;
-    close PYZOR
-      or dbg(sprintf("pyzor: [%s] finished: %s exit=0x%04x",$pid,$!,$?));
+    # read+split avoids a Perl I/O bug (Bug 5985)
+    my($inbuf,$nread,$resp); $resp = '';
+    while ( $nread=read(PYZOR,$inbuf,8192) ) { $resp .= $inbuf }
+    defined $nread  or die "error reading from pipe: $!";
+    @response = split(/^/m, $resp, -1);  undef $resp;
+
+    my $errno = 0;  close PYZOR or $errno = $!;
+    if (proc_status_ok($?,$errno)) {
+      dbg("pyzor: [%s] finished successfully", $pid);
+    } elsif (proc_status_ok($?,$errno, 0,1)) {  # sometimes it exits with 1
+      dbg("pyzor: [%s] finished: %s", $pid, exit_status_str($?,$errno));
+    } else {
+      info("pyzor: [%s] error: %s", $pid, exit_status_str($?,$errno));
+    }
 
     if (!@response) {
       # this exact string is needed below
       die("no response\n");	# yes, this is possible
     }
-    map { chomp } @response;
+    chomp for @response;
     dbg("pyzor: got response: " . join("\\n", @response));
 
     if ($response[0] =~ /^Traceback/) {
-      # this exact string is needed below
-      die("internal error\n");
+      die("internal error, python traceback seen in response\n");
     }
 
   });
@@ -297,8 +314,9 @@ sub pyzor_lookup {
       if (kill('TERM',$pid)) { dbg("pyzor: killed stale helper [$pid]") }
       else { dbg("pyzor: killing helper application [$pid] failed: $!") }
     }
-    close PYZOR
-      or dbg(sprintf("pyzor: [%s] terminated: %s exit=0x%04x",$pid,$!,$?));
+    my $errno = 0;  close PYZOR or $errno = $!;
+    proc_status_ok($?,$errno)
+      or info("pyzor: [%s] error: %s", $pid, exit_status_str($?,$errno));
   }
   $permsgstatus->leave_helper_run_mode();
 
@@ -374,9 +392,9 @@ sub pyzor_report {
   my ($self, $options, $tmpf) = @_;
 
   # note: not really tainted, this came from system configuration file
-  my $path = Mail::SpamAssassin::Util::untaint_file_path($options->{report}->{conf}->{pyzor_path});
+  my $path = untaint_file_path($options->{report}->{conf}->{pyzor_path});
+  my $opts = untaint_var($options->{report}->{conf}->{pyzor_options}) || '';
 
-  my $opts = $options->{report}->{conf}->{pyzor_options} || '';
   my $timeout = $self->{main}->{conf}->{pyzor_timeout};
 
   $options->{report}->enter_helper_run_mode();
@@ -392,10 +410,23 @@ sub pyzor_report {
 	$tmpf, 1, $path, split(' ', $opts), "report");
     $pid or die "$!\n";
 
-    my @ignored = <PYZOR>;
-    $options->{report}->close_pipe_fh(\*PYZOR);
+    my($inbuf,$nread,$nread_all); $nread_all = 0;
+    # response is ignored, just check its existence
+    while ( $nread=read(PYZOR,$inbuf,8192) ) { $nread_all += $nread }
+    defined $nread  or die "error reading from pipe: $!";
 
-    waitpid ($pid, 0);
+    dbg("pyzor: empty response")  if $nread_all < 1;
+
+    my $errno = 0;  close PYZOR or $errno = $!;
+    # closing a pipe also waits for the process executing on the pipe to
+    # complete, no need to explicitly call waitpid
+    # my $child_stat = waitpid($pid,0) > 0 ? $? : undef;
+    if (proc_status_ok($?,$errno, 0)) {
+      dbg("pyzor: [%s] reporter finished successfully", $pid);
+    } else {
+      info("pyzor: [%s] reporter error: %s", $pid, exit_status_str($?,$errno));
+    }
+
   });
 
   $options->{report}->leave_helper_run_mode();

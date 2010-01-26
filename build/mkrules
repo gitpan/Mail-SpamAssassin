@@ -26,10 +26,14 @@ sub usage {
   die "build/mkrules [--src srcdir] [--exit_on_no_src] [--out outputdir]\n";
 }
 
-my $RULE_KEYWORDS_RE = qr{
+my $RULE_DEFINE_KEYWORDS_RE = qr{
         header|rawbody|body|full|uri
-        |meta|mimeheader|describe|tflags
-        |reuse|score|urirhssub|uridnsbl
+        |meta|mimeheader|urirhssub|uridnsbl
+    }x;
+
+my $RULE_KEYWORDS_RE = qr{
+        ${RULE_DEFINE_KEYWORDS_RE}|
+        describe|tflags|reuse|score
     }x;
 
 use strict;
@@ -112,6 +116,7 @@ my $newest_src_mtime = 0;
 my $newest_out_mtime = 0;
 
 my $default_file_header = join('', <DATA>);
+compile_utf8ify_function();
 
 foreach my $src (@opt_srcs) {
   if (!-d $src) {
@@ -270,7 +275,11 @@ sub src_wanted {
   return if (!-f $path);
   
   # limit what will be copied from sandboxes
-  return if ($path =~ /(?:sandbox|scores)/ && !/(?:\d.*\.cf|\.pm)$/i);
+  return if ($path =~ /\bsandbox\b/ && !/(?:\d.*\.cf|\.pm)$/i);
+
+  # don't use generated scores; they can be out of sync with what is currently
+  # in the sandboxes or the most current active.list file at any given time
+  return if ($path =~ /\bscores\b/);
 
   # a bit of sanity please - no svn metadata ;)
   return if ($path =~ /\.svn/);
@@ -403,9 +412,6 @@ sub rule_file_compile {
   while (<IN>) {
     my $orig = $_;
 
-    s/^#reuse/reuse/;   # TODO - dirty hack.  we need to fix this to just be
-    # a keyword which the engine ignores, this is absurd! 
-
     s/#.*$//g; s/^\s+//; s/\s+$//;
 
     # drop comments/blank lines from output
@@ -444,7 +450,6 @@ sub rule_file_compile {
       $rules->{$name}->{origname} = $origname;
       $rules->{$name}->{cond} ||= $current_conditional;
       $rules->{$name}->{text} .= $current_comments . $orig;
-      $rules->{$name}->{srcfile} = $f;
 
       # note if the conditional is a plugin reference, as we need to
       # ensure that "loadplugin" lines stay in the same place
@@ -455,11 +460,10 @@ sub rule_file_compile {
       # note if we found the rule defn or not.  if we did not,
       # that means the rule was a code-tied rule, which should always
       # have its descriptions/scores/etc. published in "active".
-      if ($type =~ /^
-          (?:header|rawbody|body|full|uri|meta|mimeheader)
-        $/x)
-      {
+      if ($type =~ /^${RULE_DEFINE_KEYWORDS_RE}$/x) {
         $rules->{$name}->{found_definition} = 1;
+        $rules->{$name}->{srcfile} = $f;
+        $rules->{$name}->{code} = $orig;
       }
       elsif ($type eq 'tflags') {
         # userconf rules are always published in "active"
@@ -666,9 +670,6 @@ sub read_output_file {
   while (<IN>) {
     my $orig = $_;
 
-    s/^#reuse/reuse/;   # TODO - dirty hack.  we need to fix this to just be
-    # a keyword which the engine ignores, this is absurd! 
-
     s/#.*$//g; s/^\s+//; s/\s+$//;
 
     # drop comments/blank lines from output
@@ -680,15 +681,27 @@ sub read_output_file {
       $lang = $1;
     }
 
-    # right now, we only read tflags from output files
-    if (/^tflags\s+(\S+)\s+(.*)$/) {
-      my $name = $1;
-      my $val = $2;
-      $val =~ s/\s+/ /gs;
-      if ($rules->{$name}->{tflags}) {
-        $rules->{$name}->{tflags} .= ' '.$val;
-      } else {
-        $rules->{$name}->{tflags} = $val;
+    if (/^(${RULE_KEYWORDS_RE})\s+(\S+)\s+(.*)$/) {
+      # rule definitions
+      my $type = $1;
+      my $name = $2;
+      my $val = $3;
+
+      # note: we only want to do this if --rulemetadata is in use!
+      if (!$rules->{$name}) { $rules->{$name} = rule_entry_create(); }
+
+      if ($type eq 'tflags') {
+        $val =~ s/\s+/ /gs;
+        if ($rules->{$name}->{tflags}) {
+          $rules->{$name}->{tflags} .= ' '.$val;
+        } else {
+          $rules->{$name}->{tflags} = $val;
+        }
+      }
+
+      if ($type =~ /^${RULE_DEFINE_KEYWORDS_RE}$/x) {
+        $rules->{$name}->{srcfile} = $file;
+        $rules->{$name}->{code} = $orig;
       }
     }
   }
@@ -878,13 +891,13 @@ sub compile_output_files {
 
   # output the known rules that are not meta subrules.
   foreach my $rule (@rulenames) {
-    next if ($rule =~ /^__/);
+    $rulemd .= get_rulemetadata_string($rule);      # all metadata strings
 
+    next if ($rule =~ /^__/);
     my $pubfile = $rules->{$rule}->{output_file};
     my $text    = $rules->{$rule}->{output_text};
     next unless defined ($text);
 
-    $rulemd .= get_rulemetadata_string($rule);
     $output_file_text->{$pubfile} .= "##{ $rule\n".
                             $text.
                             "##} ".$rule."\n\n";
@@ -896,7 +909,6 @@ sub compile_output_files {
     my $pubfile = $rules->{$rule}->{output_file};
     my $text    = $rules->{$rule}->{output_text};
     next unless defined ($text);
-    $rulemd .= get_rulemetadata_string($rule);
     $output_file_text->{$pubfile} .= $text;
   }
 
@@ -909,8 +921,22 @@ sub compile_output_files {
   if ($opt_rulemetadata) {
     open (RULEMD, ">".$opt_rulemetadata)
             or die "cannot write rulemd to $opt_rulemetadata";
-    print RULEMD "<rulemds>", $rulemd, "</rulemds>\n";
+    print RULEMD "<?xml version='1.0' encoding='UTF-8'?>\n",
+                    "<rulemds>", $rulemd, "</rulemds>\n";
     close RULEMD or die "cannot close rulemd to $opt_rulemetadata";
+  }
+}
+
+# conditionally build a method to UTF-8-encode a string.  this is only required
+# for the rulemetadata XML output, so don't make it mandatory!
+sub compile_utf8ify_function {
+  if (!eval '
+      sub utf8ify { use Encode; return Encode::encode("UTF-8", $_[0]); } 1;
+    ')
+  {
+    eval '
+      sub utf8ify { die "unimplemented -- Encode module required!" } 1;
+    '
   }
 }
 
@@ -921,23 +947,37 @@ sub get_rulemetadata_string {
 
   my $mod = 0;
   my $srcfile = '';
+  my $code = '';
+  my $name = $rule;
 
-  if ($rules->{$rule}->{found_definition}) {
-    $srcfile = $rules->{$rule}->{srcfile} || '';
+  # if we found a rule definition with a T_ prefix, use that data
+  if (!$rules->{$name}->{srcfile} && $rules->{"T_".$name}->{srcfile}) {
+    $name = "T_".$name;
+  }
+
+  if ($rules->{$name}->{srcfile}) {
+    $srcfile = $rules->{$name}->{srcfile};
     if ($srcfile) {
       my @s = stat $srcfile;
-      if (@s) {
-        $mod = $s[9];
-      }
+      if (@s) { $mod = $s[9]; }
     }
   }
 
-  my $tf = $rules->{$rule}->{tflags} || '';
+  if ($rules->{$name}->{code}) {
+    $code = $rules->{$name}->{code};
+    $code =~ s/\]\]>/\](defanged by mkrules)\]>/gs;     # ensure it's CDATA-safe
+    $code = utf8ify($code);
+  }
+
+  my $tf = $rules->{$name}->{tflags} || '';
 
   return "<rulemetadata>".
             "<name>$rule</name>".
             "<src>$srcfile</src>".
             "<srcmtime>$mod</srcmtime>".
+            # don't include <code> blocks; they bloat up the XML badly (to 800KB)
+            # and make it very slow to parse later
+            # "<code><![CDATA[$code]]></code>".
             "<tf>$tf</tf>".
           "</rulemetadata>\n";
 }

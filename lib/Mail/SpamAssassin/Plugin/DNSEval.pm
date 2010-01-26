@@ -24,6 +24,7 @@ use Mail::SpamAssassin::Constants qw(:ip);
 use strict;
 use warnings;
 use bytes;
+use re 'taint';
 
 use vars qw(@ISA);
 @ISA = qw(Mail::SpamAssassin::Plugin);
@@ -70,8 +71,8 @@ sub check_start {
 
 sub ip_list_uniq_and_strip_private {
   my ($self, @origips) = @_;
-  my @ips = ();
-  my %seen = ();
+  my @ips;
+  my %seen;
   my $IP_PRIVATE = IP_PRIVATE;
   foreach my $ip (@origips) {
     next unless $ip;
@@ -119,8 +120,8 @@ sub message_accreditor_tag {
     (my $tag = $1) =~ tr/A-Z/a-z/;
     $acctags{$tag} = -1;
   }
-  my $accreditor_field = $pms->get('Accreditor');
-  if (defined($accreditor_field)) {
+  my $accreditor_field = $pms->get('Accreditor',undef);
+  if (defined $accreditor_field) {
     my @accreditors = split(/,/, $accreditor_field);
     foreach my $accreditor (@accreditors) {
       my @terms = split(' ', $accreditor);
@@ -155,7 +156,7 @@ sub check_rbl_backend {
   my @fullips = map { $_->{ip} } @{$pms->{relays_untrusted}};
 
   # now, make a list of all the IPs in the external set, for use in
-  # notfirsthop testing.  this will often be more IPs than found
+  # notfirsthop testing.  This will often be more IPs than found
   # in @fullips.  It includes the IPs that are trusted, but
   # not in internal_networks.
   my @fullexternal = map {
@@ -167,10 +168,10 @@ sub check_rbl_backend {
   # X-Sender-Ip: could be worth using (very low occurance for me)
   # X-Sender: has a very low bang-for-buck for me
   my $IP_ADDRESS = IP_ADDRESS;
-  my @originating = ();
-  for my $header ('X-Yahoo-Post-IP', 'X-Originating-IP', 'X-Apparently-From', 'X-SenderIP') {
-    my $str = $pms->get($header);
-    next unless $str;
+  my @originating;
+  for my $header (@{$pms->{conf}->{originating_ip_headers}}) {
+    my $str = $pms->get($header,undef);
+    next unless defined $str && $str ne '';
     push (@originating, ($str =~ m/($IP_ADDRESS)/g));
   }
 
@@ -188,66 +189,81 @@ sub check_rbl_backend {
 
   my $trusted = $self->{main}->{conf}->{trusted_networks};
 
-  if (scalar @ips + scalar @originating > 0) {
-    # If name is foo-notfirsthop, check all addresses except for
-    # the originating one.  Suitable for use with dialup lists, like the PDL.
-    # note that if there's only 1 IP in the untrusted set, do NOT pop the
-    # list, since it'd remove that one, and a legit user is supposed to
-    # use their SMTP server (ie. have at least 1 more hop)!
-    # If name is foo-lastexternal, check only the Received header just before
-    # it enters our internal networks; we can trust it and it's the one that
-    # passed mail between networks
-    if ($set =~ /-(notfirsthop|lastexternal)$/)
-    {
-      # use the external IP set, instead of the trusted set; the user may have
-      # specified some third-party relays as trusted.  Also, don't use
-      # @originating; those headers are added by a phase of relaying through
-      # a server like Hotmail, which is not going to be in dialup lists anyway.
-      @ips = $self->ip_list_uniq_and_strip_private(@fullexternal);
-      if ($1 eq "lastexternal") {
-        @ips = (defined $ips[0]) ? ($ips[0]) : ();
-      } else {
+  # If name is foo-notfirsthop, check all addresses except for
+  # the originating one.  Suitable for use with dialup lists, like the PDL.
+  # note that if there's only 1 IP in the untrusted set, do NOT pop the
+  # list, since it'd remove that one, and a legit user is supposed to
+  # use their SMTP server (ie. have at least 1 more hop)!
+  # If name is foo-lastexternal, check only the Received header just before
+  # it enters our internal networks; we can trust it and it's the one that
+  # passed mail between networks
+  if ($set =~ /-(notfirsthop|lastexternal)$/)
+  {
+    # use the external IP set, instead of the trusted set; the user may have
+    # specified some third-party relays as trusted.  Also, don't use
+    # @originating; those headers are added by a phase of relaying through
+    # a server like Hotmail, which is not going to be in dialup lists anyway.
+    @ips = $self->ip_list_uniq_and_strip_private(@fullexternal);
+    if ($1 eq "lastexternal") {
+      @ips = (defined $ips[0]) ? ($ips[0]) : ();
+    } else {
 	pop @ips if (scalar @ips > 1);
-      }
-    }
-    # If name is foo-firsttrusted, check only the Received header just
-    # after it enters our trusted networks; that's the only one we can
-    # trust the IP address from (since our relay added that header).
-    # And if name is foo-untrusted, check any untrusted IP address.
-    elsif ($set =~ /-(first|un)trusted$/)
-    {
-      my @tips = ();
-      foreach my $ip (@originating) {
-        if ($ip && !$trusted->contains_ip($ip)) {
-          push(@tips, $ip);
-        }
-      }
-      @ips = $self->ip_list_uniq_and_strip_private (@ips, @tips);
-      if ($1 eq "first") {
-        @ips = (defined $ips[0]) ? ($ips[0]) : ();
-      } else {
-        shift @ips;
-      }
-    }
-    else
-    {
-      my @tips = ();
-      foreach my $ip (@originating) {
-        if ($ip && !$trusted->contains_ip($ip)) {
-          push(@tips, $ip);
-        }
-      }
-      # add originating IPs as untrusted IPs (if they are untrusted)
-      @ips = reverse $self->ip_list_uniq_and_strip_private (@ips, @tips);
-
-      # How many IPs max you check in the received lines
-      my $checklast=$self->{main}->{conf}->{num_check_received};
-
-      if (scalar @ips > $checklast) {
-	splice (@ips, $checklast);	# remove all others
-      }
     }
   }
+  # If name is foo-firsttrusted, check only the Received header just
+  # after it enters our trusted networks; that's the only one we can
+  # trust the IP address from (since our relay added that header).
+  # And if name is foo-untrusted, check any untrusted IP address.
+  elsif ($set =~ /-(first|un)trusted$/)
+  {
+    my @tips;
+    foreach my $ip (@originating) {
+      if ($ip && !$trusted->contains_ip($ip)) {
+        push(@tips, $ip);
+      }
+    }
+    @ips = $self->ip_list_uniq_and_strip_private (@ips, @tips);
+    if ($1 eq "first") {
+      @ips = (defined $ips[0]) ? ($ips[0]) : ();
+    } else {
+      shift @ips;
+    }
+  }
+  else
+  {
+    my @tips;
+    foreach my $ip (@originating) {
+      if ($ip && !$trusted->contains_ip($ip)) {
+        push(@tips, $ip);
+      }
+    }
+
+    # add originating IPs as untrusted IPs (if they are untrusted)
+    @ips = reverse $self->ip_list_uniq_and_strip_private (@ips, @tips);
+  }
+
+  # How many IPs max you check in the received lines
+  my $checklast=$self->{main}->{conf}->{num_check_received};
+
+  if (scalar @ips > $checklast) {
+    splice (@ips, $checklast);	# remove all others
+  }
+
+  my $tflags = $pms->{conf}->{tflags}->{$rule};
+
+  # Trusted relays should only be checked against nice rules (dnswls)
+  if (defined $tflags && $tflags !~ /\bnice\b/) {
+    foreach my $ip (@ips) {
+      last if !$trusted->contains_ip($ip);
+      shift @ips;  # remove trusted hosts from beginning
+    }
+  }
+
+  unless (scalar @ips > 0) {
+    dbg("dns: no untrusted IPs to check");
+    return 0;
+  }
+
   dbg("dns: only inspecting the following IPs: ".join(", ", @ips));
 
   eval {
@@ -298,7 +314,7 @@ sub check_rbl_from_host {
 # this only checks the address host name and not the domain name because
 # using the domain name had much worse results for dsn.rfc-ignorant.org
 sub check_rbl_envfrom {
-  _check_rbl_addresses(@_, $_[1]->get('EnvelopeFrom:addr'));
+  _check_rbl_addresses(@_, $_[1]->get('EnvelopeFrom:addr',undef));
 }
 
 sub _check_rbl_addresses {
@@ -309,7 +325,7 @@ sub _check_rbl_addresses {
 
   my %hosts;
   for my $address (@addresses) {
-    if ($address =~ m/\@(\S+\.\S+)/) {
+    if (defined $address && $address =~ m/ \@ ( [^\@\s]+ \. [^\@\s]+ )/x) {
       $hosts{lc($1)} = 1;
     }
   }
@@ -333,11 +349,11 @@ sub check_dns_sender {
   my ($self, $pms, $rule) = @_;
 
   my $host;
-  for my $from ($pms->get('EnvelopeFrom:addr')) {
+  for my $from ($pms->get('EnvelopeFrom:addr',undef)) {
     next unless defined $from;
 
     $from =~ tr/././s;		# bug 3366
-    if ($from =~ /\@(\S+\.\S+)/) {
+    if ($from =~ m/ \@ ( [^\@\s]+ \. [^\@\s]+ )/x ) {
       $host = lc($1);
       last;
     }

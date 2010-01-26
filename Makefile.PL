@@ -13,9 +13,10 @@ my $mm_version = $ExtUtils::MakeMaker::VERSION;
 # avoid stupid 'Argument "6.30_01" isn't numeric in numeric ge (>=)' warnings;
 # strip off the beta subversion noise that causes the trouble.
 $mm_version =~ s/_\S+$//;      # "6.30_01" => "6.30"
+$mm_version += 0;
 
-if ($mm_version+0 < 5.45) {
-  die "SpamAssassin Makefile.PL requires at least ExtUtils::MakeMaker v5.45";
+if ($mm_version < 6.17) {
+  die "SpamAssassin Makefile.PL requires at least ExtUtils::MakeMaker v6.17";
 }
 
 use constant RUNNING_ON_WINDOWS => ($^O =~ /^(mswin|dos|os2)/oi);
@@ -71,7 +72,6 @@ my @ATT_KEYS = (
   'VENDORLOCALSTATEDIR',
 
   'PERL_BIN',         # Sets the Perl interpreter used by the scripts.
-  'PERL_VERSION',     # Some parts in SpamAssassin were dependant on the version
   'PERL_WARN',        # Can be used to disable warnings in the scripts
   'PERL_TAINT',       # "   "  "    "  "    taint mode for the scripts (DON'T)
 
@@ -84,7 +84,6 @@ my @ATT_KEYS = (
 
 sub parse_arg {
   my($val, $name) = (@_);
-
   if ($val =~ /^($name)=["']?(.*?)["']?$/) {
     return $2;
   } else {
@@ -109,56 +108,21 @@ sub yesno {
 }
 
 
-
 my %opt = (
-  'build_spamc'        => undef,
+  'build_spamc'     => undef,
   'enable_ssl'      => undef,
   'contact_address' => undef,
   'destdir'         => undef,
 );
 ARGV: foreach (@ARGV) {
   foreach my $key (keys %opt) {
-    my $val;
-
-    $val = parse_arg($_, uc($key));
+    my $val = parse_arg($_, uc($key));
     if (defined $val) {
       $opt{$key} = $val;
       next ARGV;
     }
   }
 }
-
-
-# Gather some information about what EU::MM offers and/or needs
-my(
-  $mm_knows_destdir,
-  $mm_has_destdir,
-  $mm_has_good_destdir,
-  $mm_needs_destdir,
-);
-
-# MakeMaker prior to 6.11 doesn't support DESTDIR which is needed for
-# packaging with builddir!=destdir. See bug 2388.
-$mm_knows_destdir    = $ExtUtils::MakeMaker::Recognized_Att_Keys{DESTDIR};
-$mm_has_good_destdir = $mm_version >= 6.11;
-# Add DESTDIR hack only if it's requested (and necessary)
-$mm_needs_destdir    = $opt{'destdir'} && !$mm_has_good_destdir;
-$mm_has_destdir      = $mm_knows_destdir || $mm_needs_destdir;
-push(@ATT_KEYS, 'DESTDIR') if $mm_needs_destdir;
-
-# Now make EU::MM understand our extended vars
-foreach my $key (@ATT_KEYS) {
-  $ExtUtils::MakeMaker::Recognized_Att_Keys{$key} = 1;
-}
-
-
-# Gather the rules files in the range 00-69; we do this in perl because
-# it's more portable.  Also, plugin .pm files.
-my @datafiles = map { s,^rules/,,; $_ }
-                grep { -f $_ } (<rules/*.cf>, <rules/*.pm>);
-my $datafiles = join(' ', (grep 
-                { /^(?:(?:[0-6][0-9]|72)_\S+\.cf|\S+\.pm)/ } @datafiles),
-                qw(user_prefs.template languages sa-update-pubkey.txt));
 
 
 # See lib/ExtUtils/MakeMaker.pm for details of how to influence
@@ -174,7 +138,9 @@ my %makefile = (
       'spamassassin.raw' => 'spamassassin',
       'sa-learn.raw'     => 'sa-learn',
       'sa-update.raw'    => 'sa-update',
-      'sa-compile.raw'    => 'sa-compile',
+      'sa-compile.raw'   => 'sa-compile',
+      'sa-awl.raw'       => 'sa-awl',
+      'sa-check_spamd.raw' => 'sa-check_spamd',
       'spamc/spamc.c'    => 'spamc/spamc$(EXE_EXT)',
       'spamd/spamd.raw'  => 'spamd/spamd',
     },
@@ -204,7 +170,7 @@ my %makefile = (
 	-DLOCAL_STATE_DIR="$(I_LOCALSTATEDIR)"',
 
     'macro' => {
-        DATAFILES => $datafiles,
+        DATAFILES => 'user_prefs.template languages sa-update-pubkey.txt'
     },
 
     # be quite explicit about this; afaik CPAN.pm is sensible using this
@@ -215,8 +181,13 @@ my %makefile = (
         'File::Copy'    => 2.02,          # this version is shipped with 5.005_03, the oldest version known to work
         'Pod::Usage'    => 1.10,          # all versions prior to this do seem to be buggy
         'HTML::Parser'  => 3.43,          # the HTML code is based on this parser, older versions have utf-8 bugs
+        'Archive::Tar'  => 1.23,          # for sa-update
+        'IO::Zlib'      => 1.04,          # for sa-update
+        'Mail::DKIM'    => 0.31,
         'Net::DNS'      => (RUNNING_ON_WINDOWS ? 0.46 : 0.34), # bugs in older revs
+        'NetAddr::IP'   => 4.000,
         'Sys::Hostname' => 0,
+        'Time::HiRes'   => 0,
         'Time::Local'   => 0,
         'Errno'         => 0,
     },
@@ -266,18 +237,11 @@ my %makefile = (
     },
 
     'AUTHOR'   => 'The Apache SpamAssassin Project <dev at spamassassin.apache.org>',
-    'ABSTRACT' => 'SpamAssassin is an extensible email filter which is used to identify spam.',
+    'ABSTRACT' => 'SpamAssassin is an extensible email filter which is used to identify spam',
 
     # We have only this Makefile.PL and this option keeps MakeMaker from
     # asking all questions twice after a 'make dist*'.
     'NORECURS' => 1,
-
-    # bug 5074: perl 5.6.1 (with ExtUtils::MakeMaker 5.45) attempts to
-    # recurse anyway unless this is explicitly specified
-    'DIR' => [ ],
-
-    # Don't add META.yml to the MANIFEST for god's sake!
-    'NO_META' => 1,
 );
 
 # rules/72_active.cf is built from "rulesrc", but *must* exist before
@@ -286,56 +250,12 @@ my @FILES_THAT_MUST_EXIST = qw(
         rules/72_active.cf
     );
 
-# That META.yml stuff was introduced with Perl 6.06_03, see
-# <http://archive.develooper.com/makemaker@perl.org/msg00922.html>
-# <http://archive.develooper.com/makemaker@perl.org/msg00984.html>
-delete $makefile{'NO_META'} if $mm_version < 6.06_03;
-
 # make sure certain optional modules are up-to-date if they are installed
 # also see PREREQ_PM above
 my %CURRENT_PM = (
     'Net::DNS' => (RUNNING_ON_WINDOWS ? 0.46 : 0.34),
     'Razor2::Client::Agent' => 2.40,
 );
-
-if ($mm_needs_destdir) {
-  my $error = <<DESTDIR_HACK;
-
-    ***********************************************************************
-    ExtUtils::MakeMaker ${mm_version} doesn't include support for DESTDIR,
-    so if you want to be on the safe side, you might want to upgrade your
-    ExtUtils::MakeMaker to version 6.11 or later. It is available via CPAN.
-
-    You can use either the CPAN shell or go to
-      <http://search.cpan.org/search?module=ExtUtils::MakeMaker>
-    to get an up-to-date version.
-
-    This should only be necessary if you are creating binary packages.
-    ***********************************************************************
-
-DESTDIR_HACK
-  $error =~ s/^ {4}//gm;
-  warn $error;
-}
-elsif ($opt{'destdir'} and !$mm_has_good_destdir) {
-  my $error = <<DESTDIR_BUG;
-
-    ***********************************************************************
-    ExtUtils::MakeMaker ${mm_version} contains bugs that may cause problems
-    in the \"make\" process.  It is recommended that you upgrade
-    ExtUtils::MakeMaker to version 6.11 or later. It is available via CPAN.
-
-    You can use either the CPAN shell or go to
-      <http://search.cpan.org/search?module=ExtUtils::MakeMaker>
-    to get an up-to-date version.
-
-    This should only be necessary if you are creating binary packages.
-    ***********************************************************************
-
-DESTDIR_BUG
-  $error =~ s/^ {4}//gm;
-  warn $error;
-}
 
 
 # All the $(*MAN1*) stuff is empty/zero if Perl was Configured with -Dman1dir=none;
@@ -393,7 +313,9 @@ use lib 'lib';
 use Mail::SpamAssassin::Util::DependencyInfo;
 if (Mail::SpamAssassin::Util::DependencyInfo::long_diagnostics() != 0) {
   # missing required module?  die!
-  exit 1;
+  # bug 5908: http://cpantest.grango.org/wiki/CPANAuthorNotes says
+  # we should exit with a status of 0, but without creating Makefile
+  exit 0;
 }
 
 foreach my $file (@FILES_THAT_MUST_EXIST) {
@@ -403,22 +325,55 @@ foreach my $file (@FILES_THAT_MUST_EXIST) {
 
 #######################################################################
 
+# bug 6131
+($mm_version >= 6.46) and $makefile{META_MERGE} = {
+  license => 'apache',
+
+  resources => {
+    license     => 'http://www.apache.org/licenses/LICENSE-2.0.html',
+    homepage    => 'http://spamassassin.apache.com/',
+    bugtracker  => 'https://issues.apache.org/SpamAssassin/',
+    repository  => 'http://svn.apache.org/repos/asf/spamassassin/',
+    MailingList => 'http://wiki.apache.org/spamassassin/MailingLists',
+  },
+
+  recommends => {
+    'MIME::Base64' =>              0,
+    'DB_File' =>                   0,
+    'Net::SMTP' =>                 0,
+    'Mail::SPF' =>                 0,
+    'IP::Country::Fast' =>         0,
+    'Razor2::Client::Agent' =>     2.61,
+    'Net::Ident' =>                0,
+    'IO::Socket::INET6' =>         0,
+    'IO::Socket::SSL' =>           0,
+    'Compress::Zlib' =>            0,
+    'Mail::DKIM' =>                0.37,
+    'DBI' =>                       0,
+    'Getopt::Long' =>              2.32,
+    'LWP::UserAgent' =>            0,
+    'HTTP::Date' =>                0,
+    'Archive::Tar' =>              1.23,
+    'IO::Zlib' =>                  1.04,
+    'Encode::Detect' =>            0
+  }
+};
+
+#######################################################################
+
 # Now finish the meta hash and dump the Makefile
 $makefile{EXE_FILES} = [ values %{$makefile{EXE_FILES}} ];
 $makefile{AUTHOR} =~ s/(<.+) at (.+>)/$1\@$2/;
 WriteMakefile(%makefile);
-print "Makefile written by ExtUtils::MakeMaker ${mm_version}\n";
+print "Makefile written by ExtUtils::MakeMaker $mm_version\n";
 
 #######################################################################
 
 package MY;
 
-
 use vars qw(
   $MY_GLOBALS_ARE_SANE
-
   $RUNNING_ON_WINDOWS
-
   @REPOSITORIES
 
   $MACRO_RE
@@ -517,7 +472,7 @@ sub macro_ref {
 # If it is omitted, the value set in the current EU::MM instance is used.
 sub macro_def {
   my($name, $val) = (@_, undef);
-  my $MUST_NOT_HAPPEN = "THIS MUST NOT HAPPEN. PLEASE REPORT A BUG VIA <http://issues.apache.org/SpamAssassin/>";
+  my $MUST_NOT_HAPPEN = "THIS MUST NOT HAPPEN. PLEASE REPORT A BUG VIA <https://issues.apache.org/SpamAssassin/>";
   die $MUST_NOT_HAPPEN  unless defined $name;
   die $MUST_NOT_HAPPEN  unless defined $EQ;
   $val = $SELF->{$name} unless defined $val;
@@ -772,32 +727,6 @@ sub _set_macro_PERL_BIN {
   set_macro('PERL_BIN', macro_ref('FULLPERL'));
 }
 
-# This routine determines the value of the app given in PERL_BIN.
-#
-# There are no parameters.
-#
-# If PERL_VERSION wasn't set at the command line, it will try to call
-# the app given in PERL_BIN and ask it for its version. If that doesn't
-# work for some reason, it will use the version of the current Perl
-# interpreter.
-sub _set_macro_PERL_VERSION {
-
-  return if get_macro('PERL_VERSION');
-
-  my($perl, $ver);
-
-  #
-  $perl = get_expanded_macro('PERL_BIN');
-  if (-x $perl) {
-    $ver = qx{$perl -V:version};
-    $ver =~ s/^version='([0-9.]+).*$/$1/s;
-  }
-
-  $ver = $] unless $ver;
-
-  set_macro('PERL_VERSION', float_to_version($ver));
-}
-
 # This is a helper routine for PERL_WARN and PERL_TAINT.
 #
 # The first parameter must be either 'WARN' or 'TAINT'.
@@ -908,15 +837,6 @@ sub MY::install {
   foreach (@code) {
     # Add our install targets as a dependency to all top-level install targets
     s/^(install(?:_[a-z]+)?\s*::?\s*.*)$/$1 conf__install data__install/;
-
-    # Now do the DESTDIR hack, if necessary.
-    next if !$mm_needs_destdir;
-    # Write the correct path to perllocal.pod
-    next if /installed into/;
-
-    # Replace all other $(INSTALL*) vars (except $(INSTALLDIRS) of course)
-    # with their $(DESTINSTALL*) counterparts
-    s/\Q$(\E(INSTALL(?!DIRS)${MACRO_RE})\Q)\E/\$(DEST$1)/g;
   }
 
   clean_MY_globals($self);
@@ -958,28 +878,6 @@ sub MY::constants {
         }
       }
     }
-
-    if (line_has_macro_def($line, 'MM_VERSION')) {
-      # These macros are just for debugging purposes.
-      $line = join("\n", $line,
-         macro_def(MM_HAS_DESTDIR      => ::yesno($mm_has_destdir)),
-         macro_def(MM_HAS_GOOD_DESTDIR => ::yesno($mm_has_good_destdir)),
-         macro_def(MM_KNOWS_DESTDIR    => ::yesno($mm_knows_destdir)),
-         macro_def(MM_NEEDS_DESTDIR    => ::yesno($mm_needs_destdir)),
-       );
-    }
-
-    # Add DESTDIR support if necessary
-    if ($mm_needs_destdir) {
-      if (line_has_macro_def($line, 'INSTALLDIRS')) {
-        $line .= "\n" . macro_def('DESTDIR');
-      }
-      elsif (line_has_macro_def($line, qr/INSTALL${MACRO_RE}/)) {
-        my $macro = get_macro_name_from_line($line);
-        $line .= "\n" . macro_def('DEST' . $macro,
-                          macro_ref('DESTDIR') . macro_ref($macro));
-      }
-    }
   }
   push(@code, qq{});
 
@@ -1017,9 +915,7 @@ sub MY::constants {
         # The INSTALL* macros.
         push(@code, macro_def($macro));
         # The DESTINSTALL* macros.
-        push(@code, macro_def('DEST' . $macro,
-                      macro_ref('DESTDIR') . macro_ref($macro)))
-          if $mm_has_destdir;
+        push(@code, macro_def('DEST' . $macro, macro_ref('DESTDIR') . macro_ref($macro)));
       }
     }
   }
@@ -1027,14 +923,13 @@ sub MY::constants {
   # Set the PERL_* stuff
   {
     _set_macro_PERL_BIN;
-    _set_macro_PERL_VERSION;
     _set_macro_PERL_WARN;
     _set_macro_PERL_TAINT;
 
     # Add it to the Makefile.
     push(@code, qq{});
     push(@code, qq{# Some details about our Perl});
-    foreach my $m (qw(BIN VERSION WARN TAINT)) {
+    foreach my $m (qw(BIN WARN TAINT)) {
       push(@code, macro_def('PERL_' . $m));
     }
   }
@@ -1070,13 +965,8 @@ sub MY::constants {
       push(@code, macro_def('I_' . $macro . 'DIR',
                     macro_ref('INSTALL' . repository($repository, $macro eq 'SCRIPT') . $macro)));
 
-      if ($mm_has_destdir) {
-        push(@code, macro_def('B_' . $macro . 'DIR',
-                      macro_ref('DESTINSTALL' . repository($repository, $macro eq 'SCRIPT') . $macro)));
-      } else {
-        push(@code, macro_def('B_' . $macro . 'DIR',
-                      macro_ref('I_' . $macro . 'DIR')));
-      }
+      push(@code, macro_def('B_' . $macro . 'DIR',
+                    macro_ref('DESTINSTALL' . repository($repository, $macro eq 'SCRIPT') . $macro)));
     }
   }
 
@@ -1143,6 +1033,12 @@ sa-update: sa-update.raw build_rules
 sa-compile: sa-compile.raw
 	$(PREPROCESS) $(FIXBYTES) $(FIXVARS) $(FIXBANG) -m$(PERM_RWX) -isa-compile.raw -osa-compile
 
+sa-awl: sa-awl.raw
+	$(PREPROCESS) $(FIXBYTES) $(FIXVARS) $(FIXBANG) -m$(PERM_RWX) -isa-awl.raw -osa-awl
+
+sa-check_spamd: sa-check_spamd.raw
+	$(PREPROCESS) $(FIXBYTES) $(FIXVARS) $(FIXBANG) -m$(PERM_RWX) -isa-check_spamd.raw -osa-check_spamd
+
 spamd/spamd: spamd/spamd.raw
 	$(PREPROCESS) $(FIXBYTES) $(FIXVARS) $(FIXBANG) -m$(PERM_RWX) -i$? -o$@
 
@@ -1206,6 +1102,7 @@ conf__install:
 	$(PERL) -MFile::Copy -e "copy(q{rules/v310.pre}, q{$(B_CONFDIR)/v310.pre}) unless -f q{$(B_CONFDIR)/v310.pre}"
 	$(PERL) -MFile::Copy -e "copy(q{rules/v312.pre}, q{$(B_CONFDIR)/v312.pre}) unless -f q{$(B_CONFDIR)/v312.pre}"
 	$(PERL) -MFile::Copy -e "copy(q{rules/v320.pre}, q{$(B_CONFDIR)/v320.pre}) unless -f q{$(B_CONFDIR)/v320.pre}"
+	$(PERL) -MFile::Copy -e "copy(q{rules/v330.pre}, q{$(B_CONFDIR)/v330.pre}) unless -f q{$(B_CONFDIR)/v330.pre}"
 
 data__install:
 	-$(MKPATH) $(B_DATADIR)
@@ -1237,7 +1134,7 @@ manifest_skip:
 	mv MANIFEST.SKIP.tmp MANIFEST.SKIP
 
 sysreport:
-	$(NOECHO) $(PERL) tools/sysreport CC=$(CC) PERL=$(PERL) PERL_BIN=$(PERL_BIN) PERL_VERSION=$(PERL_VERSION)
+	$(NOECHO) $(PERL) tools/sysreport CC=$(CC) PERL=$(PERL) PERL_BIN=$(PERL_BIN)
 
   EOD
 

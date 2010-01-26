@@ -31,6 +31,7 @@ use Mail::SpamAssassin::Plugin;
 use Mail::SpamAssassin::Logger;
 use strict;
 use warnings;
+use re 'taint';
 
 our @ISA = qw(Mail::SpamAssassin::Plugin);
 
@@ -52,7 +53,7 @@ sub new {
 
 sub set_config {
   my($self, $conf) = @_;
-  my @cmds = ();
+  my @cmds;
 
 =head1 USER PREFERENCES
 
@@ -105,7 +106,7 @@ sub check_whitelist_bounce_relays {
 
   # check the plain-text body, first
   foreach my $line (@{$body}) {
-    next unless ($line =~ /Received: /);
+    next unless ($line =~ /^[> ]*Received:/i);
     while ($line =~ / (\S+\.\S+) /g) {
       return 1 if $self->_relay_is_in_whitelist_bounce_relays($pms, $1);
     }
@@ -116,9 +117,25 @@ sub check_whitelist_bounce_relays {
   # fixed, otherwise we'll miss some messages due to their MIME structure
 
   my $pristine = $pms->{msg}->get_pristine_body();
+  my $found_received = 0;
+  my $fullhdr = '';
   foreach my $line ($pristine =~ /^(.*)$/gm) {
-    next unless $line && ($line =~ /Received: /);
-    while ($line =~ / (\S+\.\S+) /g) {
+    if (!defined $line) { return 0; }
+
+    # don't bother until we see a line with "Received:" in it
+    if (!$found_received) {             
+      next unless ($line =~ /^[> ]*Received:/i);
+      $found_received = 1;
+    }
+
+    if ($line =~ /^\s/) {               # bug 5912, deal with multiline
+      $fullhdr .= $line;
+    } else {
+      $fullhdr = $line;
+    }
+
+    next unless ($fullhdr =~ /^[> ]*Received:/i);
+    while ($fullhdr =~ /\s(\S+\.\S+)\s/gs) {
       return 1 if $self->_relay_is_in_whitelist_bounce_relays($pms, $1);
     }
   }
@@ -131,6 +148,8 @@ sub _relay_is_in_whitelist_bounce_relays {
   return 1 if $self->_relay_is_in_list(
         $pms->{conf}->{whitelist_bounce_relays}, $pms, $relay);
   dbg("rules: relay $relay doesn't match any whitelist");
+
+  return 0;
 }
 
 sub _relay_is_in_list {
@@ -150,9 +169,3 @@ sub _relay_is_in_list {
 }
 
 1;
-__DATA__
-
-=back
-
-=cut
-

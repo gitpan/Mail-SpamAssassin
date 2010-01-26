@@ -30,6 +30,10 @@ change at any point, and it's expected that they'll only be used by other
 Mail::SpamAssassin modules. (TODO: we should probably revisit this if
 it's useful for plugin development.)
 
+NOTE: Utility functions should not be changing global variables such
+as $_, $1, $2, ... $/, etc. unless explicitly documented.  If these
+variables are in use by these functions, they should be localized.
+
 =over 4
 
 =cut
@@ -39,30 +43,37 @@ package Mail::SpamAssassin::Util;
 use strict;
 use warnings;
 use bytes;
+use re 'taint';
 
 use Mail::SpamAssassin::Logger;
 
-use vars qw (
-  @ISA @EXPORT
-  $AM_TAINTED
-);
+BEGIN {
+  use Exporter ();
 
-require Exporter;
+  use vars qw (
+    @ISA @EXPORT @EXPORT_OK
+    $AM_TAINTED
+  );
 
-@ISA = qw(Exporter);
-@EXPORT = qw(local_tz base64_decode);
+  @ISA = qw(Exporter);
+  @EXPORT = ();
+  @EXPORT_OK = qw(&local_tz &base64_decode &untaint_var &untaint_file_path
+                  &exit_status_str &proc_status_ok);
+}
 
 use Mail::SpamAssassin;
 use Mail::SpamAssassin::Util::RegistrarBoundaries;
 
 use Config;
+use IO::Handle;
 use File::Spec;
 use File::Basename;
 use Time::Local;
 use Sys::Hostname (); # don't import hostname() into this namespace!
 use Fcntl;
-use POSIX (); # don't import anything unless we ask explicitly!
-use Errno qw(EEXIST);
+use Errno qw(ENOENT EACCES EEXIST);
+use POSIX qw(:sys_wait_h WIFEXITED WIFSIGNALED WIFSTOPPED WEXITSTATUS
+             WTERMSIG WSTOPSIG);
 
 ###########################################################################
 
@@ -120,20 +131,23 @@ use constant RUNNING_ON_WINDOWS => ($^O =~ /^(?:mswin|dos|os2)/oi);
     delete @ENV{qw(IFS CDPATH ENV BASH_ENV)};
 
     # Go through and clean the PATH out
-    my @path = ();
+    my @path;
     my @stat;
     foreach my $dir (File::Spec->path()) {
       next unless $dir;
 
-      $dir =~ /^(.+)$/; # untaint, then clean ( 'foo/./bar' -> 'foo/bar', etc. )
-      $dir = File::Spec->canonpath($1);
+      # untaint if at least 1 char and no NL (is the restriction intentional?)
+      local ($1);
+      $dir = untaint_var($1)  if $dir =~ /^(.+)$/;
+      # then clean ( 'foo/./bar' -> 'foo/bar', etc. )
+      $dir = File::Spec->canonpath($dir);
 
       if (!File::Spec->file_name_is_absolute($dir)) {
 	dbg("util: PATH included '$dir', which is not absolute, dropping");
 	next;
       }
       elsif (!(@stat=stat($dir))) {
-	dbg("util: PATH included '$dir', which doesn't exist, dropping");
+	dbg("util: PATH included '$dir', which is unusable, dropping: $!");
 	next;
       }
       elsif (!-d _) {
@@ -171,7 +185,7 @@ sub am_running_in_taint_mode {
     for my $d ((File::Spec->curdir, File::Spec->rootdir, File::Spec->tmpdir)) {
       opendir(TAINT, $d) || next;
       $blank = readdir(TAINT);
-      closedir(TAINT);
+      closedir(TAINT)  or die "error closing directory $d: $!";
       last;
     }
     if (!(defined $blank && $blank)) {
@@ -182,7 +196,7 @@ sub am_running_in_taint_mode {
     # seriously mind-bending perl
     $AM_TAINTED = not eval { eval "1 || $blank" || 1 };
   }
-  dbg("util: running in taint mode? ". ($AM_TAINTED ? "yes" : "no"));
+  dbg("util: running in taint mode? %s", $AM_TAINTED ? "yes" : "no");
   return $AM_TAINTED;
 }
 
@@ -208,15 +222,16 @@ sub untaint_file_path {
   return unless defined($path);
   return '' if ($path eq '');
 
+  local ($1);
   # Barry Jaspan: allow ~ and spaces, good for Windows.  Also return ''
   # if input is '', as it is a safe path.
   my $chars = '-_A-Za-z\xA0-\xFF0-9\.\%\@\=\+\,\/\\\:';
   my $re = qr/^\s*([$chars][${chars}~ ]*)$/o;
 
   if ($path =~ $re) {
-    return $1;
+    return untaint_var($1);
   } else {
-    warn "util: cannot untaint path: \"$path\"\n";
+    warn "util: refusing to untaint suspicious path: \"$path\"\n";
     return $path;
   }
 }
@@ -232,8 +247,8 @@ sub untaint_hostname {
   #   $domain = qq<$label(?:\.$label)*>;
   #   length($host) <= 255 && $host =~ /^($domain)$/
   # expanded (no variables in the re) because of a tainting bug in Perl 5.8.0
-  if (length($host) <= 255 && $host =~ /^([a-z\d](?:[a-z\d-]{0,61}[a-z\d])?(?:\.[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?)*)$/i) {
-    return $1;
+  if (length($host) <= 255 && $host =~ /^[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?(?:\.[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?)*$/i) {
+    return untaint_var($host);
   }
   else {
     warn "util: cannot untaint hostname: \"$host\"\n";
@@ -253,15 +268,17 @@ sub untaint_hostname {
 #  untaint_var(\%ENV);
 #
 sub untaint_var {
+  no re 'taint';  # override a  "use re 'taint'"  from outer scope
   local ($_) = @_;
   return undef unless defined;
 
   unless (ref) {
-    /^(.*)$/s;
+    local($1); # avoid Perl taint bug: tainted global $1 propagates taintedness
+    /^(.*)\z/s;
     return $1;
   }
   elsif (ref eq 'ARRAY') {
-    @{$_} = map { $_ = untaint_var($_) } @{$_};
+    $_ = untaint_var($_)  for @{$_};
     return @{$_} if wantarray;
   }
   elsif (ref eq 'HASH') {
@@ -289,12 +306,54 @@ sub taint_var {
   my ($v) = @_;
   return $v unless defined $v;      # can't taint "undef"
 
-  # $^X is apparently "always tainted".  We can use this to render
-  # a string tainted as follows:
-  my $tainter = substr ($^X."_", 0, 1);     # get 1 tainted char
-  $v .= $tainter; chop $v;      # then add and remove it
+  # $^X is apparently "always tainted".
+  # Concatenating an empty tainted string taints the result.
+  return $v . substr($^X, 0, 0);
+}
 
-  return $v;
+###########################################################################
+
+# map process termination status number to an informative string, and
+# append optional mesage (dual-valued errno or a string or a number),
+# returning the resulting string
+#
+sub exit_status_str($;$) {
+  my($stat,$errno) = @_;
+  my $str;
+  if (!defined($stat)) {
+    $str = '(no status)';
+  } elsif (WIFEXITED($stat)) {
+    $str = sprintf("exit %d", WEXITSTATUS($stat));
+  } elsif (WIFSTOPPED($stat)) {
+    $str = sprintf("stopped, signal %d", WSTOPSIG($stat));
+  } else {
+    my $sig = WTERMSIG($stat);
+    $str = sprintf("%s, signal %d (%04x)",
+             $sig == 1 ? 'HANGUP' : $sig == 2 ? 'INTERRUPTED' :
+             $sig == 6 ? 'ABORTED' : $sig == 9 ? 'KILLED' :
+             $sig == 15 ? 'TERMINATED' : 'DIED',
+             $sig, $stat);
+  }
+  if (defined $errno) {  # deal with dual-valued and plain variables
+    $str .= ', '.$errno  if (0+$errno) != 0 || ($errno ne '' && $errno ne '0');
+  }
+  return $str;
+}
+
+###########################################################################
+
+# check errno to be 0 and a process exit status to be in the list of success
+# status codes, returning true if both are ok, and false otherwise
+#
+sub proc_status_ok($;$@) {
+  my($exit_status,$errno,@success) = @_;
+  my $ok = 0;
+  if ((!defined $errno || $errno == 0) && WIFEXITED($exit_status)) {
+    my $j = WEXITSTATUS($exit_status);
+    if (!@success) { $ok = $j==0 }  # empty list implies only status 0 is good
+    elsif (grep {$_ == $j} @success) { $ok = 1 }
+  }
+  return $ok;
 }
 
 ###########################################################################
@@ -381,7 +440,7 @@ sub local_tz {
 
 sub parse_rfc822_date {
   my ($date) = @_;
-  local ($_);
+  local ($_); local ($1,$2,$3,$4);
   my ($yyyy, $mmm, $dd, $hh, $mm, $ss, $mon, $tzoff);
 
   # make it a bit easier to match
@@ -434,7 +493,7 @@ sub parse_rfc822_date {
   $hh ||= 0; $mm ||= 0; $ss ||= 0; $dd ||= 0; $mmm ||= 0; $yyyy ||= 0;
 
   # Fudge invalid times so that we get a usable date.
-  if ($ss > 59) { 
+  if ($ss > 59) {  # rfc2822 does recognize leap seconds, not handled here
     dbg("util: second after supported range, forcing second to 59: $date");  
     $ss = 59;
   } 
@@ -466,32 +525,34 @@ sub parse_rfc822_date {
     }
   }
 
-  # Time::Local (v1.10 at least) throws warnings when the dates cause
-  # a 32-bit overflow.  So force a min/max for year.
+  # Time::Local (v1.10 at least, also 1.17) throws warnings when dates cause
+  # a signed 32-bit integer overflow.  So force a min/max for year.
   if ($yyyy > 2037) {
     dbg("util: year after supported range, forcing year to 2037: $date");
     $yyyy = 2037;
   }
   elsif ($yyyy < 1970) {
     dbg("util: year before supported range, forcing year to 1970: $date");
-    $yyyy = 1971;
+    $yyyy = 1970;
   }
 
   my $time;
   eval {		# could croak
     $time = timegm($ss, $mm, $hh, $dd, $mmm-1, $yyyy);
-  };
-
-  if ($@) {
-    dbg("util: time cannot be parsed: $date, $yyyy-$mmm-$dd $hh:$mm:$ss");
+    1;
+  } or do {
+    my $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
+    dbg("util: time cannot be parsed: $date, $yyyy-$mmm-$dd $hh:$mm:$ss, $eval_stat");
     return undef;
-  }
+  };
 
   if ($tzoff =~ /([-+])(\d\d)(\d\d)$/)	# convert to seconds difference
   {
     $tzoff = (($2 * 60) + $3) * 60;
     if ($1 eq '-') {
       $time += $tzoff;
+    } elsif ($time < $tzoff) {  # careful with year 1970 and '+' time zones
+      $time = 0;
     } else {
       $time -= $tzoff;
     }
@@ -669,15 +730,16 @@ sub portable_getpwuid {
     return Mail::SpamAssassin::Util::_getpwuid_wrapper(@_);
   }
 
+  my $sts;
   if (!RUNNING_ON_WINDOWS) {
-    eval ' sub _getpwuid_wrapper { getpwuid($_[0]); } ';
+    $sts = eval ' sub _getpwuid_wrapper { getpwuid($_[0]); }; 1 ';
   } else {
     dbg("util: defining getpwuid() wrapper using 'unknown' as username");
-    eval ' sub _getpwuid_wrapper { _fake_getpwuid($_[0]); } ';
+    $sts = eval ' sub _getpwuid_wrapper { _fake_getpwuid($_[0]); }; 1 ';
   }
-
-  if ($@) {
-    warn "util: failed to define getpwuid() wrapper: $@\n";
+  if (!$sts) {
+    my $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
+    warn "util: failed to define getpwuid() wrapper: $eval_stat\n";
   } else {
     return Mail::SpamAssassin::Util::_getpwuid_wrapper(@_);
   }
@@ -726,6 +788,7 @@ sub extract_ipv4_addr_from_string {
 }
 
 ###########################################################################
+
 {
   my($hostname, $fq_hostname);
 
@@ -738,7 +801,7 @@ sub extract_ipv4_addr_from_string {
     # got to clean PATH before we may call it.
     clean_path_in_taint_mode();
     $hostname = Sys::Hostname::hostname();
-
+    $hostname =~ s/[()]//gs;            # bug 5929
     return $hostname;
   }
 
@@ -753,6 +816,7 @@ sub extract_ipv4_addr_from_string {
                     map { split } (gethostbyname($fq_hostname))[0 .. 1] # from all aliases
                   );
       $fq_hostname = $names[0] if (@names); # take the first FQDN, if any 
+      $fq_hostname =~ s/[()]//gs;       # bug 5929
     }
 
     return $fq_hostname;
@@ -878,8 +942,8 @@ sub parse_content_type {
 sub url_encode {
   my ($url) = @_;
   my (@characters) = split(/(\%[0-9a-fA-F]{2})/, $url);
-  my (@unencoded) = ();
-  my (@encoded) = ();
+  my (@unencoded);
+  my (@encoded);
 
   foreach (@characters) {
     # escaped character set ...
@@ -949,8 +1013,7 @@ If it cannot open a file after 20 tries, it returns C<undef>.
 
 # thanks to http://www2.picante.com:81/~gtaylor/autobuse/ for this code
 sub secure_tmpfile {
-  my $tmpdir = Mail::SpamAssassin::Util::untaint_file_path(
-                $ENV{'TMPDIR'} || File::Spec->tmpdir());
+  my $tmpdir = untaint_file_path($ENV{'TMPDIR'} || File::Spec->tmpdir());
 
   if (!$tmpdir) {
     # Note: we would prefer to keep this fatal, as not being able to
@@ -973,7 +1036,7 @@ sub secure_tmpfile {
     # instead, we require O_EXCL|O_CREAT to guarantee us proper
     # ownership of our file, read the open(2) man page
     if (sysopen($tmpfile, $reportfile, O_RDWR|O_CREAT|O_EXCL, 0600)) {
-      binmode $tmpfile;
+      binmode $tmpfile  or die "cannot set $reportfile to binmode: $!";
       last;
     }
 
@@ -987,7 +1050,7 @@ sub secure_tmpfile {
 
     # ensure the file handle is not semi-open in some way
     if ($tmpfile) {
-      close $tmpfile;
+      close $tmpfile  or info("error closing $reportfile: $!");
     }
   }
 
@@ -1012,7 +1075,7 @@ If it cannot create a directory after 20 tries, it returns C<undef>.
 
 # stolen from secure_tmpfile()
 sub secure_tmpdir {
-  my $tmpdir = Mail::SpamAssassin::Util::untaint_file_path(File::Spec->tmpdir());
+  my $tmpdir = untaint_file_path(File::Spec->tmpdir());
 
   if (!$tmpdir) {
     # Note: we would prefer to keep this fatal, as not being able to
@@ -1097,7 +1160,7 @@ sub uri_list_canonify {
   my($redirector_patterns, @uris) = @_;
 
   # make sure we catch bad encoding tricks
-  my @nuris = ();
+  my @nuris;
   for my $uri (@uris) {
     # we're interested in http:// and so on, skip mailto: and
     # email addresses with no protocol
@@ -1372,20 +1435,27 @@ sub force_die {
   # note use of eval { } scope in logging -- paranoia to ensure that a broken
   # $SIG{__WARN__} implementation will not interfere with the flow of control
   # here, where we *have* to die.
-  eval { warn $msg; };
+  eval { warn $msg };  # hmm, STDERR may no longer be open
+  eval { dbg("util: force_die: $msg") };
 
-  POSIX::_exit(1);  # avoid END and destructor processing 
+  POSIX::_exit(6);  # avoid END and destructor processing 
   kill('KILL',$$);  # still kicking? die! 
 }
 
 sub helper_app_pipe_open_unix {
   my ($fh, $stdinfile, $duperr2out, @cmdline) = @_;
 
+  my $pid;
   # do a fork-open, so we can setuid() back
-  my $pid = open ($fh, '-|');
+  eval {
+    $pid = open ($fh, '-|');  1;
+  } or do {
+    my $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
+    die "util: cannot fork: $eval_stat";
+  };
   if (!defined $pid) {
     # acceptable to die() here, calling code catches it
-    die "util: cannot fork: $!";
+    die "util: cannot open a pipe to a forked process: $!";
   }
 
   if ($pid != 0) {
@@ -1393,75 +1463,81 @@ sub helper_app_pipe_open_unix {
   }
 
   # else, child process.  
-  # from now on, we cannot die(), as a parent-process eval { } scope
-  # could intercept it! use force_die() instead  (bug 4370, cmt 2)
 
-  # go setuid...
-  setuid_to_euid();
-  dbg("util: setuid: ruid=$< euid=$>");
+  # from now on, we cannot die(), it could create a cloned process
+  # use force_die() instead  (bug 4370, cmt 2)
+  eval {
+    # go setuid...
+    setuid_to_euid();
+    dbg("util: setuid: ruid=$< euid=$>");
 
-  # now set up the fds.  due to some wierdness, we may have to ensure that we
-  # *really* close the correct fd number, since some other code may have
-  # redirected the meaning of STDOUT/STDIN/STDERR it seems... (bug 3649). use
-  # POSIX::close() for that. it's safe to call close() and POSIX::close() on
-  # the same fd; the latter is a no-op in that case.
+    # now set up the fds.  due to some wierdness, we may have to ensure that
+    # we *really* close the correct fd number, since some other code may have
+    # redirected the meaning of STDOUT/STDIN/STDERR it seems... (bug 3649).
+    # use POSIX::close() for that. it's safe to call close() and POSIX::close()
+    # on the same fd; the latter is a no-op in that case.
 
-  if (!$stdinfile) {              # < $tmpfile
-    # ensure we have *some* kind of fd 0.
-    $stdinfile = "/dev/null";
-  }
-
-  my $f = fileno(STDIN);
-  close STDIN;
-
-  # sanity: was that the *real* STDIN? if not, close that one too ;)
-  if ($f != 0) {
-    POSIX::close(0);
-  }
-
-  open (STDIN, "<$stdinfile") or force_die "util: cannot open $stdinfile: $!";
-
-  # this should be impossible; if we just closed fd 0, UNIX
-  # fd behaviour dictates that the next fd opened (the new STDIN)
-  # will be the lowest unused fd number, which should be 0.
-  # so die with a useful error if this somehow isn't the case.
-  if (fileno(STDIN) != 0) {
-    force_die "util: setuid: oops: fileno(STDIN) [".fileno(STDIN)."] != 0";
-  }
-
-  # ensure STDOUT is open.  since we just created a pipe to ensure this, it has
-  # to be open to that pipe, and if it isn't, something's seriously screwy.
-  # Update: actually, this fails! see bug 3649 comment 37.  For some reason,
-  # fileno(STDOUT) can be 0; possibly because open("-|") didn't change the fh
-  # named STDOUT, instead changing fileno(1) directly.  So this is now
-  # commented.
-  # if (fileno(STDOUT) != 1) {
-  # die "setuid: oops: fileno(STDOUT) [".fileno(STDOUT)."] != 1";
-  # }
-
-  if ($duperr2out) {             # 2>&1
-    my $f = fileno(STDERR);
-    close STDERR;
-
-    # sanity: was that the *real* STDERR? if not, close that one too ;)
-    if ($f != 2) {
-      POSIX::close(2);
+    if (!$stdinfile) {              # < $tmpfile
+      # ensure we have *some* kind of fd 0.
+      $stdinfile = "/dev/null";
     }
 
-    open (STDERR, ">&STDOUT") or force_die "util: dup STDOUT failed: $!";
+    my $f = fileno(STDIN);
+    close STDIN  or die "error closing STDIN: $!";
 
-    # STDERR must be fd 2 to be useful to subprocesses! (bug 3649)
-    if (fileno(STDERR) != 2) {
-      force_die "util: oops: fileno(STDERR) [".fileno(STDERR)."] != 2";
+    # sanity: was that the *real* STDIN? if not, close that one too ;)
+    if ($f != 0) {
+      POSIX::close(0);
     }
-  }
 
-  exec @cmdline;
-  warn "util: exec failed: $!";
+    open (STDIN, "<$stdinfile") or die "cannot open $stdinfile: $!";
+
+    # this should be impossible; if we just closed fd 0, UNIX
+    # fd behaviour dictates that the next fd opened (the new STDIN)
+    # will be the lowest unused fd number, which should be 0.
+    # so die with a useful error if this somehow isn't the case.
+    if (fileno(STDIN) != 0) {
+      die "oops: fileno(STDIN) [".fileno(STDIN)."] != 0";
+    }
+
+    # Ensure STDOUT is open. As we just created a pipe to ensure this, it has
+    # to be open to that pipe, and if it isn't, something's seriously screwy.
+    # Update: actually, this fails! see bug 3649 comment 37.  For some reason,
+    # fileno(STDOUT) can be 0; possibly because open("-|") didn't change the fh
+    # named STDOUT, instead changing fileno(1) directly.  So this is now
+    # commented.
+    # if (fileno(STDOUT) != 1) {
+    # die "setuid: oops: fileno(STDOUT) [".fileno(STDOUT)."] != 1";
+    # }
+
+    STDOUT->autoflush(1);
+
+    if ($duperr2out) {             # 2>&1
+      my $f = fileno(STDERR);
+      close STDERR  or die "error closing STDERR: $!";
+
+      # sanity: was that the *real* STDERR? if not, close that one too ;)
+      if ($f != 2) {
+        POSIX::close(2);
+      }
+
+      open (STDERR, ">&STDOUT") or die "dup STDOUT failed: $!";
+      STDERR->autoflush(1);  # make sure not to lose diagnostics if exec fails
+
+      # STDERR must be fd 2 to be useful to subprocesses! (bug 3649)
+      if (fileno(STDERR) != 2) {
+        die "oops: fileno(STDERR) [".fileno(STDERR)."] != 2";
+      }
+    }
+
+    exec @cmdline;
+    die "exec failed: $!";
+  };
+  my $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
 
   # bug 4370: we really have to exit here; break any eval traps
-  POSIX::_exit(1);  # avoid END and destructor processing 
-  kill('KILL',$$);  # still kicking? die! 
+  force_die(sprintf('util: failed to spawn a process "%s": %s',
+                    join(", ",@cmdline), $eval_stat));
   die;  # must be a die() otherwise -w will complain
 }
 
@@ -1565,14 +1641,13 @@ sub avoid_db_file_locking_bug {
                         '__db.'.basename($path)));
 
   # delete "__db.[DBNAME]" and "__db.[DBNAME].*"
-  foreach my $tfile ($db_tmpfile, <$db_tmpfile.*>) {
+  foreach my $tfile ($db_tmpfile, glob("$db_tmpfile.*")) {
     my $file = untaint_file_path($tfile);
-    next unless (-e $file);
+    my $stat_errn = stat($file) ? 0 : 0+$!;
+    next if $stat_errn == ENOENT;
 
     dbg("Berkeley DB bug work-around: cleaning tmp file $file");
-    if (!unlink($file)) {
-      die "cannot remove Berkeley DB tmp file $file: $!\n";
-    }
+    unlink($file) or warn "cannot remove Berkeley DB tmp file $file: $!\n";
   }
 }
 

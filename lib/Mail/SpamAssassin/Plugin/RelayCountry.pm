@@ -43,6 +43,7 @@ use Mail::SpamAssassin::Logger;
 use strict;
 use warnings;
 use bytes;
+use re 'taint';
 
 use vars qw(@ISA);
 @ISA = qw(Mail::SpamAssassin::Plugin);
@@ -67,11 +68,12 @@ sub extract_metadata {
   eval {
     require IP::Country::Fast;
     $reg = IP::Country::Fast->new();
-  };
-  if ($@) {
-    dbg("metadata: failed to load 'IP::Country::Fast', skipping ($@)");
+    1;
+  } or do {
+    my $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
+    dbg("metadata: failed to load 'IP::Country::Fast', skipping: $eval_stat");
     return 1;
-  }
+  };
 
   my $msg = $opts->{msg};
 

@@ -24,6 +24,7 @@ use Mail::SpamAssassin::Constants qw(:sa);
 use strict;
 use warnings;
 use bytes;
+use re 'taint';
 
 use vars qw(@ISA);
 @ISA = qw(Mail::SpamAssassin::Plugin);
@@ -95,8 +96,8 @@ sub _multipart_alternative_difference {
 
   # Go through each of the multipart parts
   foreach my $part (@ma) {
-    my %html = ();
-    my %text = ();
+    my %html;
+    my %text;
 
     # limit our search to text-based parts
     my @txt = $part->find_parts(qr@^text\b@i);
@@ -167,24 +168,28 @@ sub check_blank_line_ratio {
     $minlines = 1;
   }
 
-  if (! exists $pms->{blank_line_ratio}->{$minlines}) {
+  my $blank_line_ratio_ref = $pms->{blank_line_ratio};
+
+  if (! exists $blank_line_ratio_ref->{$minlines}) {
     $fulltext = $pms->get_decoded_body_text_array();
-    my ($blank) = 0;
-    if (scalar @{$fulltext} >= $minlines) {
-      foreach my $line (@{$fulltext}) {
-        next if ($line =~ /\S/);
-        $blank++;
+
+    my $blank = 0;
+    my $nlines = 0;
+    foreach my $chunk (@$fulltext) {
+      foreach (split(/^/m, $chunk, -1)) {
+        $nlines++;
+        $blank++  if !/\S/;
       }
-      $pms->{blank_line_ratio}->{$minlines} = 100 * $blank / scalar @{$fulltext};
     }
-    else {
-      $pms->{blank_line_ratio}->{$minlines} = -1; # don't report if it's a blank message ...
-    }
+
+    # report -1 if it's a blank message ...
+    $blank_line_ratio_ref->{$minlines} =
+      $nlines < $minlines ? -1 : 100 * $blank / $nlines;
   }
 
-  return (($min == 0 && $pms->{blank_line_ratio}->{$minlines} <= $max) ||
-	  ($pms->{blank_line_ratio}->{$minlines} > $min &&
-	   $pms->{blank_line_ratio}->{$minlines} <= $max));
+  return (($min == 0 && $blank_line_ratio_ref->{$minlines} <= $max) ||
+	  ($blank_line_ratio_ref->{$minlines} > $min &&
+	   $blank_line_ratio_ref->{$minlines} <= $max));
 }
 
 sub tvd_vertical_words {
@@ -194,7 +199,7 @@ sub tvd_vertical_words {
   $max = 101 if ($max >= 100);
 
   if (!defined $pms->{tvd_vertical_words}) {
-    $pms->{tvd_vertical_words} = 0;
+    $pms->{tvd_vertical_words} = -1;
 
     foreach (@{$text}) {
       my $l = length $_;
@@ -235,32 +240,39 @@ sub _check_stock_info {
   return if (!@parts);
 
   # Go through each of the multipart parts
-  my %hits = ();
+  my %hits;
   my $part = $parts[0];
   my ($type, $rnd) = $part->rendered();
   return unless $type;
 
-  foreach ( $rnd =~ /^\s*([^:\s][^:\n]{2,29})\s*:\s*\S/mg ) {
-    my $str = lc $_;
-    $str =~ tr/a-z//cd;
-    #$str =~ s/([a-z])0([a-z])/$1o$2/g;
+  # bug 5644,5717: avoid pathological cases where a regexp takes massive amount
+  # of time by applying the regexp to limited-size text chunks, one at a time
 
-    if ($str =~ /(
-      ^trad(?:e|ing)date|
-      company(?:name)?|
-      s\w?(?:t\w?o\w?c\w?k|y\w?m(?:\w?b\w?o\w?l)?)|
-      t(?:arget|icker)|
-      (?:opening|current)p(?:rice)?|
-      p(?:rojected|osition)|
-      expectations|
-      weeks?high|
-      marketperformance|
-      (?:year|week|month|day|price)(?:target|estimates?)|
-      sector|
-      r(?:ecommendation|ating)
-    )$/x) {
-      $hits{$1}++;
-      dbg("eval: stock info hit: $1");
+  foreach my $rnd_chunk (
+    Mail::SpamAssassin::Message::split_into_array_of_short_paragraphs($rnd))
+  {
+    foreach ( $rnd_chunk =~ /^\s*([^:\s][^:\n]{2,29})\s*:\s*\S/mg ) {
+      my $str = lc $_;
+      $str =~ tr/a-z//cd;
+      #$str =~ s/([a-z])0([a-z])/$1o$2/g;
+
+      if ($str =~ /(
+        ^trad(?:e|ing)date|
+        company(?:name)?|
+        s\w?(?:t\w?o\w?c\w?k|y\w?m(?:\w?b\w?o\w?l)?)|
+        t(?:arget|icker)|
+        (?:opening|current)p(?:rice)?|
+        p(?:rojected|osition)|
+        expectations|
+        weeks?high|
+        marketperformance|
+        (?:year|week|month|day|price)(?:target|estimates?)|
+        sector|
+        r(?:ecommendation|ating)
+      )$/x) {
+        $hits{$1}++;
+        dbg("eval: stock info hit: $1");
+      }
     }
   }
 

@@ -46,6 +46,7 @@ use Mail::SpamAssassin::Logger;
 use strict;
 use warnings;
 use bytes;
+use re 'taint';
 
 use vars qw{
   @ISA
@@ -100,12 +101,12 @@ sub load {
      local $SIG{'__DIE__'} = sub { die "$_[0]"; };
      require DBI;
      load_with_dbi($self, $username, $dsn);
-   };
-
-   if ($@) {
-     warn "config: failed to load user ($username) scores from SQL database: $@\n";
+     1;
+   } or do {
+     my $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
+     warn "config: failed to load user ($username) scores from SQL database: $eval_stat\n";
      return 0;
-   }
+   };
    return 1;
 }
 
@@ -161,6 +162,7 @@ sub load_with_dbi {
 	   delete $main->{conf}->{main};
 	 }
 	 $sth->finish();
+	 undef $sth;
        }
        else {
 	 die "config: SQL error: $sql\n".$sth->errstr."\n";

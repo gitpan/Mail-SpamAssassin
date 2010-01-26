@@ -35,17 +35,18 @@ Mail::SpamAssassin::Logger - SpamAssassin logging module
 
 package Mail::SpamAssassin::Logger;
 
-use vars qw(@ISA @EXPORT @EXPORT_OK);
-
-require Exporter;
-
 use strict;
 use warnings;
 use bytes;
+use re 'taint';
 
-@ISA = qw(Exporter);
-@EXPORT = qw(dbg info would_log);
-@EXPORT_OK = qw(log_message);
+BEGIN {
+  use Exporter ();
+  use vars qw(@ISA @EXPORT @EXPORT_OK);
+  @ISA = qw(Exporter);
+  @EXPORT = qw(dbg info would_log);
+  @EXPORT_OK = qw(log_message);
+}
 
 use constant ERROR => 0;
 use constant WARNING => 1;
@@ -61,6 +62,7 @@ my %log_level = (
 
 # global shared object
 our %LOG_SA;
+our $LOG_ENTERED;  # to avoid recursion on die or warn from within logging
 
 # defaults
 $LOG_SA{level} = WARNING;       # log info, warnings and errors
@@ -79,12 +81,20 @@ $LOG_SA{method}->{stderr} = Mail::SpamAssassin::Logger::Stderr->new();
 Enable debug logging for specific facilities.  Each facility is the area
 of code to debug.  Facilities can be specified as a hash reference (the
 key names are used), an array reference, an array, or a comma-separated
-scalar string.
+scalar string. Facility names are case-sensitive.
 
-If "all" is listed, then all debug facilities are enabled.  Higher
-priority informational messages that are suitable for logging in normal
-circumstances are available with an area of "info".  Some very verbose
-messages require the facility to be specifically enabled (see
+If "all" is listed, then all debug facilities are implicitly enabled,
+except for those explicitly disabled.  A facility name may be preceded
+by a "no" (case-insensitive), which explicitly disables it, overriding
+the "all".  For example: all,norules,noconfig,nodcc.  When facility names
+are given as an ordered list (array or scalar, not a hash), the last entry
+applies, e.g. 'nodcc,dcc,dcc,noddc' is equivalent to 'nodcc'.  Note that
+currently no facility name starts with a "no", it is advised to keep this
+practice with newly added facility names to make life easier.
+
+Higher priority informational messages that are suitable for logging in
+normal circumstances are available with an area of "info".  Some very
+verbose messages require the facility to be specifically enabled (see
 C<would_log> below).
 
 =cut
@@ -92,7 +102,7 @@ C<would_log> below).
 sub add_facilities {
   my ($facilities) = @_;
 
-  my @facilities = ();
+  my @facilities;
   if (ref ($facilities) eq '') {
     if (defined $facilities && $facilities ne '0') {
       @facilities = split(/,/, $facilities);
@@ -106,9 +116,12 @@ sub add_facilities {
   }
   @facilities = grep(/^\S+$/, @facilities);
   if (@facilities) {
-    $LOG_SA{facility}->{$_} = 1 for @facilities;
+    for my $fac (@facilities) {
+      local ($1,$2);
+      $LOG_SA{facility}->{$2} = !defined($1)  if $fac =~ /^(no)?(.+)\z/si;
+    }
     # turn on debugging if facilities other than "info" are enabled
-    if (keys %{ $LOG_SA{facility} } > 1 || !$LOG_SA{facility}->{info}) {
+    if (grep { !/^info\z/ && !/^no./si } keys %{ $LOG_SA{facility} }) {
       $LOG_SA{level} = DBG if $LOG_SA{level} < DBG;
     }
     else {
@@ -119,8 +132,6 @@ sub add_facilities {
     dbg("logger: logging level is " . $log_level{$LOG_SA{level}});
   }
 }
-
-=item log_message($level, $message)
 
 =item log_message($level, @message)
 
@@ -153,19 +164,30 @@ sub log_message {
 		       $caller[0] =~ m#^Mail::SpamAssassin(?:$|::)#);
   }
 
+  return if $LOG_ENTERED;  # avoid recursion on die or warn from within logging
+  $LOG_ENTERED = 1;  # no 'returns' from this point on, must clear the flag
+
   my $message = join(" ", @message);
   $message =~ s/[\r\n]+$//;		# remove any trailing newlines
 
   # split on newlines and call log_message multiple times; saves
   # the subclasses having to understand multi-line logs
+  my $first = 1;
   foreach my $line (split(/\n/, $message)) {
     # replace control characters with "_", tabs and spaces get
     # replaced with a single space.
     $line =~ tr/\x09\x20\x00-\x1f/  _/s;
+    if ($first) {
+      $first = 0;
+    } else {
+      local $1;
+      $line =~ s/^([^:]+?):/$1: [...]/;
+    }
     while (my ($name, $object) = each %{ $LOG_SA{method} }) {
       $object->log_message($level, $line);
     }
   }
+  $LOG_ENTERED = 0;
 }
 
 =item dbg("facility: message")
@@ -175,8 +197,8 @@ This is used for all low priority debugging messages.
 =cut
 
 sub dbg {
-  return unless $LOG_SA{level} >= DBG;
-  _log("dbg", @_);
+  _log(DBG, @_)  if $LOG_SA{level} >= DBG;
+  1;  # always return the same simple value, regardless of log level
 }
 
 =item info("facility: message")
@@ -188,34 +210,40 @@ messages are typically logged when SpamAssassin is run as a daemon.
 =cut
 
 sub info {
-  return unless $LOG_SA{level} >= INFO;
-  _log("info", @_);
+  _log(INFO, @_)  if $LOG_SA{level} >= INFO;
+  1;  # always return the same simple value, regardless of log level
 }
 
 # remember to avoid deep recursion, my friend
 sub _log {
-  my ($level, $message, @args) = @_;
+  my $facility;
+  local ($1);
 
-  my $facility = "generic";
-  local ($1,$2);
-  if ($message =~ /^(\S+?): (.*)/s) {
+  # it's faster to access this as the $_[1] alias, and not to perform
+  # string mods until we're sure we actually want to log anything
+  if ($_[1] =~ /^([^:]+?):/) {
     $facility = $1;
-    $message = $2;
+  } else {
+    $facility = "generic";
   }
 
-  # only debug specific facilities
-  # log all info, warn, and error messages
-  if ($level eq "dbg") {
-    return unless ($LOG_SA{facility}->{all} ||
-		   $LOG_SA{facility}->{$facility});
+  # log all info, warn, and error messages;
+  # only debug if asked to
+  if ($_[0] == DBG) {
+    return unless
+      exists $LOG_SA{facility}->{$facility} ? $LOG_SA{facility}->{$facility}
+                                            : $LOG_SA{facility}->{all};
   }
+
+  my ($level, $message, @args) = @_;
+  $message =~ s/^([^:]+?):\s*//;
 
   if (@args && index($message,'%') >= 0) { $message = sprintf($message,@args) }
   $message =~ s/\n+$//s;
   $message =~ s/^/${facility}: /mg;
 
   # no reason to go through warn()
-  log_message($level, $message);
+  log_message(($level == INFO ? "info" : "dbg"), $message);
 }
 
 =item add(method => 'syslog', socket => $socket, facility => $facility)
@@ -239,21 +267,36 @@ sub add {
   my $name = lc($params{method});
   my $class = ucfirst($name);
 
-  eval 'use Mail::SpamAssassin::Logger::'.$class.';';
-  ($@) and die "logger: add $class failed: $@";
+  eval 'use Mail::SpamAssassin::Logger::'.$class.'; 1'
+  or do {
+    my $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
+    die "logger: add $class failed: $eval_stat\n";
+  };
 
   if (!exists $LOG_SA{method}->{$name}) {
-    my $object = eval 'Mail::SpamAssassin::Logger::'.$class.'->new(%params);';
-    if (!$@ && $object) {
+    my $object;
+    my $eval_stat;
+    eval '$object = Mail::SpamAssassin::Logger::'.$class.'->new(%params); 1'
+    or do {
+      $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
+      undef $object;  # just in case
+    };
+    if (!$object) {
+      if (!defined $eval_stat) {
+        $eval_stat = "Mail::SpamAssassin::Logger::$class->new ".
+                     "failed to return an object";
+      }
+      warn "logger: failed to add $name method: $eval_stat\n";
+    }
+    else {
       $LOG_SA{method}->{$name} = $object;
       dbg("logger: successfully added $name method\n");
       return 1;
     }
-    warn("logger: failed to add $name method ($@)\n");
     return 0;
   }
 
-  warn("logger: $name method already added\n");
+  warn "logger: $name method already added\n";
   return 1;
 }
 
@@ -273,7 +316,7 @@ sub remove {
     info("logger: removing $name method");
     return 1;
   }
-  warn("logger: unable to remove $name method, not present to be removed");
+  warn "logger: unable to remove $name method, not present to be removed\n";
   return 1;
 }
 
@@ -297,7 +340,8 @@ sub would_log {
   if ($level eq "dbg") {
     return 0 if $LOG_SA{level} < DBG;
     return 1 if !$facility;
-    return 2 if $LOG_SA{facility}->{$facility};
+    return ($LOG_SA{facility}->{$facility} ? 2 : 0)
+      if exists $LOG_SA{facility}->{$facility};
     return 1 if $LOG_SA{facility}->{all};
     return 0;
   }

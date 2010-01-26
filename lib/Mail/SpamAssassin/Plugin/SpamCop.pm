@@ -47,6 +47,7 @@ use IO::Socket;
 use strict;
 use warnings;
 use bytes;
+use re 'taint';
 
 use constant HAS_NET_DNS => eval { require Net::DNS; };
 use constant HAS_NET_SMTP => eval { require Net::SMTP; };
@@ -79,7 +80,7 @@ sub new {
 
 sub set_config {
   my($self, $conf) = @_;
-  my @cmds = ();
+  my @cmds;
 
 =head1 USER OPTIONS
 

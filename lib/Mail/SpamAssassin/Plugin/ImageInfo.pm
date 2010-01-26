@@ -61,6 +61,7 @@ use Mail::SpamAssassin::Logger;
 use strict;
 use warnings;
 use bytes;
+use re 'taint';
 
 use vars qw(@ISA);
 @ISA = qw(Mail::SpamAssassin::Plugin);
@@ -200,12 +201,13 @@ sub _get_images {
     $pms->{'imageinfo'}->{"count_$type"} = 0;
   }
 
-  foreach my $p ($pms->{msg}->find_parts(qr@^image/(?:gif|png|jpeg)$@, 1)) {
+  foreach my $p ($pms->{msg}->find_parts(qr@^image/(?:gif|png|jpe?g)$@, 1)) {
     # make sure its base64 encoded
     my $cte = lc $p->get_header('content-transfer-encoding') || '';
     next if ($cte !~ /^base64$/);
 
     my ($type) = $p->{'type'} =~ m@/(\w+)$@;
+    $type='jpeg' if $type eq 'jpg';
     if ($type && exists $get_details{$type}) {
        $get_details{$type}->($pms,$p);
        $pms->{'imageinfo'}->{"count_$type"} ++;

@@ -17,14 +17,16 @@
 
 package Mail::SpamAssassin::Plugin::HeaderEval;
 
+use strict;
+use warnings;
+use bytes;
+use re 'taint';
+use Errno qw(EBADF);
+
 use Mail::SpamAssassin::Plugin;
 use Mail::SpamAssassin::Locales;
 use Mail::SpamAssassin::Logger;
 use Mail::SpamAssassin::Constants qw(:sa :ip);
-
-use strict;
-use warnings;
-use bytes;
 
 use vars qw(@ISA);
 @ISA = qw(Mail::SpamAssassin::Plugin);
@@ -55,8 +57,6 @@ sub new {
   $self->register_eval_rule("similar_recipients");
   $self->register_eval_rule("check_for_missing_to_header");
   $self->register_eval_rule("check_for_forged_gw05_received_headers");
-  $self->register_eval_rule("check_for_round_the_world_received_helo");
-  $self->register_eval_rule("check_for_round_the_world_received_revdns");
   $self->register_eval_rule("check_for_shifted_date");
   $self->register_eval_rule("subject_is_all_caps");
   $self->register_eval_rule("check_for_to_in_subject");
@@ -67,6 +67,7 @@ sub new {
   $self->register_eval_rule("check_ratware_name_id");
   $self->register_eval_rule("check_ratware_envelope_from");
   $self->register_eval_rule("gated_through_received_hdr_remover");
+  $self->register_eval_rule("received_within_months");
 
   return $self;
 }
@@ -86,7 +87,8 @@ sub check_for_fake_aol_relay_in_rcvd {
   my ($self, $pms) = @_;
   local ($_);
 
-  $_ = $pms->get('Received'); s/\s/ /gs;
+  $_ = $pms->get('Received');
+  s/\s/ /gs;
 
   # this is the hostname format used by AOL for their relays. Spammers love 
   # forging it.  Don't make it more specific to match aol.com only, though --
@@ -122,7 +124,7 @@ sub check_for_faraway_charset_in_headers {
   return 0 if grep { $_ eq "all" } @locales;
 
   for my $h (qw(From Subject)) {
-    my @hdrs = $pms->get("$h:raw");
+    my @hdrs = $pms->get("$h:raw");  # ??? get() returns a scalar ???
     if ($#hdrs >= 0) {
       $hdr = join(" ", @hdrs);
     } else {
@@ -191,7 +193,7 @@ sub check_for_unique_subject_id {
 # Does not include triplets only found in proper names, or in the Latin
 # and Greek terms that might be found in a larger dictionary
 
-my %triplets = ();
+my %triplets;
 my $triplets_loaded = 0;
 
 sub word_is_in_dictionary {
@@ -220,8 +222,7 @@ sub word_is_in_dictionary {
   if (!$triplets_loaded) {
     # take a copy to avoid modifying the real one
     my @default_triplets_path = @Mail::SpamAssassin::default_rules_path;
-    @default_triplets_path = map { s,$,/triplets.txt,; $_; }
-				    @default_triplets_path;
+    s{$}{/triplets.txt}  for @default_triplets_path;
     my $filename = $self->{main}->first_existing_path (@default_triplets_path);
 
     if (!defined $filename) {
@@ -229,16 +230,19 @@ sub word_is_in_dictionary {
       return 1;
     }
 
+    local *TRIPLETS;
     if (!open (TRIPLETS, "<$filename")) {
-      dbg("eval: failed to open '$filename', cannot check dictionary");
+      dbg("eval: failed to open '$filename', cannot check dictionary: $!");
       return 1;
     }
-
-    while(<TRIPLETS>) {
+    for($!=0; <TRIPLETS>; $!=0) {
       chomp;
       $triplets{$_} = 1;
     }
-    close(TRIPLETS);
+    defined $_ || $!==0  or
+      $!==EBADF ? dbg("eval: error reading from $filename: $!")
+                : die "error reading from $filename: $!";
+    close(TRIPLETS)  or die "error closing $filename: $!";
 
     $triplets_loaded = 1;
   } # if (!$triplets_loaded)
@@ -266,7 +270,7 @@ sub check_illegal_chars {
 
   $header .= ":raw" unless ($header eq "ALL" || $header =~ /:raw$/);
   my $str = $pms->get($header);
-  return 0 unless $str;
+  return 0 unless $str ne '';
 
   # avoid overlap between tests
   if ($header eq "ALL") {
@@ -294,7 +298,7 @@ sub check_illegal_chars {
 sub gated_through_received_hdr_remover {
   my ($self, $pms) = @_;
 
-  my $txt = $pms->get("Mailing-List");
+  my $txt = $pms->get("Mailing-List",undef);
   if (defined $txt && $txt =~ /^contact \S+\@\S+\; run by ezmlm$/) {
     my $dlto = $pms->get("Delivered-To");
     my $rcvd = $pms->get("Received");
@@ -307,13 +311,14 @@ sub gated_through_received_hdr_remover {
     }
   }
 
-  if ($pms->get("Received") !~ /\S/) {
+  my $rcvd = $pms->get("Received",undef);
+  if (!defined $rcvd) {
     # we have no Received headers!  These tests cannot run in that case
     return 1;
   }
 
   # MSN groups removes Received lines. thanks MSN
-  if ($pms->get("Received") =~ /from groups\.msn\.com \(\S+\.msn\.com /) {
+  if ($rcvd =~ /from groups\.msn\.com \(\S+\.msn\.com /) {
     return 1;
   }
 
@@ -338,10 +343,10 @@ sub _check_for_forged_hotmail_received_headers {
   # Microsoft passes Hotmail mail directly to MSN Group servers.
   return if $self->check_for_msn_groups_headers($pms);
 
-  my $ip = $pms->get('X-Originating-Ip');
+  my $ip = $pms->get('X-Originating-Ip',undef);
   my $IP_ADDRESS = IP_ADDRESS;
 
-  if ($ip =~ /$IP_ADDRESS/) { $ip = 1; } else { $ip = 0; }
+  if (defined $ip && $ip =~ /$IP_ADDRESS/) { $ip = 1; } else { $ip = 0; }
 
   # Hotmail formats its received headers like this:
   # Received: from hotmail.com (f135.law8.hotmail.com [216.33.241.135])
@@ -364,7 +369,7 @@ sub _check_for_forged_hotmail_received_headers {
   } else {
     # check to see if From claimed to be @hotmail.com
     my $from = $pms->get('From:addr');
-    if ($from !~ /hotmail.com/) { return; }
+    if ($from !~ /\bhotmail\.com$/i) { return; }
     $pms->{hotmail_addr_but_no_hotmail_received} = 1;
   }
 }
@@ -387,14 +392,15 @@ sub check_for_no_hotmail_received_headers {
 sub check_for_msn_groups_headers {
   my ($self, $pms) = @_;
 
-  return 0 unless ($pms->get('To') =~ /<(\S+)\@groups\.msn\.com>/i);
+  my $to = $pms->get('To');
+  return 0 unless $to =~ /<(\S+)\@groups\.msn\.com>/i;
   my $listname = $1;
 
-  # from Theo Van Dinter, see
-  # http://www.hughes-family.org/bugzilla/show_bug.cgi?id=591
+  # from Theo Van Dinter, see bug 591
   # Updated by DOS, based on messages from Bob Menschel, bug 4301
 
-  return 0 unless $pms->get('Received') =~ /from mail pickup service by ((?:p\d\d\.)groups\.msn\.com)\b/;
+  return 0 unless $pms->get('Received') =~
+                 /from mail pickup service by ((?:p\d\d\.)groups\.msn\.com)\b/;
   my $server = $1;
 
   if ($listname =~ /^notifications$/) {
@@ -454,14 +460,14 @@ sub check_for_forged_eudoramail_received_headers {
   my ($self, $pms) = @_;
 
   my $from = $pms->get('From:addr');
-  if ($from !~ /eudoramail.com/) { return 0; }
+  if ($from !~ /\beudoramail\.com$/i) { return 0; }
 
   my $rcvd = $pms->get('Received');
   $rcvd =~ s/\s+/ /gs;		# just spaces, simplify the regexp
 
-  my $ip = $pms->get('X-Sender-Ip');
+  my $ip = $pms->get('X-Sender-Ip',undef);
   my $IP_ADDRESS = IP_ADDRESS;
-  if ($ip =~ /$IP_ADDRESS/) { $ip = 1; } else { $ip = 0; }
+  if (defined $ip && $ip =~ /$IP_ADDRESS/) { $ip = 1; } else { $ip = 0; }
 
   # Eudoramail formats its received headers like this:
   # Received: from Unknown/Local ([?.?.?.?]) by shared1-mail.whowhere.com;
@@ -484,13 +490,13 @@ sub check_for_forged_yahoo_received_headers {
   my ($self, $pms) = @_;
 
   my $from = $pms->get('From:addr');
-  if ($from !~ /yahoo\.com$/) { return 0; }
+  if ($from !~ /\byahoo\.com$/i) { return 0; }
 
   my $rcvd = $pms->get('Received');
   
-  if ($pms->get("Resent-From") && $pms->get("Resent-To")) {
+  if ($pms->get("Resent-From") ne '' && $pms->get("Resent-To") ne '') {
     my $xrcvd = $pms->get("X-Received");
-    $rcvd = $xrcvd if $xrcvd;
+    $rcvd = $xrcvd  if $xrcvd ne '';
   }
   $rcvd =~ s/\s+/ /gs;		# just spaces, simplify the regexp
 
@@ -527,7 +533,7 @@ sub check_for_forged_yahoo_received_headers {
   # <http://xent.com/pipermail/fork/> for an example.
   #
   if ($rcvd =~ /\bmailer\d+\.bulk\.scd\.yahoo\.com\b/
-                && $from =~ /\@reply\.yahoo\.com$/) { return 0; }
+                && $from =~ /\@reply\.yahoo\.com$/i) { return 0; }
 
   if ($rcvd =~ /by \w+\.\w+\.yahoo\.com \(\d+\.\d+\.\d+\/\d+\.\d+\.\d+\)(?: with ESMTP)? id \w+/) {
       # possibly sent from "mail this story to a friend"
@@ -541,16 +547,17 @@ sub check_for_forged_juno_received_headers {
   my ($self, $pms) = @_;
 
   my $from = $pms->get('From:addr');
-  if($from !~ /\bjuno.com/) { return 0; }
+  if ($from !~ /\bjuno\.com$/i) { return 0; }
 
-  if($self->gated_through_received_hdr_remover($pms)) { return 0; }
+  if ($self->gated_through_received_hdr_remover($pms)) { return 0; }
 
-  my $xmailer = $pms->get('X-Mailer');
   my $xorig = $pms->get('X-Originating-IP');
+  my $xmailer = $pms->get('X-Mailer');
   my $rcvd = $pms->get('Received');
   my $IP_ADDRESS = IP_ADDRESS;
 
-  if (!$xorig) {  # New style Juno has no X-Originating-IP header, and other changes
+  if ($xorig ne '') {
+    # New style Juno has no X-Originating-IP header, and other changes
     if($rcvd !~ /from.*\b(?:juno|untd)\.com.*[\[\(]$IP_ADDRESS[\]\)].*by/
         && $rcvd !~ / cookie\.(?:juno|untd)\.com /) { return 1; }
     if($xmailer !~ /Juno /) { return 1; }
@@ -649,8 +656,8 @@ sub check_for_missing_to_header {
   my ($self, $pms) = @_;
 
   my $hdr = $pms->get('To');
-  $hdr ||= $pms->get('Apparently-To');
-  return 1 if ($hdr eq '');
+  $hdr = $pms->get('Apparently-To')  if $hdr eq '';
+  return 1  if $hdr eq '';
 
   return 0;
 }
@@ -672,72 +679,6 @@ sub check_for_forged_gw05_received_headers {
   }
 
   0;
-}
-
-sub _check_for_round_the_world_received {
-  my ($self, $pms) = @_;
-  my ($relayer, $relayerip, $relay);
-
-  $pms->{round_the_world_revdns} = 0;
-  $pms->{round_the_world_helo} = 0;
-  my $rcvd = $pms->get('Received');
-  my $IPV4_ADDRESS = IPV4_ADDRESS;
-
-  # TODO: use new Received header parser
-
-  # trad sendmail/postfix fmt:
-  # Received: from hitower.parkgroup.ru (unknown [212.107.207.26]) by
-  #     mail.netnoteinc.com (Postfix) with ESMTP id B8CAC11410E for
-  #     <me@netnoteinc.com>; Fri, 30 Nov 2001 02:42:05 +0000 (Eire)
-  # Received: from fmx1.freemail.hu ([212.46.197.200]) by hitower.parkgroup.ru
-  #     (Lotus Domino Release 5.0.8) with ESMTP id 2001113008574773:260 ;
-  #     Fri, 30 Nov 2001 08:57:47 +1000
-  if ($rcvd =~ /
-  	\nfrom\b.{0,20}\s(\S+\.${CCTLDS_WITH_LOTS_OF_OPEN_RELAYS})\s\(.{0,200}
-  	\nfrom\b.{0,20}\s([-_A-Za-z0-9.]+)\s.{0,30}\[($IPV4_ADDRESS)\]
-  /osix) { $relay = $1; $relayer = $2; $relayerip = $3; goto gotone; }
-
-  return 0;
-
-gotone:
-  my $revdns = $pms->lookup_ptr ($relayerip);
-  if (!defined $revdns) { $revdns = '(unknown)'; }
-
-  dbg("eval: round-the-world: mail relayed through $relay by ".	
-  	"$relayerip (HELO $relayer, rev DNS says $revdns)");
-
-  if ($revdns =~ /\.${ROUND_THE_WORLD_RELAYERS}$/oi) {
-    dbg("eval: round-the-world: yep, I think so (from rev dns)");
-    $pms->{round_the_world_revdns} = 1;
-    return;
-  }
-
-  if ($relayer =~ /\.${ROUND_THE_WORLD_RELAYERS}$/oi) {
-    dbg("eval: round-the-world: yep, I think so (from HELO)");
-    $pms->{round_the_world_helo} = 1;
-    return;
-  }
-
-  dbg("eval: round-the-world: probably not");
-  return;
-}
-
-sub check_for_round_the_world_received_helo {
-  my ($self, $pms) = @_;
-  if (!defined $pms->{round_the_world_helo}) {
-    $self->_check_for_round_the_world_received($pms);
-  }
-  if ($pms->{round_the_world_helo}) { return 1; }
-  return 0;
-}
-
-sub check_for_round_the_world_received_revdns {
-  my ($self, $pms) = @_;
-  if (!defined $pms->{round_the_world_revdns}) {
-    $self->_check_for_round_the_world_received($pms);
-  }
-  if ($pms->{round_the_world_revdns}) { return 1; }
-  return 0;
 }
 
 ###########################################################################
@@ -804,7 +745,7 @@ sub _get_received_header_times {
 
   my (@received);
   my $received = $pms->get('Received');
-  if (defined($received) && length($received)) {
+  if ($received ne '') {
     @received = grep {$_ =~ m/\S/} (split(/\n/,$received));
   }
   # if we have no Received: headers, chances are we're archived mail
@@ -977,7 +918,7 @@ sub check_for_to_in_subject {
   my ($self, $pms, $test) = @_;
 
   my $full_to = $pms->get('To:addr');
-  return 0 unless $full_to;
+  return 0 unless $full_to ne '';
 
   my $subject = $pms->get('Subject');
 
@@ -1053,7 +994,7 @@ sub check_messageid_not_usable {
 # Return true if the count of $hdr headers are within the given range
 sub check_header_count_range {
   my ($self, $pms, $hdr, $min, $max) = @_;
-  my %uniq = ();
+  my %uniq;
   my @hdrs = grep(!$uniq{$_}++, $pms->{msg}->get_header ($hdr));
   return (scalar @hdrs >= $min && scalar @hdrs <= $max);
 }
@@ -1067,7 +1008,7 @@ sub check_unresolved_template {
   for my $header (split(/\n/, $all)) {
     # slightly faster to test in this order
     if ($header =~ /%[A-Z][A-Z_-]/ &&
-	$header !~ /^(?:X-UIDL|X-Face|To|Cc|From|Subject|References|In-Reply-To|(?:X-|Resent-|X-Original-)?Message-Id):/i)
+	$header !~ /^(?:X-VMS-To|X-UIDL|X-Face|To|Cc|From|Subject|References|In-Reply-To|(?:X-|Resent-|X-Original-)?Message-Id):/i)
     {
       return 1;
     }
@@ -1094,8 +1035,8 @@ sub check_ratware_envelope_from {
   my $to = $pms->get('To:addr');
   my $from = $pms->get('EnvelopeFrom:addr');
 
-  return 0 unless ($to && $from);
-  return 0 if ($from =~ /^SRS\d=/);
+  return 0 if $from eq '' || $to eq '';
+  return 0 if $from =~ /^SRS\d=/;
 
   if ($to =~ /^([^@]+)@(.+)$/) {
     my($user,$dom) = ($1,$2);

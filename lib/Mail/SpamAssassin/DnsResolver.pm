@@ -38,6 +38,7 @@ package Mail::SpamAssassin::DnsResolver;
 use strict;
 use warnings;
 use bytes;
+use re 'taint';
 
 use Mail::SpamAssassin;
 use Mail::SpamAssassin::Logger;
@@ -45,16 +46,11 @@ use Mail::SpamAssassin::Logger;
 use Socket;
 use IO::Socket::INET;
 use Errno qw(EADDRINUSE EACCES);
+use Time::HiRes qw(time);
 
 use constant HAS_SOCKET_INET6 => eval { require IO::Socket::INET6; };
 
 our @ISA = qw();
-
-# Load Time::HiRes if it's available
-BEGIN {
-  eval { require Time::HiRes };
-  Time::HiRes->import( qw(time) ) unless $@;
-}
 
 ###########################################################################
 
@@ -97,7 +93,7 @@ sub load_resolver {
                                          Proto     => 'udp',
                                          );
       if ($sock6) {
-        $sock6->close();
+        $sock6->close()  or die "error closing inet6 socket: $!";
         1;
       }
     } ||
@@ -109,7 +105,7 @@ sub load_resolver {
                                          Proto     => 'udp',
                                          );
       if ($sock6) {
-        $sock6->close();
+        $sock6->close()  or die "error closing inet4 socket: $!";
         1;
       }
     };
@@ -134,13 +130,16 @@ sub load_resolver {
       $self->{res}->persistent_udp(0);  # bug 3997
     }
     1;
-  };   #  or warn "dns: eval failed: $@ $!\n";
+  } or do {
+    my $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
+    dbg("dns: eval failed: $eval_stat");
+  };
 
   dbg("dns: no ipv6") if $force_ipv4;
-  dbg("dns: is Net::DNS::Resolver available? " .
-       ($self->{no_resolver} ? "no" : "yes"));
+  dbg("dns: is Net::DNS::Resolver available? %s",
+      $self->{no_resolver} ? "no" : "yes" );
   if (!$self->{no_resolver} && defined $Net::DNS::VERSION) {
-    dbg("dns: Net::DNS version: ".$Net::DNS::VERSION);
+    dbg("dns: Net::DNS version: %s", $Net::DNS::VERSION);
   }
 
   return (!$self->{no_resolver});
@@ -182,7 +181,9 @@ sub connect_sock {
 
   return if $self->{no_resolver};
 
-  $self->{sock}->close() if $self->{sock};
+  if ($self->{sock}) {
+    $self->{sock}->close()  or die "error closing socket: $!";
+  }
   my $sock;
   my $errno;
 
@@ -203,7 +204,7 @@ sub connect_sock {
     $srcaddr = "0.0.0.0";
   }
 
-  dbg("dns: name server: $ns, LocalAddr: $srcaddr");
+  dbg("dns: name server: %s, LocalAddr: %s", $ns,$srcaddr);
 
   # find next available unprivileged port (1024 - 65535)
   # starting at a random value to spread out use of ports
@@ -229,28 +230,28 @@ sub connect_sock {
     if (defined $sock) {  # ok, got it
       last;
     } elsif ($! == EADDRINUSE || $! == EACCES) {  # in use, let's try another source port
-      dbg("dns: UDP port $lport already in use, trying another port");
+      dbg("dns: UDP port %s already in use, trying another port", $lport);
     } else {
-      warn "Error creating a DNS resolver socket: $errno";
+      warn "error creating a DNS resolver socket: $errno";
       goto no_sock;
     }
   }
   if (!defined $sock) {
-    warn "Can't create a DNS resolver socket: $errno";
+    warn "cannot create a DNS resolver socket: $errno";
     goto no_sock;
   }
 
   eval {
     my($bufsiz,$newbufsiz);
     $bufsiz = $sock->sockopt(Socket::SO_RCVBUF)
-      or die "Can't get a resolver socket rx buffer size: $!";
+      or die "cannot get a resolver socket rx buffer size: $!";
     if ($bufsiz >= 32*1024) {
       dbg("dns: resolver socket rx buffer size is %d bytes", $bufsiz);
     } else {
       $sock->sockopt(Socket::SO_RCVBUF, 32*1024)
-        or die "Can't set a resolver socket rx buffer size: $!";
+        or die "cannot set a resolver socket rx buffer size: $!";
       $newbufsiz = $sock->sockopt(Socket::SO_RCVBUF)
-        or die "Can't get a resolver socket rx buffer size: $!";
+        or die "cannot get a resolver socket rx buffer size: $!";
       dbg("dns: resolver socket rx buffer size changed from %d to %d bytes",
           $bufsiz, $newbufsiz);
     }
@@ -319,7 +320,8 @@ sub new_dns_packet {
     $packet = Net::DNS::Packet->new($host, $type, $class);
 
     # a bit noisy, so commented by default...
-    #dbg("dns: new DNS packet time=".time()." host=$host type=$type id=".$packet->id);
+    #dbg("dns: new DNS packet time=%s host=%s type=%s id=%s",
+    #    time, $host, $type, $packet->id);
     1;
   } or do {
     my $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
@@ -334,8 +336,8 @@ sub new_dns_packet {
 # Internal function used only in this file
 ## compute an unique ID for a packet to match the query to the reply
 ## It must use only data that is returned unchanged by the nameserver.
-## Argument is a Net::DNS::Packet that has a non-empty question section
-## return is an object that can be used as a hash key
+## Argument is a Net::DNS::Packet that has a non-empty question section,
+## return is an (opaque) string that can be used as a hash key
 sub _packet_id {
   my ($self, $packet) = @_;
   my $header = $packet->header;
@@ -344,13 +346,27 @@ sub _packet_id {
   my $ques = $questions[0];
 
   if (defined $ques) {
-    return join '/', $id, $ques->qname, $ques->qtype, $ques->qclass;
+    # Bug 6232: Net::DNS::Packet::new is not consistent in keeping data in
+    # sections of a packet either as original bytes or presentation-encoded:
+    # creating a query packet as above in new_dns_packet() keeps label in
+    # non-encoded form, yet on parsing an answer packet, its query section
+    # is converted to presentation form by Net::DNS::Question::parse calling
+    # Net::DNS::Packet::dn_expand and Net::DNS::wire2presentation in turn.
+    # Let's undo the effect of the wire2presentation routine here to make
+    # sure the query section of an answer packet matches the query section
+    # in our packet formed by new_dns_packet():
+    #
+    my $qname = $ques->qname;
+    $qname =~ s/\\([0-9]{3}|.)/length($1)==1 ? $1 : chr($1)/gse;
+    return join '/', $id, $qname, $ques->qtype, $ques->qclass;
+
   } else {
     # odd.  this should not happen, but clearly some DNS servers
     # can return something that Net::DNS interprets as having no
     # question section.  Better support it; just return the
     # (safe) ID part, along with a text token indicating that
     # the packet had no question part.
+    #
     return $id . "NO_QUESTION_IN_PACKET";
   }
 }
@@ -396,6 +412,7 @@ sub bgsend {
     return;
   }
   my $id = $self->_packet_id($pkt);
+  dbg("dns: providing a callback for id: $id");
   $self->{id_to_callback}->{$id} = $cb;
   return $id;
 }
@@ -414,23 +431,23 @@ sub poll_responses {
   return if $self->{no_resolver};
   return if !$self->{sock};
   my $cnt = 0;
-  my $waiting_time = 0;
 
   my $rin = $self->{sock_as_vec};
   my $rout;
 
   for (;;) {
-    my $now_before = time;
-    my ($nfound, $timeleft) = select($rout=$rin, undef, undef, $timeout);
+    my ($nfound, $timeleft);
+    { my $timer;  # collects timestamp when variable goes out of scope
+      if (!defined($timeout) || $timeout > 0)
+        { $timer = $self->{main}->time_method("poll_dns_idle") }
+      ($nfound, $timeleft) = select($rout=$rin, undef, undef, $timeout);
+    }
     if (!defined $nfound || $nfound < 0) {
       warn "dns: select failed: $!";
       return;
     }
 
     my $now = time;
-    if ($now > $now_before && (!defined($timeout) || $timeout > 0)) {
-      $waiting_time += $now - $now_before;
-    }
     $timeout = 0;  # next time around collect whatever is available, then exit
     last  if $nfound == 0;
 
@@ -459,7 +476,7 @@ sub poll_responses {
     }
   }
 
-  return wantarray ? ($cnt, $waiting_time) : $cnt;
+  return $cnt;
 }
 
 ###########################################################################
@@ -548,7 +565,7 @@ Reset socket when done with it.
 sub finish_socket {
   my ($self) = @_;
   if ($self->{sock}) {
-    $self->{sock}->close();
+    $self->{sock}->close()  or die "error closing socket: $!";
     delete $self->{sock};
   }
 }

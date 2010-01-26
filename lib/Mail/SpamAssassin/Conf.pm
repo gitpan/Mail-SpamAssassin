@@ -76,30 +76,36 @@ SpamAssassin handles incoming email messages.
 =cut
 
 package Mail::SpamAssassin::Conf;
+
+use strict;
+use warnings;
+use bytes;
+use re 'taint';
+
 use Mail::SpamAssassin::Util;
 use Mail::SpamAssassin::NetSet;
 use Mail::SpamAssassin::Constants qw(:sa);
 use Mail::SpamAssassin::Conf::Parser;
 use Mail::SpamAssassin::Logger;
 use Mail::SpamAssassin::Util::TieOneStringHash;
+use Mail::SpamAssassin::Util qw(untaint_var);
 use File::Spec;
-
-use strict;
-use warnings;
-use bytes;
 
 use vars qw{
   @ISA $VERSION
   $CONF_TYPE_STRING $CONF_TYPE_BOOL
   $CONF_TYPE_NUMERIC $CONF_TYPE_HASH_KEY_VALUE
   $CONF_TYPE_ADDRLIST $CONF_TYPE_TEMPLATE
+  $CONF_TYPE_STRINGLIST $CONF_TYPE_IPADDRLIST
+  $CONF_TYPE_NOARGS
   $INVALID_VALUE $MISSING_REQUIRED_VALUE
   @MIGRATED_SETTINGS
+  $COLLECT_REGRESSION_TESTS
 
 $TYPE_HEAD_TESTS $TYPE_HEAD_EVALS
 $TYPE_BODY_TESTS $TYPE_BODY_EVALS $TYPE_FULL_TESTS $TYPE_FULL_EVALS
 $TYPE_RAWBODY_TESTS $TYPE_RAWBODY_EVALS $TYPE_URI_TESTS $TYPE_URI_EVALS
-$TYPE_META_TESTS $TYPE_RBL_EVALS
+$TYPE_META_TESTS $TYPE_RBL_EVALS $TYPE_EMPTY_TESTS
 };
 
 @ISA = qw();
@@ -118,6 +124,7 @@ $TYPE_URI_TESTS     = 0x0010;
 $TYPE_URI_EVALS     = 0x0011;
 $TYPE_META_TESTS    = 0x0012;
 $TYPE_RBL_EVALS     = 0x0013;
+$TYPE_EMPTY_TESTS   = 0x0014;
 
 my @rule_types = ("body_tests", "uri_tests", "uri_evals",
                   "head_tests", "head_evals", "body_evals", "full_tests",
@@ -129,12 +136,15 @@ $VERSION = 'bogus';     # avoid CPAN.pm picking up version strings later
 # these are variables instead of constants so that other classes can
 # access them; if they're constants, they'd have to go in Constants.pm
 # TODO: move to Constants.pm?
-$CONF_TYPE_STRING           = 1;
-$CONF_TYPE_BOOL             = 2;
-$CONF_TYPE_NUMERIC          = 3;
-$CONF_TYPE_HASH_KEY_VALUE   = 4;
-$CONF_TYPE_ADDRLIST         = 5;
-$CONF_TYPE_TEMPLATE         = 6;
+$CONF_TYPE_STRING           =  1;
+$CONF_TYPE_BOOL             =  2;
+$CONF_TYPE_NUMERIC          =  3;
+$CONF_TYPE_HASH_KEY_VALUE   =  4;
+$CONF_TYPE_ADDRLIST         =  5;
+$CONF_TYPE_TEMPLATE         =  6;
+$CONF_TYPE_NOARGS           =  7;
+$CONF_TYPE_STRINGLIST       =  8;
+$CONF_TYPE_IPADDRLIST       =  9;
 $MISSING_REQUIRED_VALUE     = -99999999999999;
 $INVALID_VALUE              = -99999999999998;
 
@@ -150,7 +160,7 @@ sub set_default_commands {
   # see "perldoc Mail::SpamAssassin::Conf::Parser" for details on this fmt.
   # push each config item like this, to avoid a POD bug; it can't just accept
   # ( { ... }, { ... }, { ...} ) otherwise POD parsing dies.
-  my @cmds = ();
+  my @cmds;
 
 =head2 SCORING OPTIONS
 
@@ -175,7 +185,7 @@ name is still accepted, but is deprecated.
     setting => 'required_score',
     aliases => ['required_hits'],       # backwards compat
     default => 5,
-    type => $CONF_TYPE_NUMERIC
+    type => $CONF_TYPE_NUMERIC,
   });
 
 =item score SYMBOLIC_TEST_NAME n.nn [ n.nn n.nn n.nn ]
@@ -204,9 +214,9 @@ already set score.  ie: '(3)' means increase the score for this
 rule by 3 points in all score sets.  '(3) (0) (3) (0)' means increase
 the score for this rule by 3 in score sets 0 and 2 only.
 
-If no score is given for a test by the end of the configuration, a
-default score is assigned: a score of 1.0 is used for all tests,
-except those who names begin with 'T_' (this is used to indicate a
+If no score is given for a test by the end of the configuration,
+a default score is assigned: a score of 1.0 is used for all tests,
+except those whose names begin with 'T_' (this is used to indicate a
 rule in testing) which receive 0.01.
 
 Note that test names which begin with '__' are indirect rules used
@@ -232,6 +242,7 @@ it from running.
       # Figure out if we're doing relative scores, remove the parens if we are
       my $relative = 0;
       foreach (@scores) {
+        local ($1);
         if (s/^\((-?\d+(?:\.\d+)?)\)$/$1/) {
 	  $relative = 1;
 	}
@@ -309,7 +320,7 @@ e.g.
 
   push (@cmds, {
     setting => 'whitelist_from',
-    type => $Mail::SpamAssassin::Conf::CONF_TYPE_ADDRLIST
+    type => $CONF_TYPE_ADDRLIST,
   });
 
 =item unwhitelist_from add@ress.com
@@ -330,13 +341,15 @@ e.g.
   push (@cmds, {
     command => 'unwhitelist_from',
     setting => 'whitelist_from',
+    type => $CONF_TYPE_ADDRLIST,
     code => \&Mail::SpamAssassin::Conf::Parser::remove_addrlist_value
   });
 
 =item whitelist_from_rcvd addr@lists.sourceforge.net sourceforge.net
 
-Use this to supplement the whitelist_from addresses with a check against the
-Received headers. The first parameter is the address to whitelist, and the
+Works similarly to whitelist_from, except that in addition to matching
+a sender address, a relay's rDNS name must match too for the whitelisting
+rule to fire. The first parameter is an address to whitelist, and the
 second is a string to match the relay's rDNS.
 
 This string is matched against the reverse DNS lookup used during the handover
@@ -369,13 +382,14 @@ these are often targets for spammer spoofing.
 
   push (@cmds, {
     setting => 'whitelist_from_rcvd',
+    type => $CONF_TYPE_ADDRLIST,
     code => sub {
       my ($self, $key, $value, $line) = @_;
       unless (defined $value && $value !~ /^$/) {
-	return $Mail::SpamAssassin::Conf::MISSING_REQUIRED_VALUE;
+	return $MISSING_REQUIRED_VALUE;
       }
       unless ($value =~ /^\S+\s+\S+$/) {
-	return $Mail::SpamAssassin::Conf::INVALID_VALUE;
+	return $INVALID_VALUE;
       }
       $self->{parser}->add_to_addrlist_rcvd ('whitelist_from_rcvd',
                                         split(/\s+/, $value));
@@ -384,13 +398,14 @@ these are often targets for spammer spoofing.
 
   push (@cmds, {
     setting => 'def_whitelist_from_rcvd',
+    type => $CONF_TYPE_ADDRLIST,
     code => sub {
       my ($self, $key, $value, $line) = @_;
       unless (defined $value && $value !~ /^$/) {
-	return $Mail::SpamAssassin::Conf::MISSING_REQUIRED_VALUE;
+	return $MISSING_REQUIRED_VALUE;
       }
       unless ($value =~ /^\S+\s+\S+$/) {
-	return $Mail::SpamAssassin::Conf::INVALID_VALUE;
+	return $INVALID_VALUE;
       }
       $self->{parser}->add_to_addrlist_rcvd ('def_whitelist_from_rcvd',
                                         split(/\s+/, $value));
@@ -426,7 +441,7 @@ e.g.
 
   push (@cmds, {
     setting => 'whitelist_allows_relays',
-    type => $Mail::SpamAssassin::Conf::CONF_TYPE_ADDRLIST
+    type => $CONF_TYPE_ADDRLIST,
   });
 
 =item unwhitelist_from_rcvd add@ress.com
@@ -448,13 +463,14 @@ e.g.
 
   push (@cmds, {
     setting => 'unwhitelist_from_rcvd',
+    type => $CONF_TYPE_ADDRLIST,
     code => sub {
       my ($self, $key, $value, $line) = @_;
       unless (defined $value && $value !~ /^$/) {
-	return $Mail::SpamAssassin::Conf::MISSING_REQUIRED_VALUE;
+	return $MISSING_REQUIRED_VALUE;
       }
       unless ($value =~ /^(?:\S+(?:\s+\S+)*)$/) {
-	return $Mail::SpamAssassin::Conf::INVALID_VALUE;
+	return $INVALID_VALUE;
       }
       $self->{parser}->remove_from_addrlist_rcvd('whitelist_from_rcvd',
                                         split (/\s+/, $value));
@@ -472,7 +488,7 @@ non-spam, but which the user doesn't want.  Same format as C<whitelist_from>.
 
   push (@cmds, {
     setting => 'blacklist_from',
-    type => $Mail::SpamAssassin::Conf::CONF_TYPE_ADDRLIST
+    type => $CONF_TYPE_ADDRLIST,
   });
 
 =item unblacklist_from add@ress.com
@@ -495,6 +511,7 @@ e.g.
   push (@cmds, {
     command => 'unblacklist_from',
     setting => 'blacklist_from',
+    type => $CONF_TYPE_ADDRLIST,
     code => \&Mail::SpamAssassin::Conf::Parser::remove_addrlist_value
   });
 
@@ -540,15 +557,15 @@ See above.
 
   push (@cmds, {
     setting => 'whitelist_to',
-    type => $Mail::SpamAssassin::Conf::CONF_TYPE_ADDRLIST
+    type => $CONF_TYPE_ADDRLIST,
   });
   push (@cmds, {
     setting => 'more_spam_to',
-    type => $Mail::SpamAssassin::Conf::CONF_TYPE_ADDRLIST
+    type => $CONF_TYPE_ADDRLIST,
   });
   push (@cmds, {
     setting => 'all_spam_to',
-    type => $Mail::SpamAssassin::Conf::CONF_TYPE_ADDRLIST
+    type => $CONF_TYPE_ADDRLIST,
   });
 
 =item blacklist_to add@ress.com
@@ -561,7 +578,7 @@ be blacklisted.  Same format as C<blacklist_from>.
 
   push (@cmds, {
     setting => 'blacklist_to',
-    type => $Mail::SpamAssassin::Conf::CONF_TYPE_ADDRLIST
+    type => $CONF_TYPE_ADDRLIST,
   });
 
 =item whitelist_auth add@ress.com
@@ -572,8 +589,7 @@ that it first verifies that the message was sent by an authorized sender for
 the address, before whitelisting.
 
 Authorization is performed using one of the installed sender-authorization
-schemes: SPF (using C<Mail::SpamAssassin::Plugins::SPF>), Domain Keys (using
-C<Mail::SpamAssassin::Plugins::DomainKeys>), or DKIM (using
+schemes: SPF (using C<Mail::SpamAssassin::Plugins::SPF>), or DKIM (using
 C<Mail::SpamAssassin::Plugins::DKIM>).  Note that those plugins must be active,
 and working, for this to operate.
 
@@ -596,12 +612,12 @@ these are often targets for spammer spoofing.
 
   push (@cmds, {
     setting => 'whitelist_auth',
-    type => $Mail::SpamAssassin::Conf::CONF_TYPE_ADDRLIST
+    type => $CONF_TYPE_ADDRLIST,
   });
 
   push (@cmds, {
     setting => 'def_whitelist_auth',
-    type => $Mail::SpamAssassin::Conf::CONF_TYPE_ADDRLIST
+    type => $CONF_TYPE_ADDRLIST,
   });
 
 =item unwhitelist_auth add@ress.com
@@ -619,6 +635,7 @@ e.g.
   push (@cmds, {
     command => 'unwhitelist_auth',
     setting => 'whitelist_auth',
+    type => $CONF_TYPE_ADDRLIST,
     code => \&Mail::SpamAssassin::Conf::Parser::remove_addrlist_value
   });
 
@@ -654,6 +671,7 @@ header.
 
   push (@cmds, {
     setting => 'rewrite_header',
+    type => $CONF_TYPE_HASH_KEY_VALUE,
     code => sub {
       my ($self, $key, $value, $line) = @_;
       my($hdr, $string) = split(/\s+/, $value, 2);
@@ -690,6 +708,14 @@ ham, or "all" to add to either).  All headers begin with C<X-Spam->
 (so a C<header_name> Foo will generate a header called X-Spam-Foo).
 header_name is restricted to the character set [A-Za-z0-9_-].
 
+The order of C<add_header> configuration options is preserved, inserted
+headers will follow this order of declarations. When combining C<add_header>
+with C<clear_headers> and C<remove_header>, keep in mind that C<add_header>
+appends a new header to the current list, after first removing any existing
+header fields of the same name. Note also that C<add_header>, C<clear_headers>
+and C<remove_header> may appear in multiple .cf files, which are interpreted
+in alphabetic order.
+
 C<string> can contain tags as explained below in the B<TEMPLATE TAGS> section.
 You can also use C<\n> and C<\t> in the header to add newlines and tabulators
 as desired.  A backslash has to be written as \\, any other escaped chars will
@@ -703,7 +729,7 @@ long header lines are possible). The lines will still be properly folded
 You can customize existing headers with B<add_header> (only the specified
 subset of messages will be changed).
 
-See also C<clear_headers> for removing headers.
+See also C<clear_headers> and C<remove_header> for removing headers.
 
 Here are some examples (these are the defaults, note that Checker-Version can
 not be changed or removed):
@@ -719,6 +745,7 @@ not be changed or removed):
     setting => 'add_header',
     code => sub {
       my ($self, $key, $value, $line) = @_;
+      local ($1,$2,$3);
       if ($value !~ /^(ham|spam|all)\s+([A-Za-z0-9_-]+)\s+(.*?)\s*$/) {
         return $INVALID_VALUE;
       }
@@ -728,21 +755,25 @@ not be changed or removed):
         $hline = $1;
       }
       my @line = split(
-                  /\\\\/,     # split at backslashes,
+                  /\\\\/,     # split at double backslashes,
                   $hline."\n" # newline needed to make trailing backslashes work
                 );
-      map {
+      foreach (@line) {
         s/\\t/\t/g; # expand tabs
         s/\\n/\n/g; # expand newlines
         s/\\.//g;   # purge all other escapes
-      } @line;
+      };
       $hline = join("\\", @line);
       chop($hline);  # remove dummy newline again
       if (($type eq "ham") || ($type eq "all")) {
-        $self->{headers_ham}->{$name} = $hline;
+        $self->{headers_ham} =
+          [ grep { lc($_->[0]) ne lc($name) } @{$self->{headers_ham}} ];
+        push(@{$self->{headers_ham}}, [$name, $hline]);
       }
       if (($type eq "spam") || ($type eq "all")) {
-        $self->{headers_spam}->{$name} = $hline;
+        $self->{headers_spam} =
+          [ grep { lc($_->[0]) ne lc($name) } @{$self->{headers_spam}} ];
+        push(@{$self->{headers_spam}}, [$name, $hline]);
       }
     }
   });
@@ -766,6 +797,7 @@ determine that SpamAssassin is running.
     setting => 'remove_header',
     code => sub {
       my ($self, $key, $value, $line) = @_;
+      local ($1,$2);
       if ($value !~ /^(ham|spam|all)\s+([A-Za-z0-9_-]+)\s*$/) {
         return $INVALID_VALUE;
       }
@@ -773,11 +805,14 @@ determine that SpamAssassin is running.
       my ($type, $name) = ($1, $2);
       return if ( $name eq "Checker-Version" );
 
+      $name = lc($name);
       if (($type eq "ham") || ($type eq "all")) {
-        delete $self->{headers_ham}->{$name};
+        $self->{headers_ham} =
+          [ grep { lc($_->[0]) ne $name } @{$self->{headers_ham}} ];
       }
       if (($type eq "spam") || ($type eq "all")) {
-        delete $self->{headers_spam}->{$name};
+        $self->{headers_spam} =
+          [ grep { lc($_->[0]) ne $name } @{$self->{headers_spam}} ];
       }
     }
   });
@@ -788,6 +823,11 @@ Clear the list of headers to be added to messages.  You may use this
 before any B<add_header> options to prevent the default headers from being
 added to the message.
 
+C<add_header>, C<clear_headers> and C<remove_header> may appear in multiple
+.cf files, which are interpreted in alphabetic order, so C<clear_headers>
+in a later file will remove all added headers from previously interpreted
+configuration files, which may or may not be desired.
+
 Note that B<X-Spam-Checker-Version> is not removable because the version
 information is needed by mail administrators and developers to debug
 problems.  Without at least one header, it might not even be possible to
@@ -797,14 +837,16 @@ determine that SpamAssassin is running.
 
   push (@cmds, {
     setting => 'clear_headers',
+    type => $CONF_TYPE_NOARGS,
     code => sub {
       my ($self, $key, $value, $line) = @_;
-      for my $name (keys %{ $self->{headers_ham} }) {
-        delete $self->{headers_ham}->{$name} if $name ne "Checker-Version";
+      unless (!defined $value || $value eq '') {
+        return $INVALID_VALUE;
       }
-      for my $name (keys %{ $self->{headers_spam} }) {
-        delete $self->{headers_spam}->{$name} if $name ne "Checker-Version";
-      }
+      my @h = grep { lc($_->[0]) eq "checker-version" }
+                   @{$self->{headers_ham}};
+      $self->{headers_ham}  = !@h ? [] : [ $h[0] ];
+      $self->{headers_spam} = !@h ? [] : [ $h[0] ];
     }
   });
 
@@ -837,6 +879,7 @@ the original mail into tagged messages.
   push (@cmds, {
     setting => 'report_safe',
     default => 1,
+    type => $CONF_TYPE_NUMERIC,
     code => sub {
       my ($self, $key, $value, $line) = @_;
       if ($value eq '') {
@@ -847,8 +890,9 @@ the original mail into tagged messages.
       }
 
       $self->{report_safe} = $value+0;
-      if (! $self->{report_safe}) {
-        $self->{headers_spam}->{"Report"} = "_REPORT_";
+      if (! $self->{report_safe} &&
+          ! (grep { lc($_->[0]) eq "report" } @{$self->{headers_spam}}) ) {
+        push(@{$self->{headers_spam}}, ["Report", "_REPORT_"]);
       }
     }
   });
@@ -906,7 +950,7 @@ Select the locales to allow from the list below:
   push (@cmds, {
     setting => 'ok_locales',
     default => 'all',
-    type => $CONF_TYPE_STRING
+    type => $CONF_TYPE_STRING,
   });
 
 =item normalize_charset ( 0 | 1)        (default: 0)
@@ -920,6 +964,7 @@ Unicode.  Requires the Encode::Detect module, HTML::Parser version
   push (@cmds, {
     setting => 'normalize_charset',
     default => 0,
+    type => $CONF_TYPE_BOOL,
     code => sub {
 	my ($self, $key, $value, $line) = @_;
 	unless (defined $value && $value !~ /^$/) {
@@ -981,16 +1026,18 @@ the single IP address specified is used, as if the mask was C</32>.
 If a network or host address is prefaced by a C<!> the network or host will be
 excluded (or included) in a first listed match fashion.
 
-Note: 127/8 is always included in trusted_networks, regardless of your config.
+Note: 127/8 and ::1 are always included in trusted_networks, regardless of
+your config.
 
 Examples:
 
    trusted_networks 192.168/16            # all in 192.168.*.*
    trusted_networks 212.17.35.15          # just that host
    trusted_networks !10.0.1.5 10.0.1/24   # all in 10.0.1.* but not 10.0.1.5
+   trusted_networks DEAD:BEEF::/32        # all in that ipv6 prefix
 
 This operates additively, so a C<trusted_networks> line after another one
-will result in all those networks becoming trusted.  To clear out the
+will append new entries to the list of trusted networks.  To clear out the
 existing entries, use C<clear_trusted_networks>.
 
 If C<trusted_networks> is not set and C<internal_networks> is, the value
@@ -1021,16 +1068,7 @@ Otherwise this host, and all further hosts, are consider untrusted.
 
   push (@cmds, {
     setting => 'trusted_networks',
-    code => sub {
-      my ($self, $key, $value, $line) = @_;
-      unless (defined $value && $value !~ /^$/) {
-	return $MISSING_REQUIRED_VALUE;
-      }
-      foreach my $net (split (/\s+/, $value)) {
-        $self->{trusted_networks}->add_cidr ($net);
-      }
-      $self->{trusted_networks_configured} = 1;
-    }
+    type => $CONF_TYPE_IPADDRLIST,
   });
 
 =item clear_trusted_networks
@@ -1041,8 +1079,12 @@ Empty the list of trusted networks.
 
   push (@cmds, {
     setting => 'clear_trusted_networks',
+    type => $CONF_TYPE_NOARGS,
     code => sub {
       my ($self, $key, $value, $line) = @_;
+      unless (!defined $value || $value eq '') {
+        return $INVALID_VALUE;
+      }
       $self->{trusted_networks} = $self->new_netset();
       $self->{trusted_networks_configured} = 0;
     }
@@ -1058,36 +1100,29 @@ C<trusted_networks>, above.
 This value is used when checking 'dial-up' or dynamic IP address
 blocklists, in order to detect direct-to-MX spamming.
 
-Trusted relays that accept mail directly from dial-up connections should
-not be listed in C<internal_networks>. List them only in
+Trusted relays that accept mail directly from dial-up connections
+(i.e. are also performing a role of mail submission agents - MSA)
+should not be listed in C<internal_networks>. List them only in
 C<trusted_networks>.
 
 If C<trusted_networks> is set and C<internal_networks> is not, the value
 of C<trusted_networks> will be used for this parameter.
 
-If neither C<trusted_networks> or C<internal_networks> is set, no addresses
+If neither C<trusted_networks> nor C<internal_networks> is set, no addresses
 will be considered local; in other words, any relays past the machine where
 SpamAssassin is running will be considered external.
 
 Every entry in C<internal_networks> must appear in C<trusted_networks>; in
 other words, C<internal_networks> is always a subset of the trusted set.
 
-Note: 127/8 is always included in internal_networks, regardless of your config.
+Note: 127/8 and ::1 are always included in internal_networks, regardless of
+your config.
 
 =cut
 
   push (@cmds, {
     setting => 'internal_networks',
-    code => sub {
-      my ($self, $key, $value, $line) = @_;
-      unless (defined $value && $value !~ /^$/) {
-	return $MISSING_REQUIRED_VALUE;
-      }
-      foreach my $net (split (/\s+/, $value)) {
-        $self->{internal_networks}->add_cidr ($net);
-      }
-      $self->{internal_networks_configured} = 1;
-    }
+    type => $CONF_TYPE_IPADDRLIST,
   });
 
 =item clear_internal_networks
@@ -1098,8 +1133,12 @@ Empty the list of internal networks.
 
   push (@cmds, {
     setting => 'clear_internal_networks',
+    type => $CONF_TYPE_NOARGS,
     code => sub {
       my ($self, $key, $value, $line) = @_;
+      unless (!defined $value || $value eq '') {
+        return $INVALID_VALUE;
+      }
       $self->{internal_networks} = $self->new_netset();
       $self->{internal_networks_configured} = 0;
     }
@@ -1107,14 +1146,14 @@ Empty the list of internal networks.
 
 =item msa_networks ip.add.re.ss[/mask] ...   (default: none)
 
-The networks or hosts are acting as MSAs in your setup.  B<MSA> means
-that the relay hosts on these networks accept mail from your own users
-and authenticates them appropriately.  These relays will never accept
-mail from hosts that aren't authenticated in some way.  Examples of
-authentication include, IP lists, SMTP AUTH, POP-before-SMTP, etc.
+The networks or hosts which are acting as MSAs in your setup (but not also as
+MX relays).  B<MSA> means that the relay hosts on these networks accept mail
+from your own users and authenticates them appropriately.  These relays
+will never accept mail from hosts that aren't authenticated in some way.
+Examples of authentication include, IP lists, SMTP AUTH, POP-before-SMTP, etc.
 
 All relays found in the message headers after the MSA relay will take
-on the same trusted and internal classifcations as the MSA relay itself,
+on the same trusted and internal classifications as the MSA relay itself,
 as defined by your I<trusted_networks> and I<internal_networks> configuration.
 
 For example, if the MSA relay is trusted and internal so will all of the
@@ -1136,16 +1175,7 @@ external relays being trusted.
 
   push (@cmds, {
     setting => 'msa_networks',
-    code => sub {
-      my ($self, $key, $value, $line) = @_;
-      unless (defined $value && $value !~ /^$/) {
-	return $MISSING_REQUIRED_VALUE;
-      }
-      foreach my $net (split (/\s+/, $value)) {
-        $self->{msa_networks}->add_cidr ($net);
-      }
-      $self->{msa_networks_configured} = 1;
-    }
+    type => $CONF_TYPE_IPADDRLIST,
   });
 
 =item clear_msa_networks
@@ -1156,10 +1186,59 @@ Empty the list of msa networks.
 
   push (@cmds, {
     setting => 'clear_msa_networks',
+    type => $CONF_TYPE_NOARGS,
     code => sub {
       my ($self, $key, $value, $line) = @_;
+      unless (!defined $value || $value eq '') {
+        return $INVALID_VALUE;
+      }
       $self->{msa_networks} = Mail::SpamAssassin::NetSet->new(); # not new_netset
       $self->{msa_networks_configured} = 0;
+    }
+  });
+
+=item originating_ip_headers header ...   (default: X-Yahoo-Post-IP X-Originating-IP X-Apparently-From X-SenderIP)
+
+A list of header field names from which an originating IP address can
+be obtained. For example, webmail servers may record a client IP address
+in X-Originating-IP.
+
+These IP addresses are virtually appended into the Received: chain, so they
+are used in RBL checks where appropriate.
+
+Currently the IP addresses are not added into X-Spam-Relays-* header fields,
+but they may be in the future.
+
+=cut
+
+  push (@cmds, {
+    setting => 'originating_ip_headers',
+    default => [],
+    type => $CONF_TYPE_STRINGLIST,
+    code => sub {
+      my ($self, $key, $value, $line) = @_;
+      unless (defined $value && $value !~ /^$/) {
+	return $MISSING_REQUIRED_VALUE;
+      }
+      push(@{$self->{originating_ip_headers}}, split(/\s+/, $value));
+    }
+  });
+
+=item clear_originating_ip_headers
+
+Empty the list of 'originating IP address' header field names.
+
+=cut
+
+  push (@cmds, {
+    setting => 'clear_originating_ip_headers',
+    type => $CONF_TYPE_NOARGS,
+    code => sub {
+      my ($self, $key, $value, $line) = @_;
+      unless (!defined $value || $value eq '') {
+        return $INVALID_VALUE;
+      }
+      $self->{originating_ip_headers} = [];
     }
   });
 
@@ -1173,20 +1252,26 @@ more trusted relays.  See also C<envelope_sender_header>.
   push (@cmds, {
     setting => 'always_trust_envelope_sender',
     default => 0,
-    type => $CONF_TYPE_BOOL
+    type => $CONF_TYPE_BOOL,
   });
 
 =item skip_rbl_checks ( 0 | 1 )   (default: 0)
 
-By default, SpamAssassin will run RBL checks.  If your ISP already does this
-for you, set this to 1.
+Turning on the skip_rbl_checks setting will disable the DNSEval plugin,
+which implements Real-time Block List (or: Blackhole List) (RBL) lookups.
+
+By default, SpamAssassin will run RBL checks. Individual blocklists may
+be disabled selectively by setting a score of a corresponding rule to 0.
+
+See also a related configuration parameter skip_uribl_checks,
+which controls the URIDNSBL plugin (documented in the URIDNSBL man page).
 
 =cut
 
   push (@cmds, {
     setting => 'skip_rbl_checks',
     default => 0,
-    type => $CONF_TYPE_BOOL
+    type => $CONF_TYPE_BOOL,
   });
 
 =item dns_available { yes | test[: name1 name2...] | no }   (default: test)
@@ -1204,15 +1289,12 @@ You can however specify your own list by specifying
 
 Please note, the DNS test queries for NS records.
 
-SpamAssassin's network rules are run in parallel.  This can cause overhead in
-terms of the number of file descriptors required; it is recommended that the
-minimum limit on file descriptors be raised to at least 256 for safety.
-
 =cut
 
   push (@cmds, {
     setting => 'dns_available',
     default => 'test',
+    type => $CONF_TYPE_STRING,
     code => sub {
       my ($self, $key, $value, $line) = @_;
       if ($value =~ /^test(?::\s+.+)?$/) {
@@ -1240,6 +1322,7 @@ time in number of seconds will tell SpamAssassin how often to retest for working
   push (@cmds, {
     setting => 'dns_test_interval',
     default => 600,
+    type => $CONF_TYPE_NUMERIC,
     code => sub {
       my ($self, $key, $value, $line) = @_;
       if ($value !~ /^\d+$/) { return $INVALID_VALUE; }
@@ -1258,6 +1341,7 @@ servers when there are many spamd workers.
 
   push (@cmds, {
     setting => 'dns_options',
+    type => $CONF_TYPE_HASH_KEY_VALUE,
     code => sub {
       my ($self, $key, $value, $line) = @_;
       my $allowed_opts = "rotate";
@@ -1275,6 +1359,20 @@ servers when there are many spamd workers.
 
 =over 4
 
+=item use_learner ( 0 | 1 )		(default: 1)
+
+Whether to use any machine-learning classifiers with SpamAssassin, such as the
+default 'BAYES_*' rules.  Setting this to 0 will disable use of any and all
+human-trained classifiers.
+
+=cut
+
+  push (@cmds, {
+    setting => 'use_learner',
+    default => 1,
+    type => $CONF_TYPE_BOOL,
+  });
+
 =item use_bayes ( 0 | 1 )		(default: 1)
 
 Whether to use the naive-Bayesian-style classifier built into
@@ -1286,7 +1384,7 @@ operations.
   push (@cmds, {
     setting => 'use_bayes',
     default => 1,
-    type => $CONF_TYPE_BOOL
+    type => $CONF_TYPE_BOOL,
   });
 
 =item use_bayes_rules ( 0 | 1 )		(default: 1)
@@ -1300,7 +1398,7 @@ auto and manual learning enabled.
   push (@cmds, {
     setting => 'use_bayes_rules',
     default => 1,
-    type => $CONF_TYPE_BOOL
+    type => $CONF_TYPE_BOOL,
   });
 
 =item bayes_auto_learn ( 0 | 1 )      (default: 1)
@@ -1318,7 +1416,7 @@ for details on how Bayes auto-learning is implemented by default.
   push (@cmds, {
     setting => 'bayes_auto_learn',
     default => 1,
-    type => $CONF_TYPE_BOOL
+    type => $CONF_TYPE_BOOL,
   });
 
 =item bayes_ignore_header header_name
@@ -1337,6 +1435,8 @@ setting.  Example:
 
   push (@cmds, {
     setting => 'bayes_ignore_header',
+    default => [],
+    type => $CONF_TYPE_STRINGLIST,
     code => sub {
       my ($self, $key, $value, $line) = @_;
       if ($value eq '') {
@@ -1373,7 +1473,7 @@ be listed.
 
   push (@cmds, {
     setting => 'bayes_ignore_from',
-    type => $CONF_TYPE_ADDRLIST
+    type => $CONF_TYPE_ADDRLIST,
   });
 
 =item bayes_ignore_to add@ress.com
@@ -1385,7 +1485,7 @@ to the listed addresses.  See C<bayes_ignore_from> for details.
 
   push (@cmds, {
     setting => 'bayes_ignore_to',
-    type => $CONF_TYPE_ADDRLIST
+    type => $CONF_TYPE_ADDRLIST,
   });
 
 =item bayes_min_ham_num			(Default: 200)
@@ -1401,12 +1501,12 @@ spam, but you can tune these up or down with these two settings.
   push (@cmds, {
     setting => 'bayes_min_ham_num',
     default => 200,
-    type => $CONF_TYPE_NUMERIC
+    type => $CONF_TYPE_NUMERIC,
   });
   push (@cmds, {
     setting => 'bayes_min_spam_num',
     default => 200,
-    type => $CONF_TYPE_NUMERIC
+    type => $CONF_TYPE_NUMERIC,
   });
 
 =item bayes_learn_during_report         (Default: 1)
@@ -1420,7 +1520,7 @@ this option to 0.
   push (@cmds, {
     setting => 'bayes_learn_during_report',
     default => 1,
-    type => $CONF_TYPE_BOOL
+    type => $CONF_TYPE_BOOL,
   });
 
 =item bayes_sql_override_username
@@ -1436,7 +1536,7 @@ group bayes databases.
   push (@cmds, {
     setting => 'bayes_sql_override_username',
     default => '',
-    type => $CONF_TYPE_STRING
+    type => $CONF_TYPE_STRING,
   });
 
 =item bayes_use_hapaxes		(default: 1)
@@ -1450,7 +1550,7 @@ increases database size by about a factor of 8 to 10.
   push (@cmds, {
     setting => 'bayes_use_hapaxes',
     default => 1,
-    type => $CONF_TYPE_BOOL
+    type => $CONF_TYPE_BOOL,
   });
 
 =item bayes_journal_max_size		(default: 102400)
@@ -1465,7 +1565,7 @@ syncing will not occur.
   push (@cmds, {
     setting => 'bayes_journal_max_size',
     default => 102400,
-    type => $CONF_TYPE_NUMERIC
+    type => $CONF_TYPE_NUMERIC,
   });
 
 =item bayes_expiry_max_db_size		(default: 150000)
@@ -1480,7 +1580,7 @@ equivalent to a 8Mb database file.
   push (@cmds, {
     setting => 'bayes_expiry_max_db_size',
     default => 150000,
-    type => $CONF_TYPE_NUMERIC
+    type => $CONF_TYPE_NUMERIC,
   });
 
 =item bayes_auto_expire       		(default: 1)
@@ -1494,7 +1594,7 @@ database surpasses the bayes_expiry_max_db_size value.
   push (@cmds, {
     setting => 'bayes_auto_expire',
     default => 1,
-    type => $CONF_TYPE_BOOL
+    type => $CONF_TYPE_BOOL,
   });
 
 =item bayes_learn_to_journal  	(default: 0)
@@ -1510,12 +1610,72 @@ delay before the updates are actually committed to the Bayes database.
   push (@cmds, {
     setting => 'bayes_learn_to_journal',
     default => 0,
-    type => $CONF_TYPE_BOOL
+    type => $CONF_TYPE_BOOL,
   });
 
 =back
 
 =head2 MISCELLANEOUS OPTIONS
+
+=over 4
+
+=item time_limit n   (default: 300)
+
+Specifies a limit on elapsed time in seconds that SpamAssassin is allowed
+to spend before providing a result. The value may be fractional and must
+not be negative, zero is interpreted as unlimited. The default is 300
+seconds for consistency with the spamd default setting of --timeout-child .
+
+This is a best-effort advisory setting, processing will not be abruptly
+aborted at an arbitrary point in processing when the time limit is exceeded,
+but only on reaching one of locations in the program flow equipped with a
+time test. Currently equipped with the test are the main checking loop,
+asynchronous DNS lookups, plugins which are calling external programs.
+Rule evaluation is guarded by starting a timer (alarm) on each set of
+compiled rules.
+
+When a message is passed to Mail::SpamAssassin::parse, a deadline time
+is established as a sum of current time and the C<time_limit> setting.
+
+This deadline may be overruled by a caller through option 'master_deadline'
+in $suppl_attrib on a call to parse(), possibly providing a more accurate
+deadline taking into account past and expected future processing of a
+message in a mail filtering setup. Note that spamd (and possibly some
+third-party callers of SpamAssassin) will overrule the C<time_limit> setting
+based on its --timeout-child option, unlike the command line C<spamassassin>,
+which has no such command line option.
+
+When a time limit is exceeded, most of the remaining tests will be skipped,
+as well as auto-learning. Whatever tests fired so far will determine the
+final score. The behaviour is similar to short-circuiting with attribute 'on',
+as implemented by a Shortcircuit plugin. A synthetic hit on a rule named
+TIME_LIMIT_EXCEEDED with a near-zero score is generated, so that the report
+will reflect the event.
+
+The C<time_limit> option is a useful protection against excessive processing
+time on certain degenerate or unusually long or complex mail messages, as well
+as against some DoS attacks. It is also needed in time-critical pre-queue
+filtering setups (e.g. milter, proxy, integration with MTA), where message
+processing must finish before a SMTP client times out.  RFC 5321 prescribes
+in section 4.5.3.2.6 the 'DATA Termination' time limit of 10 minutes,
+although it is not unusual to see some SMTP clients abort sooner on waiting
+for a response. A sensible C<time_limit> for a pre-queue filtering setup is
+maybe 50 seconds, assuming that clients are willing to wait at least a minute.
+
+=cut
+
+  push (@cmds, {
+    setting => 'time_limit',
+    default => 300,
+    type => $CONF_TYPE_NUMERIC,
+    code => sub {
+      my ($self, $key, $value, $line) = @_;
+      if ($value !~ /^\d+(?:\.\d*)?$/) { return $INVALID_VALUE }
+      $value = 0+$value;
+      if ($value < 0) { return $INVALID_VALUE }
+      $self->{time_limit} = $value;
+    }
+  });
 
 =over 4
 
@@ -1553,6 +1713,7 @@ win32 depending on the platform in use.
   push (@cmds, {
     setting => 'lock_method',
     default => '',
+    type => $CONF_TYPE_STRING,
     code => sub {
       my ($self, $key, $value, $line) = @_;
       if ($value !~ /^(nfssafe|flock|win32)$/) {
@@ -1567,20 +1728,21 @@ win32 depending on the platform in use.
 
 =item fold_headers ( 0 | 1 )        (default: 1)
 
-By default,  headers added by SpamAssassin will be whitespace folded.
+By default, headers added by SpamAssassin will be whitespace folded.
 In other words, they will be broken up into multiple lines instead of
-one very long one and each other line will have a tabulator prepended
-to mark it as a continuation of the preceding one.
+one very long one and each continuation line will have a tabulator
+prepended to mark it as a continuation of the preceding one.
 
 The automatic wrapping can be disabled here.  Note that this can generate very
-long lines.
+long lines.  RFC 2822 required that header lines do not exceed 998 characters
+(not counting the final CRLF).
 
 =cut
 
   push (@cmds, {
     setting => 'fold_headers',
     default => 1,
-    type => $CONF_TYPE_BOOL
+    type => $CONF_TYPE_BOOL,
   });
 
 =item report_safe_copy_headers header_name ...
@@ -1595,6 +1757,8 @@ separated by spaces, or you can just use multiple lines.
 
   push (@cmds, {
     setting => 'report_safe_copy_headers',
+    default => [],
+    type => $CONF_TYPE_STRINGLIST,
     code => sub {
       my ($self, $key, $value, $line) = @_;
       if ($value eq '') {
@@ -1625,8 +1789,8 @@ in some mailserver configurations.  (More discussion of this can be found
 in bug 2142 and bug 4747 in the SpamAssassin BugZilla.)
 
 To avoid this heuristic failure, the C<envelope_sender_header> setting may be
-helpful.  Name the header that your MTA adds to messages containing the address
-used at the MAIL FROM step of the SMTP transaction.
+helpful.  Name the header that your MTA or MDA adds to messages containing the
+address used at the MAIL FROM step of the SMTP transaction.
 
 If the header in question contains C<E<lt>> or C<E<gt>> characters at the start
 and end of the email address in the right-hand side, as in the SMTP
@@ -1651,7 +1815,7 @@ example:
   push (@cmds, {
     setting => 'envelope_sender_header',
     default => undef,
-    type => $CONF_TYPE_STRING
+    type => $CONF_TYPE_STRING,
   });
 
 =item describe SYMBOLIC_TEST_NAME description ...
@@ -1670,7 +1834,7 @@ length to no more than 50 characters.
     command => 'describe',
     setting => 'descriptions',
     is_frequent => 1,
-    type => $CONF_TYPE_HASH_KEY_VALUE
+    type => $CONF_TYPE_HASH_KEY_VALUE,
   });
 
 =item report_charset CHARSET		(default: unset)
@@ -1683,7 +1847,7 @@ is attached to spam mail messages.
   push (@cmds, {
     setting => 'report_charset',
     default => '',
-    type => $CONF_TYPE_STRING
+    type => $CONF_TYPE_STRING,
   });
 
 =item report ...some text for a report...
@@ -1703,7 +1867,8 @@ Tags can be included as explained above.
   push (@cmds, {
     command => 'report',
     setting => 'report_template',
-    type => $CONF_TYPE_TEMPLATE
+    default => '',
+    type => $CONF_TYPE_TEMPLATE,
   });
 
 =item clear_report_template
@@ -1715,7 +1880,7 @@ Clear the report template.
   push (@cmds, {
     command => 'clear_report_template',
     setting => 'report_template',
-    default => '',
+    type => $CONF_TYPE_NOARGS,
     code => \&Mail::SpamAssassin::Conf::Parser::set_template_clear
   });
 
@@ -1730,7 +1895,7 @@ of the system the scanner is running on is also included.
   push (@cmds, {
     setting => 'report_contact',
     default => 'the administrator of that system',
-    type => $CONF_TYPE_STRING
+    type => $CONF_TYPE_STRING,
   });
 
 =item report_hostname ...hostname to use...
@@ -1744,7 +1909,7 @@ SpamAssassin calls itself.
   push (@cmds, {
     setting => 'report_hostname',
     default => '',
-    type => $CONF_TYPE_STRING
+    type => $CONF_TYPE_STRING,
   });
 
 =item unsafe_report ...some text for a report...
@@ -1764,7 +1929,7 @@ Tags can be used in this template (see above for details).
     command => 'unsafe_report',
     setting => 'unsafe_report_template',
     default => '',
-    type => $CONF_TYPE_TEMPLATE
+    type => $CONF_TYPE_TEMPLATE,
   });
 
 =item clear_unsafe_report_template
@@ -1776,6 +1941,7 @@ Clear the unsafe_report template.
   push (@cmds, {
     command => 'clear_unsafe_report_template',
     setting => 'unsafe_report_template',
+    type => $CONF_TYPE_NOARGS,
     code => \&Mail::SpamAssassin::Conf::Parser::set_template_clear
   });
 
@@ -1814,6 +1980,7 @@ existing system rule from a C<user_prefs> file with C<spamd>.
     setting => 'allow_user_rules',
     is_priv => 1,
     default => 0,
+    type => $CONF_TYPE_BOOL,
     code => sub {
       my ($self, $key, $value, $line) = @_;
       if ($value eq '') {
@@ -1855,6 +2022,7 @@ Example: http://chkpt.zdnet.com/chkpt/whatever/spammer.domain/yo/dude
       }
 
       # convert to qr// while including modifiers
+      local ($1,$2,$3);
       $value =~ /^m?(\W)(.*)(?:\1|>|}|\)|\])(.*?)$/;
       my $pattern = $2;
       $pattern = "(?".$3.")".$pattern if $3;
@@ -1868,15 +2036,27 @@ Example: http://chkpt.zdnet.com/chkpt/whatever/spammer.domain/yo/dude
 =item header SYMBOLIC_TEST_NAME header op /pattern/modifiers	[if-unset: STRING]
 
 Define a test.  C<SYMBOLIC_TEST_NAME> is a symbolic test name, such as
-'FROM_ENDS_IN_NUMS'.  C<header> is the name of a mail header, such as
-'Subject', 'To', etc.
+'FROM_ENDS_IN_NUMS'.  C<header> is the name of a mail header field, such as
+'Subject', 'To', 'From', etc.
 
-Appending C<:raw> to the header name will inhibit decoding of quoted-printable
-or base-64 encoded strings.
+Appending a modifier C<:raw> to a header field name will inhibit decoding of
+quoted-printable or base-64 encoded strings, and will preserve all whitespace
+inside the header string.  The C<:raw> may also be applied to pseudo-headers
+e.g. C<ALL:raw> will return a pristine (unmodified) header section.
 
-Appending C<:addr> to the header name will cause everything except
-the first email address to be removed from the header.  For example,
-all of the following will result in "example@foo":
+Appending a modifier C<:addr> to a header field name will cause everything
+except the first email address to be removed from the header field.  It is
+mainly applicable to header fields 'From', 'Sender', 'To', 'Cc' along with
+their 'Resent-*' counterparts, and the 'Return-Path'.
+
+Appending a modifier C<:name> to a header field name will cause everything
+except the first display name to be removed from the header field.  It is
+mainly applicable to header fields 'From' and 'Resent-From'.
+
+It is syntactically permitted to append more than one modifier to a header
+field name, although currently most combinations achieve no additional effect,
+for example C<From:addr:raw> or C<From:raw:addr> is currently the same as
+C<From:addr> .
 
 =over 4
 
@@ -1921,6 +2101,10 @@ There are several special pseudo-headers that can be specified:
 =over 4
 
 =item C<ALL> can be used to mean the text of all the message's headers.
+Note that all whitespace inside the headers, at line folds, is currently
+compressed into a single space (' ') character. To obtain a pristine
+(unmodified) header section, use C<ALL:raw> - the :raw modifier is documented
+above.
 
 =item C<ToCc> can be used to mean the contents of both the 'To' and 'Cc'
 headers.
@@ -1932,8 +2116,9 @@ on how to set this.
 
 =item C<MESSAGEID> is a symbol meaning all Message-Id's found in the message;
 some mailing list software moves the real 'Message-Id' to 'Resent-Message-Id'
-or 'X-Message-Id', then uses its own one in the 'Message-Id' header.  The value
-returned for this symbol is the text from all 3 headers, separated by newlines.
+or to 'X-Message-Id', then uses its own one in the 'Message-Id' header.
+The value returned for this symbol is the text from all 3 headers, separated
+by newlines.
 
 =item C<X-Spam-Relays-Untrusted>, C<X-Spam-Relays-Trusted>,
 C<X-Spam-Relays-Internal> and C<X-Spam-Relays-External> represent a portable,
@@ -2084,6 +2269,7 @@ name.
     is_priv => 1,
     code => sub {
       my ($self, $key, $value, $line) = @_;
+      local ($1,$2);
       if ($value =~ /^(\S+)\s+(?:rbl)?eval:(.*)$/) {
         my ($name, $fn) = ($1, $2);
 
@@ -2095,7 +2281,7 @@ name.
         }
       }
       elsif ($value =~ /^(\S+)\s+exists:(.*)$/) {
-        $self->{parser}->add_test ($1, "$2 =~ /./", $TYPE_HEAD_TESTS);
+        $self->{parser}->add_test ($1, "defined($2)", $TYPE_HEAD_TESTS);
         $self->{descriptions}->{$1} = "Found a $2 header";
       }
       else {
@@ -2133,6 +2319,7 @@ Define a body eval test.  See above.
     is_priv => 1,
     code => sub {
       my ($self, $key, $value, $line) = @_;
+      local ($1,$2);
       if ($value =~ /^(\S+)\s+eval:(.*)$/) {
         $self->{parser}->add_test ($1, $2, $TYPE_BODY_EVALS);
       }
@@ -2184,10 +2371,10 @@ Define a raw-body pattern test.  C<pattern> is a Perl regular expression.
 Note: as per the header tests, C<#> must be escaped (C<\#>) or else it is
 considered the beginning of a comment.
 
-The 'raw body' of a message is the raw data inside all textual parts.
-The text will be decoded from base64 or quoted-printable encoding,
-but HTML tags and line breaks will still be present.   The pattern
-will be applied line-by-line.
+The 'raw body' of a message is the raw data inside all textual parts. The
+text will be decoded from base64 or quoted-printable encoding, but HTML
+tags and line breaks will still be present.  Multiline expressions will
+need to be used to match strings that are broken by line breaks.
 
 =item rawbody SYMBOLIC_TEST_NAME eval:name_of_eval_method([args])
 
@@ -2201,6 +2388,7 @@ Define a raw-body eval test.  See above.
     is_priv => 1,
     code => sub {
       my ($self, $key, $value, $line) = @_;
+      local ($1,$2);
       if ($value =~ /^(\S+)\s+eval:(.*)$/) {
         $self->{parser}->add_test ($1, $2, $TYPE_RAWBODY_EVALS);
       } else {
@@ -2234,6 +2422,7 @@ Define a full message eval test.  See above.
     is_priv => 1,
     code => sub {
       my ($self, $key, $value, $line) = @_;
+      local ($1,$2);
       if ($value =~ /^(\S+)\s+eval:(.*)$/) {
         $self->{parser}->add_test ($1, $2, $TYPE_FULL_EVALS);
       } else {
@@ -2258,8 +2447,8 @@ rule names, and that there is no C<XOR> operator.
 
 =item meta SYMBOLIC_TEST_NAME boolean arithmetic expression
 
-Can also define a boolean arithmetic expression in terms of other
-tests, with an unhit test having the value "0" and a hit test having a
+Can also define an arithmetic expression in terms of other tests,
+with an unhit test having the value "0" and a hit test having a
 nonzero value.  The value of a hit meta test is that of its arithmetic
 expression.  The value of a hit eval test is that returned by its
 method.  The value of a hit header, body, rawbody, uri, or full test
@@ -2295,6 +2484,38 @@ ignore these for scoring.
         return $INVALID_VALUE;
       }
       $self->{parser}->add_test (@values, $TYPE_META_TESTS);
+    }
+  });
+
+=item reuse SYMBOLIC_TEST_NAME [ OLD_SYMBOLIC_TEST_NAME_1 ... ]
+
+Defines the name of a test that should be "reused" during the scoring
+process. If a message has an X-Spam-Status header that shows a hit for
+this rule or any of the old rule names given, a hit will be added for
+this rule when B<mass-check --reuse> is used. Examples:
+
+C<reuse SPF_PASS>
+
+C<reuse MY_NET_RULE_V2 MY_NET_RULE_V1>
+
+The actual logic for reuse tests is done by
+B<Mail::SpamAssassin::Plugin::Reuse>.
+
+=cut
+
+  push (@cmds, {
+    setting => 'reuse',
+    is_priv => 1,
+    code => sub {
+      my ($self, $key, $value, $line) = @_;
+      if ($value !~ /\s*(\w+)(?:\s+(?:\w+(?:\s+\w+)*))?\s*$/) {
+        return $INVALID_VALUE;
+      }
+      my $rule_name = $1;
+      # don't overwrite tests, just define them so scores, priorities work
+      if (!exists $self->{tests}->{$rule_name}) {
+        $self->{parser}->add_test($rule_name, undef, $TYPE_EMPTY_TESTS);
+      }
     }
   });
 
@@ -2345,7 +2566,7 @@ Only affects header, body, rawbody, uri, and full tests.
     setting => 'tflags',
     is_frequent => 1,
     is_priv => 1,
-    type => $CONF_TYPE_HASH_KEY_VALUE
+    type => $CONF_TYPE_HASH_KEY_VALUE,
   });
 
 =item priority SYMBOLIC_TEST_NAME n
@@ -2363,7 +2584,7 @@ internally, and should not be used.
   push (@cmds, {
     setting => 'priority',
     is_priv => 1,
-    type => $CONF_TYPE_HASH_KEY_VALUE
+    type => $CONF_TYPE_HASH_KEY_VALUE,
   });
 
 =back
@@ -2426,8 +2647,9 @@ general running of SpamAssassin.
     setting => 'test',
     is_admin => 1,
     code => sub {
-      return unless defined($Mail::SpamAssassin::Conf::COLLECT_REGRESSION_TESTS);
+      return unless defined $COLLECT_REGRESSION_TESTS;
       my ($self, $key, $value, $line) = @_;
+      local ($1,$2,$3);
       if ($value !~ /^(\S+)\s+(ok|fail)\s+(.*)$/) { return $INVALID_VALUE; }
       $self->{parser}->add_regression_test($1, $2, $3);
     }
@@ -2437,7 +2659,7 @@ general running of SpamAssassin.
 
 All DNS queries are made at the beginning of a check and we try to read
 the results at the end.  This value specifies the maximum period of time
-(in seconds) to wait for an DNS query.  If most of the DNS queries have
+(in seconds) to wait for a DNS query.  If most of the DNS queries have
 succeeded for a particular message, then SpamAssassin will not wait for
 the full period to avoid wasting time on unresponsive server(s), but will
 shrink the timeout according to a percentage of queries already completed.
@@ -2491,7 +2713,8 @@ subdomain of the specified zone.
         $self->{by_zone}{$zone}{rbl_timeout}     = $1+0;
         $self->{by_zone}{$zone}{rbl_timeout_min} = $2+0  if defined $2;
       }
-    }
+    },
+    type => $CONF_TYPE_NUMERIC,
   });
 
 =item util_rb_tld tld1 tld2 ...
@@ -2547,6 +2770,33 @@ fed.us, etc.
     }
   });
 
+=item util_rb_3tld 3tld1.some.tld 3tld2.other.tld ...
+
+This option allows the addition of new 3rd-level TLDs (3TLD) to the
+RegistrarBoundaries code.  Updates to the list usually happen when new
+versions of SpamAssassin are released, but sometimes it's necessary to add in
+new 3TLDs faster than a release can occur.  3TLDs include things like
+demon.co.uk, plc.co.im, etc.
+
+=cut
+
+  push (@cmds, {
+    setting => 'util_rb_3tld',
+    is_admin => 1,
+    code => sub {
+      my ($self, $key, $value, $line) = @_;
+      unless (defined $value && $value !~ /^$/) {
+	return $MISSING_REQUIRED_VALUE;
+      }
+      unless ($value =~ /^[^\s.]+\.[^\s.]+\.[^\s.]+(?:\s+[^\s.]+\.[^\s.]+)*$/) {
+	return $INVALID_VALUE;
+      }
+      foreach (split(/\s+/, $value)) {
+        $Mail::SpamAssassin::Util::RegistrarBoundaries::THREE_LEVEL_DOMAINS{lc $_} = 1;
+      }
+    }
+  });
+
 =item bayes_path /path/filename	(default: ~/.spamassassin/bayes)
 
 This is the directory and filename for Bayes databases.  Several databases
@@ -2565,6 +2815,7 @@ more effective with individual user databases.
     setting => 'bayes_path',
     is_admin => 1,
     default => '__userstate__/bayes',
+    type => $CONF_TYPE_STRING,
     code => sub {
       my ($self, $key, $value, $line) = @_;
       unless (defined $value && $value !~ /^$/) {
@@ -2583,7 +2834,8 @@ The file mode bits used for the Bayesian filtering database files.
 
 Make sure you specify this using the 'x' mode bits set, as it may also be used
 to create directories.  However, if a file is created, the resulting file will
-not have any execute bits set (the umask is set to 111).
+not have any execute bits set (the umask is set to 111). The argument is a
+string of octal digits, it is converted to a numeric value internally.
 
 =cut
 
@@ -2591,7 +2843,12 @@ not have any execute bits set (the umask is set to 111).
     setting => 'bayes_file_mode',
     is_admin => 1,
     default => '0700',
-    type => $CONF_TYPE_STRING
+    type => $CONF_TYPE_NUMERIC,
+    code => sub {
+      my ($self, $key, $value, $line) = @_;
+      if ($value !~ /^0?\d{3}$/) { return $INVALID_VALUE }
+      $self->{bayes_file_mode} = untaint_var($value);
+    }
   });
 
 =item bayes_store_module Name::Of::BayesStore::Module
@@ -2609,8 +2866,10 @@ module.
     setting => 'bayes_store_module',
     is_admin => 1,
     default => '',
+    type => $CONF_TYPE_STRING,
     code => sub {
       my ($self, $key, $value, $line) = @_;
+      local ($1);
       if ($value !~ /^([_A-Za-z0-9:]+)$/) { return $INVALID_VALUE; }
       $self->{bayes_store_module} = $1;
     }
@@ -2628,7 +2887,7 @@ This option give the connect string used to connect to the SQL based Bayes stora
     setting => 'bayes_sql_dsn',
     is_admin => 1,
     default => '',
-    type => $CONF_TYPE_STRING
+    type => $CONF_TYPE_STRING,
   });
 
 =item bayes_sql_username
@@ -2643,7 +2902,7 @@ This option gives the username used by the above DSN.
     setting => 'bayes_sql_username',
     is_admin => 1,
     default => '',
-    type => $CONF_TYPE_STRING
+    type => $CONF_TYPE_STRING,
   });
 
 =item bayes_sql_password
@@ -2658,7 +2917,7 @@ This option gives the password used by the above DSN.
     setting => 'bayes_sql_password',
     is_admin => 1,
     default => '',
-    type => $CONF_TYPE_STRING
+    type => $CONF_TYPE_STRING,
   });
 
 =item bayes_sql_username_authorized ( 0 | 1 )  (default: 0)
@@ -2680,7 +2939,7 @@ bayes_sql_override_username config option.
     setting => 'bayes_sql_username_authorized',
     is_admin => 1,
     default => 0,
-    type => $CONF_TYPE_BOOL
+    type => $CONF_TYPE_BOOL,
   });
 
 =item user_scores_dsn DBI:databasetype:databasename:hostname:port
@@ -2690,7 +2949,7 @@ used to connect.  Example: C<DBI:mysql:spamassassin:localhost>
 
 If you load user scores from an LDAP directory, this will set the DSN used to
 connect. You have to write the DSN as an LDAP URL, the components being the
-host and port to connect to, the base DN for the seasrch, the scope of the
+host and port to connect to, the base DN for the search, the scope of the
 search (base, one or sub), the single attribute being the multivalued attribute
 used to hold the configuration data (space separated pairs of key and value,
 just as in a file) and finally the filter being the expression used to filter
@@ -2706,7 +2965,7 @@ Example: C<ldap://localhost:389/dc=koehntopp,dc=de?spamassassinconfig?uid=__USER
     setting => 'user_scores_dsn',
     is_admin => 1,
     default => '',
-    type => $CONF_TYPE_STRING
+    type => $CONF_TYPE_STRING,
   });
 
 =item user_scores_sql_username username
@@ -2719,7 +2978,7 @@ The authorized username to connect to the above DSN.
     setting => 'user_scores_sql_username',
     is_admin => 1,
     default => '',
-    type => $CONF_TYPE_STRING
+    type => $CONF_TYPE_STRING,
   });
 
 =item user_scores_sql_password password
@@ -2732,7 +2991,7 @@ The password for the database username, for the above DSN.
     setting => 'user_scores_sql_password',
     is_admin => 1,
     default => '',
-    type => $CONF_TYPE_STRING
+    type => $CONF_TYPE_STRING,
   });
 
 =item user_scores_sql_custom_query query
@@ -2768,7 +3027,7 @@ value may be null.
 
 =back
 
-The query must be one one continuous line in order to parse correctly.
+The query must be one continuous line in order to parse correctly.
 
 Here are several example queries, please note that these are broken up
 for easy reading, in your config it should be one continuous line.
@@ -2794,7 +3053,8 @@ C<SELECT preference, value FROM _TABLE_ WHERE username = _USERNAME_ OR username 
   push (@cmds, {
     setting => 'user_scores_sql_custom_query',
     is_admin => 1,
-    type => $CONF_TYPE_STRING
+    default => undef,
+    type => $CONF_TYPE_STRING,
   });
 
 =item user_scores_ldap_username
@@ -2810,7 +3070,7 @@ Example: C<cn=master,dc=koehntopp,dc=de>
     setting => 'user_scores_ldap_username',
     is_admin => 1,
     default => '',
-    type => $CONF_TYPE_STRING
+    type => $CONF_TYPE_STRING,
   });
 
 =item user_scores_ldap_password
@@ -2824,7 +3084,7 @@ to the empty string ("").
     setting => 'user_scores_ldap_password',
     is_admin => 1,
     default => '',
-    type => $CONF_TYPE_STRING
+    type => $CONF_TYPE_STRING,
   });
 
 =item loadplugin PluginModuleName [/path/module.pm]
@@ -2849,13 +3109,18 @@ See C<Mail::SpamAssassin::Plugin> for more details on writing plugins.
       if ($value eq '') {
         return $MISSING_REQUIRED_VALUE;
       }
+      my ($package, $path);
+      local ($1,$2);
       if ($value =~ /^(\S+)\s+(\S+)$/) {
-        $self->load_plugin ($1, $2);
-      } elsif ($value =~ /^(?:\S+)$/) {
-        $self->load_plugin ($value);
+        ($package, $path) = ($1, $2);
+      } elsif ($value =~ /^\S+$/) {
+        ($package, $path) = ($value, undef);
       } else {
 	return $INVALID_VALUE;
       }
+      # is blindly untainting safe?  it is no worse than before
+      $_ = untaint_var($_)  for ($package,$path);
+      $self->load_plugin ($package, $path);
     }
   });
 
@@ -2874,14 +3139,34 @@ the filesystem.
       if ($value eq '') {
         return $MISSING_REQUIRED_VALUE;
       }
+      my ($package, $path);
+      local ($1,$2);
       if ($value =~ /^(\S+)\s+(\S+)$/) {
-        $self->load_plugin ($1, $2, 1);
-      } elsif ($value =~ /^(?:\S+)$/) {
-        $self->load_plugin ($value, undef, 1);
+        ($package, $path) = ($1, $2);
+      } elsif ($value =~ /^\S+$/) {
+        ($package, $path) = ($value, undef);
       } else {
 	return $INVALID_VALUE;
       }
+      # is blindly untainting safe?  it is no worse than before
+      $_ = untaint_var($_)  for ($package,$path);
+      $self->load_plugin ($package, $path, 1);
     }
+  });
+
+=item ignore_always_matching_regexps         (Default: 0)
+
+Ignore any rule which contains a regexp which always matches.
+Currently only catches regexps which contain '||', or which begin or
+end with a '|'.  Also ignore rules with C<some> combinatorial explosions.
+
+=cut
+
+  push (@cmds, {
+    setting  => 'ignore_always_matching_regexps',
+    is_admin => 1,
+    default  => 0,
+    type     => $CONF_TYPE_BOOL,
   });
 
 =back
@@ -2895,12 +3180,12 @@ the filesystem.
 Include configuration lines from C<filename>.   Relative paths are considered
 relative to the current configuration file or user preferences file.
 
-=item if (conditional perl expression)
+=item if (boolean perl expression)
 
 Used to support conditional interpretation of the configuration
-file. Lines between this and a corresponding C<else> or C<endif> line,
-will be ignored unless the conditional expression evaluates as true
-(in the perl sense; that is, defined and non-0).
+file. Lines between this and a corresponding C<else> or C<endif> line
+will be ignored unless the expression evaluates as true
+(in the perl sense; that is, defined and non-0 and non-empty string).
 
 The conditional accepts a limited subset of perl for security -- just enough to
 perform basic arithmetic comparisons.  The following input is accepted:
@@ -2925,6 +3210,13 @@ C<3.004080>.
 
 This is a function call that returns C<1> if the plugin named
 C<Name::Of::Plugin> is loaded, or C<undef> otherwise.
+
+=item can(Name::Of::Package::function_name)
+
+This is a function call that returns C<1> if the perl package named
+C<Name::Of::Package> includes a function called C<function_name>, or C<undef>
+otherwise.  Note that packages can be SpamAssassin plugins or built-in classes,
+there's no difference in this respect.
 
 =back
 
@@ -2954,7 +3246,7 @@ An alias for C<if plugin(PluginModuleName)>.
 Used to support conditional interpretation of the configuration
 file. Lines between this and a corresponding C<endif> line,
 will be ignored unless the conditional expression evaluates as false
-(in the perl sense; that is, not defined and 0).
+(in the perl sense; that is, not defined and not 0 and non-empty string).
 
 =item require_version n.nnnnnn
 
@@ -2971,6 +3263,7 @@ version.  So 3.0.0 is C<3.000000>, and 3.4.80 is C<3.004080>.
 
   push (@cmds, {
     setting => 'require_version',
+    type => $CONF_TYPE_STRING,
     code => sub {
     }
   });
@@ -3043,6 +3336,10 @@ optional, and the default is shown below.
  _CONTACTADDRESS_  contents of the 'report_contact' setting
  _HEADER(NAME)_    includes the value of a message header.  value is the same
                    as is found for header rules (see elsewhere in this doc)
+ _TIMING_          timing breakdown report
+ _ADDEDHEADERHAM_  resulting header fields as requested by add_header for spam
+ _ADDEDHEADERSPAM_ resulting header fields as requested by add_header for ham
+ _ADDEDHEADER_     same as ADDEDHEADERHAM for ham or ADDEDHEADERSPAM for spam
 
 If a tag reference uses the name of a tag which is not in this list or defined
 by a loaded plugin, the reference will be left intact and not replaced by any
@@ -3124,7 +3421,7 @@ distances that are greater than 9.)
 ###########################################################################
 
 # settings that were once part of core, but are now in (possibly-optional)
-# bundled plugins. these will be warned about, but do not generate a fatal
+# bundled plugins. These will be warned about, but do not generate a fatal
 # error when "spamassassin --lint" is run like a normal syntax error would.
 
 @MIGRATED_SETTINGS = qw{
@@ -3183,17 +3480,20 @@ sub new {
   $self->{rewrite_header} = { };
   $self->{want_rebuild_for_type} = { };
   $self->{user_defined_rules} = { };
-  $self->{headers_spam} = { };
-  $self->{headers_ham} = { };
+  $self->{headers_spam} = [ ];
+  $self->{headers_ham} = [ ];
 
   $self->{bayes_ignore_headers} = [ ];
   $self->{bayes_ignore_from} = { };
   $self->{bayes_ignore_to} = { };
 
   $self->{whitelist_auth} = { };
+  $self->{def_whitelist_auth} = { };
   $self->{whitelist_from} = { };
   $self->{whitelist_allows_relays} = { };
   $self->{blacklist_from} = { };
+  $self->{whitelist_from_rcvd} = { };
+  $self->{def_whitelist_from_rcvd} = { };
 
   $self->{blacklist_to} = { };
   $self->{whitelist_to} = { };
@@ -3207,10 +3507,11 @@ sub new {
   $self->{internal_networks_configured} = 0;
 
   # Make sure we add in X-Spam-Checker-Version
-  $self->{headers_spam}->{"Checker-Version"} =
-                "SpamAssassin _VERSION_ (_SUBVERSION_) on _HOSTNAME_";
-  $self->{headers_ham}->{"Checker-Version"} =
-                $self->{headers_spam}->{"Checker-Version"};
+  { my $r = [ "Checker-Version",
+              "SpamAssassin _VERSION_ (_SUBVERSION_) on _HOSTNAME_" ];
+    push(@{$self->{headers_spam}}, $r);
+    push(@{$self->{headers_ham}},  $r);
+  }
 
   # these should potentially be settable by end-users
   # perhaps via plugin?
@@ -3351,7 +3652,7 @@ sub trim_rules {
     push(@rules_to_keep, $self->add_meta_depends($meta))
   }
 
-  my %rules_to_keep_hash = ();
+  my %rules_to_keep_hash;
 
   foreach my $rule (@rules_to_keep) {
     $rules_to_keep_hash{$rule} = 1;
@@ -3368,7 +3669,7 @@ sub trim_rules {
 sub add_meta_depends {
   my ($self, $meta) = @_;
 
-  my @rules = ();
+  my @rules;
   my @tokens = $self->get_rule_value('meta_tests', $meta) =~ m/(\w+)/g;
 
   @tokens = grep(!/^\d+$/, @tokens);
@@ -3457,9 +3758,23 @@ sub finish_parsing {
 
 ###########################################################################
 
+sub found_any_rules {
+  my ($self) = @_;
+  if (!defined $self->{found_any_rules}) {
+    $self->{found_any_rules} = (scalar keys %{$self->{tests}} > 0);
+  }
+  return $self->{found_any_rules};
+}
+
+###########################################################################
+
 sub get_description_for_rule {
   my ($self, $rule) = @_;
-  return $self->{descriptions}->{$rule};
+  # as silly as it looks, localized $1 here prevents an outer $1 from getting
+  # tainted by the expression or assignment in the next line, bug 6148
+  local($1);
+  my $rule_descr = $self->{descriptions}->{$rule};
+  return $rule_descr;
 }
 
 ###########################################################################
@@ -3514,7 +3829,9 @@ sub load_plugin {
   if ($path) {
     $path = $self->{parser}->fix_path_relative_to_current_file($path);
   }
-  $self->{main}->{plugins}->load_plugin ($package, $path, $silent);
+  # it wouldn't hurt to do some checking on validity of $package
+  # and $path before untainting them
+  $self->{main}->{plugins}->load_plugin(untaint_var($package), $path, $silent);
 }
 
 sub load_plugin_succeeded {
@@ -3553,7 +3870,7 @@ sub clone {
     internal_networks trusted_networks msa_networks 
   );
 
-  my %done = ();
+  my %done;
 
   # special cases.  first, skip anything that cannot be changed
   # by users, and the stuff we take care of here
@@ -3589,6 +3906,7 @@ sub clone {
   # and now, copy over all the rest -- the less complex cases.
   while(my($k,$v) = each %{$source}) {
     next if exists $done{$k};   # we handled it above
+    $done{$k} = undef;
     my $i = ref($v);
 
     # Not a reference, or a scalar?  Just copy the value over.
@@ -3608,6 +3926,13 @@ sub clone {
       # throw a warning for debugging -- should never happen in normal usage
       warn "config: dup unknown type $k, $i\n";
     }
+  }
+
+  foreach my $cmd (@{$self->{registered_commands}}) {
+    my $k = $cmd->{setting};
+    next if exists $done{$k};   # we handled it above
+    $done{$k} = undef;
+    $dest->{$k} = $source->{$k};
   }
 
   # scoresets
@@ -3636,8 +3961,8 @@ sub free_uncompiled_rule_source {
         !$self->{allow_user_rules})
   {
     delete $self->{if_stack};
-    delete $self->{source_file};
-    delete $self->{meta_dependencies};
+    #delete $self->{source_file};
+    #delete $self->{meta_dependencies};
   }
 }
 
@@ -3645,6 +3970,7 @@ sub new_netset {
   my ($self) = @_;
   my $set = Mail::SpamAssassin::NetSet->new();
   $set->add_cidr ('127/8');
+  $set->add_cidr ('::1');
   return $set;
 }
 
@@ -3659,6 +3985,13 @@ sub finish {
 ###########################################################################
 
 sub sa_die { Mail::SpamAssassin::sa_die(@_); }
+
+###########################################################################
+
+# subroutines available to conditionalize rules, for example:
+#   if (can(Mail::SpamAssassin::Conf::feature_originating_ip_headers))
+
+sub feature_originating_ip_headers { 1 }
 
 ###########################################################################
 

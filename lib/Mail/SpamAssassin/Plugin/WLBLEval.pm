@@ -23,6 +23,7 @@ use Mail::SpamAssassin::Logger;
 use strict;
 use warnings;
 use bytes;
+use re 'taint';
 
 use vars qw(@ISA);
 @ISA = qw(Mail::SpamAssassin::Plugin);
@@ -49,6 +50,7 @@ sub new {
   $self->register_eval_rule("check_forged_in_whitelist");
   $self->register_eval_rule("check_from_in_default_whitelist");
   $self->register_eval_rule("check_forged_in_default_whitelist");
+  $self->register_eval_rule("check_mailfrom_matches_rcvd");
 
   return $self;
 }
@@ -120,6 +122,8 @@ sub check_from_in_list {
   return 0;
 }
 
+# TODO: this should be moved to a utility module off PerMsgStatus,
+# rather than a plugin API; it's used in Bayes.pm as a utility
 sub check_wb_list {
   my ($self, $params) = @_;
 
@@ -230,6 +234,59 @@ sub _check_from_in_default_whitelist {
 
 ###########################################################################
 
+# check if domain name of an envelope sender address matches a domain name
+# of the first untrusted relay (if any), or any trusted relay otherwise
+sub check_mailfrom_matches_rcvd {
+  my ($self, $pms) = @_;
+  my $sender = $pms->get("EnvelopeFrom:addr");
+  return 0  if $sender eq '';
+  return $self->_check_addr_matches_rcvd($pms,$sender);
+}
+
+# check if domain name of a supplied e-mail address matches a domain name
+# of the first untrusted relay (if any), or any trusted relay otherwise
+sub _check_addr_matches_rcvd {
+  my ($self, $pms, $addr) = @_;
+
+  local $1;
+  return 0  if $addr !~ / \@ ( [^\@]+ \. [^\@]+ ) \z/x;
+  my $addr_domain = lc $1;
+
+  my @relays;
+  if ($pms->{num_relays_untrusted} > 0) {
+    # check against the first untrusted, if present
+    @relays = $pms->{relays_untrusted}->[0];
+  } elsif ($pms->{num_relays_trusted} > 0) {
+    # otherwise try all trusted ones, but only do so
+    # if there are no untrusted relays to avoid forgery
+    push(@relays, @{$pms->{relays_trusted}});
+  }
+  return 0  if !@relays;
+
+  my($adrh,$adrd) =
+    Mail::SpamAssassin::Util::RegistrarBoundaries::split_domain($addr_domain);
+  my $match = 0;
+  my $any_tried = 0;
+  foreach my $rly (@relays) {
+    my $relay_rdns = $rly->{lc_rdns};
+    next  if !defined $relay_rdns || $relay_rdns eq '';
+    my($rlyh,$rlyd) =
+      Mail::SpamAssassin::Util::RegistrarBoundaries::split_domain($relay_rdns);
+    $any_tried = 1;
+    if ($adrd eq $rlyd) {
+      dbg("rules: $addr MATCHES relay $relay_rdns ($adrd)");
+      $match = 1; last;
+    }
+  }
+  if ($any_tried && !$match) {
+    dbg("rules: %s does NOT match relay(s) %s",
+        $addr, join(', ', map { $_->{lc_rdns} } @relays));
+  }
+  return $match;
+}
+
+###########################################################################
+
 # look up $addr and trusted relays in a whitelist with rcvd
 # note if it appears to be a forgery and $addr is not in any-relay list
 sub _check_whitelist_rcvd {
@@ -238,7 +295,7 @@ sub _check_whitelist_rcvd {
   # we can only match this if we have at least 1 trusted or untrusted header
   return 0 unless ($pms->{num_relays_untrusted}+$pms->{num_relays_trusted} > 0);
 
-  my @relays = ();
+  my @relays;
   # try the untrusted one first
   if ($pms->{num_relays_untrusted} > 0) {
     @relays = $pms->{relays_untrusted}->[0];

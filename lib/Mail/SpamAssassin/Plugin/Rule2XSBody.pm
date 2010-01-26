@@ -42,6 +42,7 @@ use Mail::SpamAssassin::Plugin::OneLineBodyRuleType;
 use strict;
 use warnings;
 use bytes;
+use re 'taint';
 
 use vars qw(@ISA);
 @ISA = qw(Mail::SpamAssassin::Plugin);
@@ -112,10 +113,16 @@ sub setup_test_set_pri {
   $conf->{skip_body_rules}   ||= { };
   $conf->{need_one_line_sub} ||= { };
 
+  my %longname;
+  foreach my $nameandflags (keys %{$hasrules}) {
+    my $name = $nameandflags; $name =~ s/,\[.*?\]$//;
+    $longname{$name} = $nameandflags;
+  }
+
   my $found = 0;
   foreach my $name (keys %{$rules}) {
     my $rule = $rules->{$name};
-    my $comprule = $hasrules->{$name};
+    my $comprule = $hasrules->{$longname{$name} || ''};
     $rule =~ s/\#/\[hash\]/gs;
 
     if (!$comprule) { 
@@ -217,15 +224,27 @@ sub run_body_fast_scan {
       # way to support this and still work with UTF-8 ok
       my $results = &{$modname.'::scan'}(lc $line);
 
-      my %alreadydone = ();
-      foreach my $rulename (@{$results})
+      my %alreadydone;
+      foreach my $ruleandflags (@{$results})
       {
         # only try each rule once per line
-        next if exists $alreadydone{$rulename};
-        $alreadydone{$rulename} = undef;
+        next if exists $alreadydone{$ruleandflags};
+        $alreadydone{$ruleandflags} = undef;
+
+        my $rulename = $ruleandflags;
+        my $flags = ($rulename =~ s/,\[(.*?)\]$//)?$1:'';
 
         # ignore 0-scored rules, of course
         next unless $scoresptr->{$rulename};
+
+        # non-lossy rules; the re2c version matches exactly what
+        # the perl regexp matches, so we don't need to perform
+        # a validation match to follow up; it's a hit!
+        if ($flags =~ /\bl=0/) {
+          $scanner->got_hit($rulename, "BODY: ", ruletype => "one_line_body");
+          # TODO: hit_rule_plugin_code? it's just debugging really
+          next;
+        }
 
 	# dbg("zoom: base found for $rulename: $line");
 	# }
@@ -259,7 +278,7 @@ sub finish {
 
   my $miss = $self->{rule2xs_misses};
   foreach my $r (sort { $miss->{$a} <=> $miss->{$b} } keys %{$miss}) {
-    dbg "zoom: ".$miss->{$r}." misses for rule2xs rule $r\n";
+    dbg("zoom: %s misses for rule2xs rule %s", $miss->{$r},$r);
   }
 }
 

@@ -17,12 +17,15 @@
 
 package Mail::SpamAssassin::Plugin::MIMEEval;
 
-use Mail::SpamAssassin::Plugin;
-use Mail::SpamAssassin::Locales;
-use Mail::SpamAssassin::Constants qw(:sa CHARSETS_LIKELY_TO_FP_AS_CAPS);
 use strict;
 use warnings;
 use bytes;
+use re 'taint';
+
+use Mail::SpamAssassin::Plugin;
+use Mail::SpamAssassin::Locales;
+use Mail::SpamAssassin::Constants qw(:sa CHARSETS_LIKELY_TO_FP_AS_CAPS);
+use Mail::SpamAssassin::Util qw(untaint_var);
 
 use vars qw(@ISA);
 @ISA = qw(Mail::SpamAssassin::Plugin);
@@ -66,13 +69,13 @@ sub are_more_high_bits_set {
 sub check_for_faraway_charset {
   my ($self, $pms, $body) = @_;
 
-  my $type = $pms->get('Content-Type');
+  my $type = $pms->get('Content-Type',undef);
 
   my @locales = Mail::SpamAssassin::Util::get_my_locales($self->{main}->{conf}->{ok_locales});
 
   return 0 if grep { $_ eq "all" } @locales;
 
-  $type = get_charset_from_ct_line ($type);
+  $type = get_charset_from_ct_line($type)  if defined $type;
 
   if (defined $type &&
     !Mail::SpamAssassin::Locales::is_charset_ok_for_locales
@@ -103,7 +106,7 @@ sub check_for_mime_html {
   my ($self, $pms) = @_;
 
   my $ctype = $pms->get('Content-Type');
-  return 1 if (defined($ctype) && $ctype =~ m@^text/html@i);
+  return 1 if $ctype =~ m{^text/html}i;
 
   $self->_check_attachments($pms) unless exists $pms->{mime_body_html_count};
   return ($pms->{mime_body_html_count} > 0);
@@ -114,7 +117,7 @@ sub check_for_mime_html_only {
   my ($self, $pms) = @_;
 
   my $ctype = $pms->get('Content-Type');
-  return 1 if (defined($ctype) && $ctype =~ m@^text/html@i);
+  return 1 if $ctype =~ m{^text/html}i;
 
   $self->_check_attachments($pms) unless exists $pms->{mime_body_html_count};
   return ($pms->{mime_body_html_count} > 0 &&
@@ -155,7 +158,7 @@ sub _check_mime_header {
 
   if ($ctype =~ /^text/ &&
       $cte =~ /base64/ &&
-      $charset !~ /(?:utf-8|big5)/ &&   # big5 due to bug 4687
+      (!$charset || $charset =~ /(?:us-ascii|ansi_x3\.4-1968|iso-ir-6|ansi_x3\.4-1986|iso_646\.irv:1991|ascii|iso646-us|us|ibm367|cp367|csascii)/) &&
       !($cd && $cd =~ /^(?:attachment|inline)/))
   {
     $pms->{mime_base64_encoded_text} = 1;
@@ -423,12 +426,10 @@ sub body_charset_is_likely_to_fp {
   # koi8-r etc.
   #
   $self->_check_attachments($pms) unless exists $pms->{mime_checked_attachments};
-  my @charsets = ();
-  my $type = $pms->get('Content-Type');
-  $type = get_charset_from_ct_line ($type);
-  if (defined $type) {
-    push (@charsets, $type);
-  }
+  my @charsets;
+  my $type = $pms->get('Content-Type',undef);
+  $type = get_charset_from_ct_line($type)  if defined $type;
+  push (@charsets, $type)  if defined $type;
   if (defined $pms->{mime_html_charsets}) {
     push (@charsets, split(' ', $pms->{mime_html_charsets}));
   }
@@ -444,6 +445,7 @@ sub body_charset_is_likely_to_fp {
 
 sub get_charset_from_ct_line {
   my $type = shift;
+  if (!defined $type) { return undef; }
   if ($type =~ /charset="([^"]+)"/i) { return $1; }
   if ($type =~ /charset='([^']+)'/i) { return $1; }
   if ($type =~ /charset=(\S+)/i) { return $1; }

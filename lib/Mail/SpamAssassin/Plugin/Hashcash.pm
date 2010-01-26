@@ -83,15 +83,24 @@ not have any execute bits set (the umask is set to 111).
 
 package Mail::SpamAssassin::Plugin::Hashcash;
 
-use Mail::SpamAssassin::Plugin;
-use Mail::SpamAssassin::Logger;
-use Digest::SHA1 qw(sha1);
-use Fcntl;
-use File::Path;
-use File::Basename;
 use strict;
 use warnings;
 use bytes;
+use re 'taint';
+
+use Mail::SpamAssassin::Plugin;
+use Mail::SpamAssassin::Logger;
+use Mail::SpamAssassin::Util qw(untaint_var);
+
+use Errno qw(ENOENT EACCES);
+use Fcntl;
+use File::Path;
+use File::Basename;
+
+BEGIN {
+  eval { require Digest::SHA; import Digest::SHA qw(sha1); 1 }
+  or do { require Digest::SHA1; import Digest::SHA1 qw(sha1) }
+}
 
 use vars qw(@ISA);
 @ISA = qw(Mail::SpamAssassin::Plugin);
@@ -120,7 +129,7 @@ sub new {
 
 sub set_config {
   my($self, $conf) = @_;
-  my @cmds = ();
+  my @cmds;
 
   push(@cmds, {
     setting => 'use_hashcash',
@@ -205,7 +214,9 @@ sub _run_hashcash_for_one_string {
   $hc =~ s/\s+//gs;       # remove whitespace from multiline, folded tokens
 
   # untaint the string for paranoia, making sure not to allow \n \0 \' \"
-  $hc =~ /^([-A-Za-z0-9\xA0-\xFF:_\/\%\@\.\,\= \*\+\;]+)$/; $hc = $1;
+  if ($hc =~ /^[-A-Za-z0-9\xA0-\xFF:_\/\%\@\.\,\= \*\+\;]+$/) {
+    $hc = untaint_var($hc);
+  }
   if (!$hc) { return 0; }
 
   my ($ver, $bits, $date, $rsrc, $exts, $rand, $trial);
@@ -275,7 +286,10 @@ sub was_hashcash_token_double_spent {
 
   my $path = $main->sed_path ($main->{conf}->{hashcash_doublespend_path});
   my $parentdir = dirname ($path);
-  if (!-d $parentdir) {
+  my $stat_errn = stat($parentdir) ? 0 : 0+$!;
+  if ($stat_errn == 0 && !-d _) {
+    dbg("hashcash: parent dir $parentdir exists but is not a directory");
+  } elsif ($stat_errn == ENOENT) {
     # run in an eval(); if mkpath has no perms, it calls die()
     eval {
       mkpath ($parentdir, 0, (oct ($main->{conf}->{hashcash_doublespend_file_mode}) & 0777));

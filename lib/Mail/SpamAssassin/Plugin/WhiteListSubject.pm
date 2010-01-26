@@ -47,6 +47,7 @@ use Mail::SpamAssassin::Plugin;
 use strict;
 use warnings;
 use bytes;
+use re 'taint';
 
 use vars qw(@ISA);
 @ISA = qw(Mail::SpamAssassin::Plugin);
@@ -71,11 +72,12 @@ sub new {
 sub set_config {
   my ($self, $conf) = @_;
 
-  my @cmds = ();
+  my @cmds;
 
   push(@cmds, {
 	       setting => 'whitelist_subject',
 	       default => {},
+               type => $Mail::SpamAssassin::Conf::CONF_TYPE_ADDRLIST,
 	       code => sub {
 		 my ($self, $key, $value, $line) = @_;
 
@@ -91,6 +93,7 @@ sub set_config {
   push(@cmds, {
 	       setting => 'blacklist_subject',
 	       default => {},
+               type => $Mail::SpamAssassin::Conf::CONF_TYPE_ADDRLIST,
 	       code => sub {
 		 my ($self, $key, $value, $line) = @_;
 
@@ -111,7 +114,7 @@ sub check_subject_in_whitelist {
 
   my $subject = $permsgstatus->get('Subject');
 
-  return 0 unless $subject;
+  return 0 unless $subject ne '';
 
   return $self->_check_subject($permsgstatus->{conf}->{whitelist_subject}, $subject);
 }
@@ -121,7 +124,7 @@ sub check_subject_in_blacklist {
 
   my $subject = $permsgstatus->get('Subject');
 
-  return 0 unless $subject;
+  return 0 unless $subject ne '';
 
   return $self->_check_subject($permsgstatus->{conf}->{blacklist_subject}, $subject);
 }

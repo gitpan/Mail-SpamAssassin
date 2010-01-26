@@ -34,6 +34,7 @@ BEGIN {
 
 use strict;
 use warnings;
+use re 'taint';
 
 # Big Ugly Hack; purpose: don't force requirement on IO::Socket::INET6
 BEGIN {
@@ -88,10 +89,10 @@ use Mail::SpamAssassin::NetSet;
 use Mail::SpamAssassin::SubProcBackChannel;
 use Mail::SpamAssassin::SpamdForkScaling qw(:pfstates);
 use Mail::SpamAssassin::Logger qw(:DEFAULT log_message);
+use Mail::SpamAssassin::Util qw(untaint_var exit_status_str);
 use Mail::SpamAssassin::Timeout;
 
 use Getopt::Long;
-use Pod::Usage;
 use POSIX qw(:sys_wait_h);
 use POSIX qw(setsid sigprocmask _exit);
 use Errno;
@@ -100,6 +101,7 @@ use Cwd ();
 use File::Spec 0.8;
 use File::Path;
 use Carp ();
+use Time::HiRes qw(time);
 
 use constant RUNNING_ON_MACOS => ($^O =~ /^darwin/oi);
 
@@ -109,10 +111,7 @@ if ($Mail::SpamAssassin::VERSION ne '@@VERSION@@' && '@@VERSION@@' ne "\@\@VERSI
   die 'spamd: spamd script is v@@VERSION@@, but using modules v'.$Mail::SpamAssassin::VERSION."\n";
 }
 
-# Load Time::HiRes if it's available
 BEGIN {
-  eval { require Time::HiRes };
-  Time::HiRes->import(qw(time)) unless $@;
   # redirect __WARN__ and __DIE__
   # do not trap warnings here based on eval scope; evals are very
   # common throughout.  die()s can be trapped though.
@@ -162,6 +161,9 @@ sub print_usage_and_exit {
     print_version();
     print("\n");
   }
+
+  require Pod::Usage;
+  import Pod::Usage;
   pod2usage(
     -verbose => 0,
     -message => $message,
@@ -193,17 +195,17 @@ Mail::SpamAssassin::Util::am_running_in_taint_mode();
 # First clean PATH and untaint the environment -- need to do this before
 # Cwd::cwd(), else it will croak.
 Mail::SpamAssassin::Util::clean_path_in_taint_mode();
-Mail::SpamAssassin::Util::untaint_var( \%ENV );
+untaint_var( \%ENV );
 
 # The zeroth argument will be replaced in daemonize().
-my $ORIG_ARG0 = Mail::SpamAssassin::Util::untaint_var($0);
+my $ORIG_ARG0 = untaint_var($0);
 
 # Getopt::Long clears all arguments it processed (untaint both @ARGVs here!)
-my @ORIG_ARGV = Mail::SpamAssassin::Util::untaint_var( \@ARGV );
+my @ORIG_ARGV = untaint_var( \@ARGV );
 
 # daemonize() switches to the root later on and we need to come back here
 # somehow -- untaint the dir to be on the safe side.
-my $ORIG_CWD = Mail::SpamAssassin::Util::untaint_var( Cwd::cwd() );
+my $ORIG_CWD = untaint_var( Cwd::cwd() );
 
 prepare_for_sighup_restart();
 
@@ -541,7 +543,7 @@ my $childlimit;           # max number of kids allowed
 my $timeout_tcp;          # socket timeout (connect->headers), 0=no timeout
 my $timeout_child;        # processing timeout (headers->finish), 0=no timeout
 my $clients_per_child;    # number of clients each child should process
-my %children = ();        # current children
+my %children;             # current children
 
 if ( defined $opt{'max-children'} ) {
   $childlimit = $opt{'max-children'};
@@ -659,7 +661,7 @@ if (!$opt{'round-robin'})
 my $listeninfo = compose_listen_info_string();
 
 sub compose_listen_info_string {
-  my @listeninfo = ();
+  my @listeninfo;
 
   if ( $listen_unix ) {
     push @listeninfo, "UNIX domain socket " . $opt{'socketpath'};
@@ -719,13 +721,14 @@ sub server_sock_setup {
   # retry 3 times to bind to the listening socket; 3 seconds delay,
   # max, but should allow a little time for any existing shutting-down
   # server to complete shutdown
-  for my $retry (1 .. 3) {
+  my $lastretry = 10;
+  for my $retry (1 .. $lastretry) {
     if ($retry > 1) { sleep 1; }
 
     eval { $sub->(); };
     last unless ($@);       # success => break
 
-    if ($retry == 3) {
+    if ($retry == $lastretry) {
       die $@;               # this is fatal
     } else {
       warn "server socket setup failed, retry $retry: $@";
@@ -876,6 +879,7 @@ my $spamtest = Mail::SpamAssassin->new(
     local_tests_only     => ( $opt{'local'} || 0 ),
     debug                => ( $opt{'debug'} || 0 ),
     paranoid             => ( $opt{'paranoid'} || 0 ),
+    require_rules        => 1,
     home_dir_for_helpers => (
       defined $opt{'home_dir_for_helpers'}
       ? $opt{'home_dir_for_helpers'}
@@ -897,6 +901,7 @@ unless ($clients_per_child > 1) {
 
 ## DAEMONIZE! ##
 
+my $originalparent = $$;
 $opt{'daemonize'} and daemonize();
 
 # bug 3443: setup signal handlers before the kids since we may have to
@@ -920,8 +925,8 @@ $spamtest->finish_learner();
 # If we're going to be switching users in check(), let's backup the
 # fresh configuration now for later restoring ...  MUST be placed after
 # the M::SA creation.
-my %conf_backup = ();
-my %msa_backup = ();
+my %conf_backup;
+my %msa_backup;
 
 if ($copy_config_p) {
   foreach( 'username', 'user_dir', 'userstate_dir', 'learn_to_journal' ) {
@@ -958,6 +963,7 @@ if (defined $opt{'pidfile'}) {
 # now allow waiting processes to connect, if they're watching the log.
 # The test suite does this!
 info("spamd: server pid: $$\n");
+kill("USR1",$originalparent) if ($opt{'daemonize'});
 
 # Fork off our children.
 for ( 1 .. $childlimit ) {
@@ -1125,6 +1131,7 @@ sub spawn {
       }
       undef $current_user;
 
+      dbg("timing: " . $spamtest->timer_report()) if would_log('dbg', 'timing');
     }
 
     # If the child lives to get here, it will die ...  Muhaha.
@@ -1189,6 +1196,7 @@ sub accept_a_conn {
   $client->autoflush(1);
 
   # keep track of start time
+  $spamtest->timer_reset;
   my $start = time;
 
   my ($remote_hostname, $remote_hostaddr);
@@ -1243,20 +1251,12 @@ sub accept_a_conn {
 
   s/\r?\n//;
 
-  # It may be a SKIP message, meaning that the client (spamc)
-  # thinks it is too big to check.  So we don't do any real work
-  # in that case.
-
-  if (/SKIP SPAMC\/(.*)/) {
-    info(sprintf("spamd: skipped large message in %3d seconds", time - $start));
-  }
-
   # It might be a CHECK message, meaning that we should just check
   # if it's spam or not, then return the appropriate response.
   # If we get the PROCESS command, the client is going to send a
   # message that we need to filter.
 
-  elsif (/(PROCESS|CHECK|SYMBOLS|REPORT|HEADERS|REPORT_IFSPAM) SPAMC\/(.*)/) {
+  if (/(PROCESS|CHECK|SYMBOLS|REPORT|HEADERS|REPORT_IFSPAM) SPAMC\/(.*)/) {
     my $method = $1;
     my $version = $2;
     eval {
@@ -1302,10 +1302,20 @@ sub accept_a_conn {
     }
   }
 
-  # Looks like a client is just seeing if we're alive.
+  # Looks like a client is just seeing if we're alive or changed its mind
 
-  elsif (/PING SPAMC\/(.*)/) {
-    syswrite( $client, "SPAMD/1.4 $resphash{EX_OK} PONG\r\n" );
+  elsif (/(SKIP|PING) SPAMC\/(.*)/) {
+    my $method = $1;
+    my $version = $2;
+
+    if ($method eq 'SKIP') {
+      # It may be a SKIP message, meaning that the client (spamc)
+      # thinks it is too big to check.  So we don't do any real work
+      # in that case.
+      info("spamd: skipped large message in %3.1f seconds", time - $start);
+    }
+    doskip_or_ping($method, $version,
+                   $start, $remote_hostname, $remote_hostaddr);
   }
 
   # If it was none of the above, then we don't know what it was.
@@ -1344,7 +1354,7 @@ sub handle_setuid_to_user {
 }
 
 sub parse_body {
-  my ($client, $expected_length, $compress_zlib) = @_;
+  my ($client, $expected_length, $compress_zlib, $start_time) = @_;
 
   my @msglines;
   my $actual_length;
@@ -1371,7 +1381,8 @@ sub parse_body {
   
   # Now parse *only* the message headers; the MIME tree won't be generated 
   # yet, it will be done on demand later on.
-  my $mail = $spamtest->parse(\@msglines, 0);
+  my $mail = $spamtest->parse(\@msglines, 0, !$timeout_child ? () :
+                         { master_deadline => $start_time + $timeout_child } );
 
   return ($mail, $actual_length);
 }
@@ -1420,7 +1431,7 @@ sub zlib_inflate_read {
 
   # TODO: split during inflate, too
   # note that this preserves line endings
-  @{$msglinesref} = map { s/$/\n/gs; $_; } split(/\n/, $out);
+  @{$msglinesref} = map { my $s=$_; $s=~s/$/\n/gs; $s } split(/\n/, $out);
   return $actual_length;
 }
 
@@ -1473,7 +1484,7 @@ sub check {
 
   # generate mail object from input
   my ($mail, $actual_length) = parse_body($client, $expected_length,
-                $compress_zlib);
+                                          $compress_zlib, $start_time);
   return 0 unless defined($mail);       # error
 
   if ($compress_zlib) {
@@ -1666,7 +1677,7 @@ sub dotell {
   if ($> == 0) { die "spamd: still running as root! dying"; }
 
   if (!$opt{tell}) {
-    service_unavailable_error("TELL commands have not been enabled.");
+    service_unavailable_error("TELL commands are not enabled, set the --allow-tell switch.");
     return 0;
   }
 
@@ -1778,6 +1789,25 @@ sub dotell {
        . " $scantime seconds, $actual_length bytes");
 
   $mail->finish();
+  return 1;
+}
+
+sub doskip_or_ping {
+  my ($method, $version, $start_time, $remote_hostname, $remote_hostaddr) = @_;
+
+  if ( $version >= 1.5 ) {
+    # Spamc protocol 1.5 means client is expected to send a protocol header
+    # (usually just a null header), followed by an empty line
+    # Fixes Bug 6187.
+
+    my $hdrs = {};
+    return 0 unless (parse_headers($hdrs, $client));
+  }
+
+  if ($method eq 'PING') {
+    print $client "SPAMD/1.5 $resphash{EX_OK} PONG\r\n";
+  }
+
   return 1;
 }
 
@@ -2000,7 +2030,7 @@ sub protocol_error {
   my ($err) = @_;
   my $resp = "EX_PROTOCOL";
   syswrite($client, "SPAMD/1.0 $resphash{$resp} Bad header line: $err\r\n");
-  warn("spamd: bad protocol: header error: $err");
+  warn("spamd: bad protocol: header error: $err\n");
 }
 
 sub service_unavailable_error {
@@ -2008,14 +2038,14 @@ sub service_unavailable_error {
   my $resp = "EX_UNAVAILABLE";
   syswrite($client,
 	   "SPAMD/1.0 $resphash{$resp} Service Unavailable: $err\r\n");
-  warn("spamd: service unavailable: $err");
+  warn("spamd: service unavailable: $err\n");
 }
 
 sub service_timeout {
   my ($err) = @_;
   my $resp = "EX_TIMEOUT";
   print $client "SPAMD/1.0 $resphash{$resp} Timeout: $err\r\n";
-  warn("spamd: timeout: $err");
+  warn("spamd: timeout: $err\n");
 }
 
 ###########################################################################
@@ -2076,7 +2106,21 @@ sub handle_user_setuid_basic {
     my $prefsfrom = $username;  # the one passed, NOT $opt{username}
 
     if ($prefsfrom eq $suidto) {
-      $userdir = $suiddir;      # reuse the already-looked-up info
+      $userdir = $suiddir;  # reuse the already-looked-up info, tainted
+    } elsif ( $opt{'vpopmail'} ) {
+      #
+      # If vpopmail config enabled then set $userdir to virtual homedir
+      #
+      my $username_untainted;
+      $username_untainted =
+        untaint_var($username)  if $username =~ /^[-:,.=+A-Za-z0-9_\@~]+\z/;
+      my $vpopdir = $suiddir; # This should work with common vpopmail setups
+      $userdir = `$vpopdir/bin/vuserinfo -d \Q$username_untainted\E`;
+      if ($? == 0) {
+        chomp($userdir);
+      } else {
+        $userdir = handle_user_vpopmail($username_untainted,$vpopdir);
+      }
     } else {
       $userdir = (getpwnam($prefsfrom))[7];
     }
@@ -2095,30 +2139,46 @@ sub handle_user_setuid_basic {
 
   # call this anyway, regardless of --user-config, so that
   # signal_user_changed() is called
-  handle_user_set_user_prefs($userdir, $username);
+  handle_user_set_user_prefs(untaint_var($userdir), $username);
+}
+
+sub handle_user_vpopmail {
+  #
+  # If vuserinfo failed $username could be an alias
+  # As the alias could be an alias itself we'll try to resolve it recursively
+  # Because we're mistrusting vpopmail we'll set off an alarm
+  #
+  my $username = shift;
+  my $vpopdir = shift;
+  my $userdir;
+  my $vpoptimeout = 5;
+  my $vptimer = Mail::SpamAssassin::Timeout->new({ secs => $vpoptimeout });
+
+  $vptimer->run(sub {
+    my $vpopusername = $username;
+    local $1;
+    do {
+      my $vpopusername_tainted = `$vpopdir/bin/valias \Q$vpopusername\E`;
+      if ($vpopusername_tainted =~ /.+ -> &?(.+)/) {
+        $vpopusername = untaint_var($1);
+      } else {
+        die "failed to resolve vpopmail user/alias '$username' using vuserinfo/valias";
+      }
+    } until (($userdir = `$vpopdir/bin/vuserinfo -d \Q$vpopusername\E`) && $? == 0);
+    $userdir =~ s{.+ -> (/.+)/Maildir/}{$1};
+  });
+
+  if ($vptimer->timed_out()) {
+    undef $userdir;
+    die "failed to resolve vpopmail user/alias '$username' in time ($vpoptimeout seconds)";
+  } else {
+    chomp($userdir);
+  }
+  return $userdir;
 }
 
 sub handle_user_set_user_prefs {
   my ($dir, $username) = @_;
-
-  # If vpopmail config enabled then set $dir to virtual homedir
-  #
-  if ( $opt{'vpopmail'} ) {
-    my $vpopdir = $dir;
-    $dir = `$vpopdir/bin/vuserinfo -d \Q$username\E`;
-    if ($? != 0) {
-      #
-      # If vuserinfo failed $username could be an alias
-      #
-      $dir = `$vpopdir/bin/valias \Q$username\E`;
-      if ($? == 0 && $dir !~ /.+ -> &/) {
-        $dir =~ s,.+ -> (/.+)/Maildir/,$1,;
-      } else {
-        undef($dir);
-      }
-    }
-    chomp($dir);
-  }
 
   # don't do this if we weren't passed a directory
   if ($dir) {
@@ -2363,6 +2423,7 @@ sub child_handler {
 
   # clean up any children which have exited
   while((my $pid = waitpid(-1, WNOHANG)) > 0) {
+    my $child_stat = $pid > 0 ? $? : undef;
     if (!defined $children{$pid}) {
       # ignore this child; we didn't realise we'd forked it. bug 4237
       next;
@@ -2378,9 +2439,10 @@ sub child_handler {
       if ($sock) { $sock->close(); }
     }
 
-    unless ($$Mail::SpamAssassin::Logger::LOG_SA{INHIBIT_LOGGING_IN_SIGCHLD_HANDLER}) {
-      info("spamd: handled cleanup of child pid $pid ".
-                ((defined $sig) ? "due to SIG$sig" : ""));
+    unless ($Mail::SpamAssassin::Logger::LOG_SA{INHIBIT_LOGGING_IN_SIGCHLD_HANDLER}) {
+      info("spamd: handled cleanup of child pid [%s]%s: %s",
+           $pid, (defined $sig ? " due to SIG$sig" : ""),
+           exit_status_str($child_stat,0));
     }
   }
 
@@ -2399,10 +2461,12 @@ sub restart_handler {
   foreach (keys %children) {
     kill 'INT' => $_;
     my $pid = waitpid($_, 0);
+    my $child_stat = $pid > 0 ? $? : undef;
     if ($scaling) {
       $scaling->child_exited($pid);
     }
-    info("spamd: child $pid killed successfully");
+    info("spamd: child [%s] killed successfully: %s",
+         $pid, exit_status_str($child_stat,0));
   }
   %children = ();
 
@@ -2434,6 +2498,12 @@ sub backtrace_handler {
         "most recent message: $current_msgid\n");
 }
 
+my  $serverstarted = 0;
+
+sub serverstarted {
+  $serverstarted = 1;
+}
+
 sub daemonize {
   # Pretty command line in ps
   $0 = join (' ', $ORIG_ARG0, @ORIG_ARGV) unless would_log("dbg");
@@ -2450,8 +2520,27 @@ sub daemonize {
   Mail::SpamAssassin::Logger::remove('stderr');
 
   # Here we go...
+  $SIG{USR1} = \&serverstarted;
   defined( my $pid = fork ) or die "spamd: cannot fork: $!\n";
-  exit if $pid;
+  if ($pid) {
+    my $child_stat;
+    # Bug 6191, Bug 6258: takes almost two minutes on a slow machine
+    # for a forked child process to report back, bump limit to 180 seconds
+    for (my $retry=180, my $waited=0;
+         $retry > 0 && !$serverstarted && $waited != $pid;
+         $retry--)
+    {
+      warn("waitpid failed: $waited $!")  if $waited;
+      sleep 1;
+      $waited = waitpid($pid, WNOHANG);
+      $child_stat = $?  if $waited > 0;
+    }
+    die sprintf("child process [%s] exited or timed out ".
+                "without signaling production of a PID file: %s",
+                $pid, exit_status_str($child_stat,0)) unless $serverstarted;
+    exit;
+  }
+  delete  $SIG{USR1};
   setsid or die "spamd: cannot start new session: $!\n";
 
   # Now we can redirect the errors, too.
@@ -2616,7 +2705,7 @@ sub do_sighup_restart {
 
   # ensure we re-run spamd using the right perl interpreter, and
   # with the right switches (taint mode and warnings) (bug 5255)
-  my $perl = Mail::SpamAssassin::Util::untaint_var($^X);
+  my $perl = untaint_var($^X);
   my @execs = ( $perl, "-T", "-w", $ORIG_ARG0, @ORIG_ARGV );
 
   if ($perl eq $perl_from_hashbang_line) {
@@ -3089,7 +3178,7 @@ timeouts completely.
 =item B<--timeout-child>=I<number>
 
 This option specifies the number of seconds to wait for a spamd child to
-to process or check a message.  The minimum value is C<1>, the default 
+process or check a message.  The minimum value is C<1>, the default 
 value is C<300>, and a value of C<0> will disable child timeouts completely.
 
 =item B<-H> I<directory>, B<--helper-home-dir>=I<directory>

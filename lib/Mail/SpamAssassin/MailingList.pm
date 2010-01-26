@@ -25,7 +25,7 @@ package Mail::SpamAssassin::PerMsgStatus;
 use strict;
 use warnings;
 use bytes;
-
+use re 'taint';
 
 sub detect_mailing_list {
     my ($self) = @_;
@@ -63,7 +63,7 @@ sub detect_ml_ezmlm {
 #  List-Archive: 
 #  X-Mailman-Version: \d
 #
-# However, for for mailing list membership reminders, most of
+# However, for mailing list membership reminders, most of
 # those headers are gone, so we identify on the following:
 #
 #  Subject: ...... mailing list memberships reminder  (v1)
@@ -81,13 +81,13 @@ sub detect_ml_mailman {
     if ($self->get('x-list-administrivia') =~ /yes/ ||
         $self->get('subject') =~ /mailing list memberships reminder$/)
     {
-        return 0 unless $self->get('errors-to');
-        return 0 unless $self->get('x-beenthere');
+        return 0 unless defined $self->get('errors-to',undef);
+        return 0 unless defined $self->get('x-beenthere',undef);
         return 0 unless $self->get('x-no-archive') =~ /yes/;
         return 1;
     }
 
-    return 0 unless $self->get('list-id');
+    return 0 unless defined $self->get('list-id',undef);
     return 0 unless $self->get('list-help') =~ /^<mailto:/;
     return 0 unless $self->get('list-post') =~ /^<mailto:/;
     return 0 unless $self->get('list-subscribe') =~ /<mailto:.*=subscribe>/;
@@ -123,7 +123,7 @@ sub detect_ml_lyris {
 # sub detect_ml_listbuilder {
 #   my ($self, $full) = @_;
 # 
-#   my $reply = $self->get ('Reply-To:addr');
+#   my $reply = $self->get('Reply-To:addr');
 #   if ($reply !~ /\@lb.bcentral.com/) { return 0; }
 # 
 #   # Received: from unknown (HELO lbrout14.listbuilder.com) (204.71.191.9)

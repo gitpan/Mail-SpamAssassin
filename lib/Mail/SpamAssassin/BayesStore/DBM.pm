@@ -20,16 +20,23 @@ package Mail::SpamAssassin::BayesStore::DBM;
 use strict;
 use warnings;
 use bytes;
-use Fcntl;
+use re 'taint';
 
-use Mail::SpamAssassin;
-use Mail::SpamAssassin::Util;
-use Mail::SpamAssassin::BayesStore;
-use Mail::SpamAssassin::Logger;
-use Digest::SHA1 qw(sha1);
+use Fcntl;
+use Errno qw(EBADF);
 use File::Basename;
 use File::Spec;
 use File::Path;
+
+BEGIN {
+  eval { require Digest::SHA; import Digest::SHA qw(sha1); 1 }
+  or do { require Digest::SHA1; import Digest::SHA1 qw(sha1) }
+}
+
+use Mail::SpamAssassin;
+use Mail::SpamAssassin::Util qw(untaint_var);
+use Mail::SpamAssassin::BayesStore;
+use Mail::SpamAssassin::Logger;
 
 use constant MAGIC_RE    => qr/^\015\001\007\011\003/;
 
@@ -615,7 +622,7 @@ sub untie_db {
 sub calculate_expire_delta {
   my ($self, $newest_atime, $start, $max_expire_mult) = @_;
 
-  my %delta = (); # use a hash since an array is going to be very sparse
+  my %delta;  # use a hash since an array is going to be very sparse
 
   # do the first pass, figure out atime delta
   my ($tok, $packed);
@@ -979,7 +986,7 @@ sub dump_db_toks {
     # We have the value already, so just unpack it.
     my ($ts, $th, $atime) = $self->tok_unpack ($tokvalue);
     
-    my $prob = $self->{bayes}->compute_prob_for_token($tok, $vars[1], $vars[2], $ts, $th);
+    my $prob = $self->{bayes}->_compute_prob_for_token($tok, $vars[1], $vars[2], $ts, $th);
     $prob ||= 0.5;
     
     my $encoded_tok = unpack("H*",$tok);
@@ -1005,7 +1012,7 @@ sub get_running_expire_tok {
 sub set_running_expire_tok {
   my ($self) = @_;
 
-  # update the lock and and running expire magic token
+  # update the lock and running expire magic token
   $self->{bayes}->{main}->{locker}->refresh_lock ($self->{locked_file});
   $self->{db_toks}->{$RUNNING_EXPIRE_MAGIC_TOKEN} = time();
 }
@@ -1026,7 +1033,7 @@ sub tok_count_change {
   $atime = 0 unless defined $atime;
 
   if ($self->{bayes}->{main}->{learn_to_journal}) {
-    # we can't store the SHA1 binary value in the journal to convert it
+    # we can't store the SHA1 binary value in the journal, so convert it
     # to a printable value that can be converted back later
     my $encoded_tok = unpack("H*",$tok);
     $self->defer_update ("c $ds $dh $atime $encoded_tok");
@@ -1042,7 +1049,7 @@ sub multi_tok_count_change {
 
   foreach my $tok (keys %{$tokens}) {
     if ($self->{bayes}->{main}->{learn_to_journal}) {
-      # we can't store the SHA1 binary value in the journal to convert it
+      # we can't store the SHA1 binary value in the journal, so convert it
       # to a printable value that can be converted back later
       my $encoded_tok = unpack("H*",$tok);
       $self->defer_update ("c $ds $dh $atime $encoded_tok");
@@ -1070,7 +1077,7 @@ sub nspam_nham_change {
 
 sub tok_touch {
   my ($self, $tok, $atime) = @_;
-  # we can't store the SHA1 binary value in the journal to convert it
+  # we can't store the SHA1 binary value in the journal, so convert it
   # to a printable value that can be converted back later
   my $encoded_tok = unpack("H*", $tok);
   $self->defer_update ("t $atime $encoded_tok");
@@ -1080,7 +1087,7 @@ sub tok_touch_all {
   my ($self, $tokens, $atime) = @_;
 
   foreach my $token (@{$tokens}) {
-    # we can't store the SHA1 binary value in the journal to convert it
+    # we can't store the SHA1 binary value in the journal, so convert it
     # to a printable value that can be converted back later
     my $encoded_tok = unpack("H*", $token);
     $self->defer_update ("t $atime $encoded_tok");
@@ -1121,6 +1128,7 @@ sub cleanup {
   # touches missed.
   my $write_failure = 0;
   my $original_point = tell OUT;
+  $original_point >= 0  or die "Can't obtain file position: $!";
   my $len;
   do {
     $len = syswrite (OUT, $self->{string_to_journal}, $nbytes);
@@ -1172,7 +1180,7 @@ sub get_magic_re {
   return qr/^\*\*[A-Z]+$/;
 }
 
-# provide a more generalized public insterface into the journal sync
+# provide a more generalized public interface into the journal sync
 
 sub sync {
   my ($self, $opts) = @_;
@@ -1195,13 +1203,16 @@ sub _sync_journal {
     return 0;
   }
 
+  my $eval_stat;
   eval {
     local $SIG{'__DIE__'};	# do not run user die() traps in here
     if ($self->tie_db_writable()) {
       $ret = $self->_sync_journal_trapped($opts, $path);
     }
+    1;
+  } or do {
+    $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
   };
-  my $err = $@;
 
   # ok, untie from write-mode if we can
   if (!$self->{bayes}->{main}->{learn_caller_will_untie}) {
@@ -1209,8 +1220,8 @@ sub _sync_journal {
   }
 
   # handle any errors that may have occurred
-  if ($err) {
-    warn "bayes: $err\n";
+  if (defined $eval_stat) {
+    warn "bayes: $eval_stat\n";
     return 0;
   }
 
@@ -1226,7 +1237,7 @@ sub _sync_journal_trapped {
   my $started = time();
   my $count = 0;
   my $total_count = 0;
-  my %tokens = ();
+  my %tokens;
   my $showdots = $opts->{showdots};
   my $retirepath = $path.".old";
 
@@ -1257,6 +1268,7 @@ sub _sync_journal_trapped {
     }
 
     # now read the retired journal
+    local *JOURNAL;
     if (!open (JOURNAL, "<$retirepath")) {
       warn "bayes: cannot open read $retirepath\n";
       return 0;
@@ -1264,7 +1276,7 @@ sub _sync_journal_trapped {
 
 
     # Read the journal
-    while (<JOURNAL>) {
+    for ($!=0; defined($_=<JOURNAL>); $!=0) {
       $total_count++;
 
       if (/^t (\d+) (.+)$/) { # Token timestamp update, cache resultant entries
@@ -1289,7 +1301,10 @@ sub _sync_journal_trapped {
 	warn "bayes: gibberish entry found in journal: $_";
       }
     }
-    close JOURNAL;
+    defined $_ || $!==0  or
+      $!==EBADF ? dbg("bayes: error reading journal file: $!")
+                : die "error reading journal file: $!";
+    close(JOURNAL) or die "Can't close journal file: $!";
 
     # Now that we've determined what tokens we need to update and their
     # final values, update the DB.  Should be much smaller than the full
@@ -1413,6 +1428,7 @@ sub perform_upgrade {
   my ($self, $opts) = @_;
   my $ret = 0;
 
+  my $eval_stat;
   eval {
     local $SIG{'__DIE__'};	# do not run user die() traps in here
 
@@ -1425,15 +1441,15 @@ sub perform_upgrade {
     my $dir = dirname($path);
 
     # make temporary copy since old dbm and new dbm may have same name
-    opendir(DIR, $dir) || die "bayes: can't opendir $dir: $!";
+    opendir(DIR, $dir) or die "bayes: can't opendir $dir: $!";
     my @files = grep { /^bayes_(?:seen|toks)(?:\.\w+)?$/ } readdir(DIR);
-    closedir(DIR);
+    closedir(DIR) or die "bayes: can't close directory $dir: $!";
     if (@files < 2 || !grep(/bayes_seen/,@files) || !grep(/bayes_toks/,@files))
     {
       die "bayes: unable to find bayes_toks and bayes_seen, stopping\n";
     }
     # untaint @files (already safe after grep)
-    @files = map { /(.*)/, $1 } @files;
+    untaint_var(\@files);
  	 
     for (@files) {
       my $src = "$dir/$_";
@@ -1458,14 +1474,16 @@ sub perform_upgrade {
     else {
       print "import failed, original files saved with \"old\" prefix\n";
     }
+    1;
+  } or do {
+    $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
   };
-  my $err = $@;
 
   $self->untie_db();
 
   # if we died, untie the dbm files
-  if ($err) {
-    warn "bayes: perform_upgrade: $err\n";
+  if (defined $eval_stat) {
+    warn "bayes: perform_upgrade: $eval_stat\n";
     return 0;
   }
   $ret;
@@ -1486,15 +1504,19 @@ sub upgrade_old_dbm_files_trapped {
     # modules directly.
     # Note: (bug 2390), the 'use' needs to be on the same line as the eval
     # for RPM dependency checks to work properly.  It's lame, but...
+    my $eval_stat;
     eval 'use ' . $dbm . ';
       tie %in, "' . $dbm . '", $filename, O_RDONLY, 0600;
       %{ $output } = %in;
       $count = scalar keys %{ $output };
       untie %in;
-    ';
-    if ($@) {
-      print "$dbm: $dbm module not installed, nothing copied\n";
-      dbg("bayes: error was: $@");
+      1;
+    ' or do {
+      $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
+    };
+    if (defined $eval_stat) {
+      print "$dbm: $dbm module not installed(?), nothing copied: $eval_stat\n";
+      dbg("bayes: error was: $eval_stat");
     }
     elsif ($count == 0) {
       print "$dbm: no database of that kind found, nothing copied\n";
@@ -1579,6 +1601,7 @@ sub backup_database {
 sub restore_database {
   my ($self, $filename, $showdots) = @_;
 
+  local *DUMPFILE;
   if (!open(DUMPFILE, '<', $filename)) {
     dbg("bayes: unable to open backup file $filename: $!");
     return 0;
@@ -1634,6 +1657,7 @@ sub restore_database {
   my $oldest_token_age = time() + 100000;
 
   my $line = <DUMPFILE>;
+  defined $line  or die "Error reading dump file: $!";
   $line_count++;
 
   # We require the database version line to be the first in the file so we can
@@ -1662,7 +1686,7 @@ sub restore_database {
     return 0;
   }
 
-  while (my $line = <DUMPFILE>) {
+  for ($!=0; defined($line=<DUMPFILE>); $!=0) {
     chomp($line);
     $line_count++;
 
@@ -1759,7 +1783,8 @@ sub restore_database {
       next;
     }
   }
-  close(DUMPFILE);
+  defined $line || $!==0  or die "Error reading dump file: $!";
+  close(DUMPFILE) or die "Can't close dump file: $!";
 
   print STDERR "\n" if ($showdots);
 

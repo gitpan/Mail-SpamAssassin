@@ -29,13 +29,16 @@ package Mail::SpamAssassin::Plugin::BodyRuleBaseExtractor;
 
 use Mail::SpamAssassin::Plugin;
 use Mail::SpamAssassin::Logger;
+use Mail::SpamAssassin::Util qw(untaint_var);
 use Mail::SpamAssassin::Util::Progress;
 
+use Errno qw(ENOENT EACCES EEXIST);
 use Data::Dumper;
 
 use strict;
 use warnings;
 use bytes;
+use re 'taint';
 
 use vars qw(@ISA);
 @ISA = qw(Mail::SpamAssassin::Plugin);
@@ -50,9 +53,20 @@ use constant DEBUG_RE_PARSING => 0;     # noisy!
 # $main->{bases_can_use_quantifiers} = 0; # /foo.*bar/ or /foo*bar/ or /foooo?bar/
 # $main->{bases_can_use_char_classes} = 0; # /fo[opqr]bar/
 # $main->{bases_split_out_alternations} = 1; # /(foo|bar|baz)/ => ["foo", "bar", "baz"]
+# $main->{base_quiet} = 0;      # silences progress output
 
 # TODO: it would be nice to have a clean API to pass such settings
 # through to plugins instead of hanging them off $main
+
+##############################################################################
+
+# testing purposes only
+my $fixup_re_test;
+#$fixup_re_test = 1; fixup_re("fr()|\\\\|"); die;
+#$fixup_re_test = 1; fixup_re("\\x{1b}\$b"); die;
+#$fixup_re_test = 1; fixup_re("\\33\$b"); die;
+#$fixup_re_test = 1; fixup_re("[link]"); die;
+#$fixup_re_test = 1; fixup_re("please do not resend your original message."); die;
 
 ###########################################################################
 
@@ -63,7 +77,7 @@ sub new {
   my $self = $class->SUPER::new($mailsaobject);
   bless ($self, $class);
 
-  $self->{show_progress} = 1;           # default
+  $self->{show_progress} = !$mailsaobject->{base_quiet};
 
   # $self->test(); exit;
   return $self;
@@ -83,7 +97,9 @@ sub extract_bases {
   my $main = $conf->{main};
   if (!$main->{base_extract}) { return; }
 
-  info("base extraction starting.  this can take a while...");
+  $self->{show_progress} and
+        info("base extraction starting.  this can take a while...");
+
   $self->extract_set($conf, $conf->{body_tests}, 'body');
 }
 
@@ -101,21 +117,21 @@ sub extract_set {
 sub extract_set_pri {
   my ($self, $conf, $rules, $ruletype) = @_;
 
-  my @good_bases = ();
-  my @failed = ();
+  my @good_bases;
+  my @failed;
   my $yes = 0;
   my $no = 0;
   my $count = 0;
   my $start = time;
   $self->{main} = $conf->{main};	# for use in extract_hints()
-  info ("extracting from rules of type $ruletype");
+  $self->{show_progress} and info ("extracting from rules of type $ruletype");
 
   # attempt to find good "base strings" (simplified regexp subsets) for each
   # regexp.  We try looking at the regexp from both ends, since there
   # may be a good long string of text at the end of the rule.
 
-  # require this many chars in a base string for it to be viable
-  my $min_chars = 3;
+  # require this many chars in a base string + delimiters for it to be viable
+  my $min_chars = 5;
 
   my $progress;
   $self->{show_progress} and $progress = Mail::SpamAssassin::Util::Progress->new({
@@ -133,7 +149,7 @@ sub extract_set_pri {
 
 NEXT_RULE:
   foreach my $name (keys %{$rules}) {
-    $self->{show_progress} and $progress->update(++$count);
+    $self->{show_progress} and $progress and $progress->update(++$count);
 
     my $rule = $rules->{$name};
     my $cachekey = join "#", $name, $rule;
@@ -163,20 +179,23 @@ NEXT_RULE:
     # TODO: need cleaner way to do this
     goto NO if ($conf->{rules_to_replace}->{$name});
 
-    my ($qr, $mods) = $self->simplify_and_qr_regexp($rule);
+    my ($lossy, @bases);
 
-    my @bases;
     eval {  # catch die()s
-      @bases = $self->extract_hints($rule, $qr, $mods);
+      my ($qr, $mods) = $self->simplify_and_qr_regexp($rule);
+      ($lossy, @bases) = $self->extract_hints($rule, $qr, $mods);
+      1;
+    } or do {
+      my $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
+      dbg("zoom: giving up on regexp: $eval_stat");
     };
-    $@ and dbg("giving up on regexp: $@");
 
     # if any of the extracted hints in a set are too short, the entire
     # set is invalid; this is because each set of N hints represents just
     # 1 regexp.
     my $minlen;
     foreach my $str (@bases) {
-      my $len = length $str;
+      my $len = length fixup_re($str); # bug 6143: count decoded characters
       if ($len < $min_chars) { $minlen = undef; @bases = (); last; }
       elsif (!defined($minlen) || $len < $minlen) { $minlen = $len; }
     }
@@ -186,7 +205,7 @@ NEXT_RULE:
 
       # figure out if we have e.g. ["foo", "foob", "foobar"]; in this
       # case, we only need to track ["foo"].
-      my %subsumed = ();
+      my %subsumed;
       foreach my $base1 (@bases) {
         foreach my $base2 (@bases) {
           if ($base1 ne $base2 && $base1 =~ /\Q$base2\E/) {
@@ -195,14 +214,18 @@ NEXT_RULE:
         }
       }
 
-      my @forcache = ();
-
+      my @forcache;
       foreach my $base (@bases) {
         next if $subsumed{$base};
-        push @good_bases, { base => $base, orig => $rule, name => $name };
+        push @good_bases, {
+            base => $base, orig => $rule, name => "$name,[l=$lossy]"
+          };
         # *separate* copies for cache -- we modify the @good_bases entry
-        push @forcache, { base => $base, orig => $rule, name => $name };
+        push @forcache, {
+            base => $base, orig => $rule, name => "$name,[l=$lossy]"
+          };
       }
+
       $cached->{rule_bases}->{$cachekey} = { g => \@forcache };
       $yes++;
     }
@@ -215,11 +238,10 @@ NO:
     }
   }
 
-  $self->{show_progress} and $progress->final();
+  $self->{show_progress} and $progress and $progress->final();
 
-  dbg ("$ruletype: found ".(scalar @good_bases).
-        " usable base strings in ".
-        "$yes rules, skipped $no rules");
+  dbg("zoom: $ruletype: found ".(scalar @good_bases).
+      " usable base strings in $yes rules, skipped $no rules");
 
   # NOTE: re2c will attempt to provide the longest pattern that matched; e.g.
   # ("food" =~ "foo" / "food") will return "food".  So therefore if a pattern
@@ -267,7 +289,7 @@ NO:
   # array -- into a more efficient format, using arrays and with a little
   # bit of precomputation, to go (quite a bit) faster
 
-  my @rewritten = ();
+  my @rewritten;
   foreach my $set1 (@good_bases) {
     my $base = $set1->{base};
     next if (!$base || !$set1->{name});
@@ -283,7 +305,7 @@ NO:
   @good_bases = @rewritten;
 
   foreach my $set1 (@good_bases) {
-    $self->{show_progress} and $progress->update(++$count);
+    $self->{show_progress} and $progress and $progress->update(++$count);
 
     my $base1 = $set1->[0]; next unless $base1;
     my $name1 = $set1->[1];
@@ -332,7 +354,7 @@ NO:
   # we can still have duplicate cases; __FRAUD_PTS and __SARE_FRAUD_BADTHINGS
   # both contain "killed" for example, pointing at different rules, which
   # the above search hasn't found.  Collapse them here with a hash
-  my %bases = ();
+  my %bases;
   foreach my $set (@good_bases) {
     my $base = $set->[0];
     next unless $base;
@@ -347,20 +369,20 @@ NO:
 
   foreach my $base (keys %bases) {
     # uniq the list, since there are probably dup rules listed
-    my %u = ();
+    my %u;
     for my $i (split ' ', $bases{$base}) {
       next if exists $u{$i}; undef $u{$i}; 
     }
     $conf->{base_string}->{$ruletype}->{$base} = join ' ', sort keys %u;
   }
-  $self->{show_progress} and $progress->final();
+  $self->{show_progress} and $progress and $progress->final();
 
   if ($cachefile) {
     $self->write_cachefile ($cachefile, $cached);
   }
 
   my $elapsed = time - $start;
-  info ("$ruletype: ".
+  $self->{show_progress} and info ("$ruletype: ".
             (scalar keys %{$conf->{base_string}->{$ruletype}}).
             " base strings extracted in $elapsed seconds\n");
 }
@@ -391,6 +413,8 @@ sub simplify_and_qr_regexp {
     }
   }
 
+  my $lossy = 0;
+
   # now: simplify aspects of the regexp.  Bear in mind that we can
   # simplify as long as we cause the regexp to become more general;
   # more hits is OK, since false positives will be discarded afterwards
@@ -399,13 +423,15 @@ sub simplify_and_qr_regexp {
 
   if ($main->{bases_must_be_casei}) {
     $rule = lc $rule;
-    $mods =~ s/i//;
+
+    $lossy = 1;
+    $mods =~ s/i// and $lossy = 0;
 
     # always case-i: /A(?i:ct) N(?i:ow)/ => /Act Now/
-    $rule =~ s/(?<!\\)\(\?i\:(.*?)\)/$1/gs;
+    $rule =~ s/(?<!\\)\(\?i\:(.*?)\)/$1/gs and $lossy++;
 
     # always case-i: /A(?-i:ct)/ => /Act/
-    $rule =~ s/(?<!\\)\(\?-i\:(.*?)\)/$1/gs;
+    $rule =~ s/(?<!\\)\(\?-i\:(.*?)\)/$1/gs and $lossy++;
 
     # remove (?i)
     $rule =~ s/\(\?i\)//gs;
@@ -413,28 +439,36 @@ sub simplify_and_qr_regexp {
   else {
     die "case-i" if $rule =~ /\(\?i\)/;
     die "case-i" if $mods =~ /i/;
+
+    # always case-i: /A(?i:ct) N(?i:ow)/ => /Act Now/
+    $rule =~ s/(?<!\\)\(\?i\:(.*?)\)/$1/gs and die "case-i";
+
+    # we're already non-case-i so this is a no-op: /A(?-i:ct)/ => /Act/
+    $rule =~ s/(?<!\\)\(\?-i\:(.*?)\)/$1/gs;
   }
 
   # remove /m and /s modifiers
-  $mods =~ s/m//;
-  $mods =~ s/s//;
+  $mods =~ s/m// and $lossy++;
+  $mods =~ s/s// and $lossy++;
 
   # remove (^|\b)'s
   # T_KAM_STOCKTIP23 /(EXTREME INNOVATIONS|(^|\b)EXTI($|\b))/is
-  $rule =~ s/\(\^\|\\b\)//gs;
-  $rule =~ s/\(\$\|\\b\)//gs;
-  $rule =~ s/\(\\b\|\^\)//gs;
-  $rule =~ s/\(\\b\|\$\)//gs;
+  $rule =~ s/\(\^\|\\b\)//gs and $lossy++;
+  $rule =~ s/\(\$\|\\b\)//gs and $lossy++;
+  $rule =~ s/\(\\b\|\^\)//gs and $lossy++;
+  $rule =~ s/\(\\b\|\$\)//gs and $lossy++;
 
   # remove (?!credit)
-  $rule =~ s/\(\?\![^\)]+\)//gs;
+  $rule =~ s/\(\?\![^\)]+\)//gs and $lossy++;
 
   # remove \b's
-  $rule =~ s/(?<!\\)\\b//gs;
+  $rule =~ s/(?<!\\)\\b//gs and $lossy++;
 
   # remove the "?=" trick
   # (?=[dehklnswxy])(horny|nasty|hot|wild|young|....etc...)
   $rule =~ s/\(\?\=\[[^\]]+\]\)//gs;
+
+  $mods .= "L" if $lossy;
   ($rule, $mods);
 }
 
@@ -447,6 +481,9 @@ sub extract_hints {
   my $main = $self->{main};
   my $orig = $rule;
 
+  my $lossy = 0;
+  $mods =~ s/L// and $lossy++;
+
   # if there are anchors, give up; we can't get much 
   # faster than these anyway
   die "anchors" if $rule =~ /^\(?(?:\^|\\A)/;
@@ -454,7 +491,7 @@ sub extract_hints {
   # die "anchors" if $rule =~ /(?:\$|\\Z)\)?$/;
   # just remove end-of-string anchors; they're slow so could gain
   # from our speedup
-  $rule =~ s/(?<!\\)(?:\$|\\Z)\)?$//;
+  $rule =~ s/(?<!\\)(?:\$|\\Z)\)?$// and $lossy++;
 
   # simplify (?:..) to (..)
   $main->{bases_allow_noncapture_groups} or
@@ -467,6 +504,7 @@ sub extract_hints {
   $rule =~ s/(?<!\\)(\w)\?/\($1\|\)/gs;
 
   my ($tmpf, $tmpfh) = Mail::SpamAssassin::Util::secure_tmpfile();
+  untaint_var(\$tmpf);
 
   # attempt to find a safe regexp delimiter...
   # TODO: would prob be easier to just read this from $rawrule
@@ -481,14 +519,22 @@ sub extract_hints {
       }
     }
   }
-  print $tmpfh "use bytes; m".$quos.$rule.$quos.$mods;
-  close $tmpfh or die "cannot write to $tmpf";
+  print $tmpfh "use bytes; m".$quos.$rule.$quos.$mods
+    or die "error writing to $tmpf: $!";
+  close $tmpfh  or die "error closing $tmpf: $!";
 
   my $perl = $self->get_perl();
-  open (IN, "$perl -c -Mre=debug $tmpf 2>&1 |") or die "cannot run $perl";
-  my $fullstr = join('', <IN>);
-  close IN;
-  unlink $tmpf;
+  local *IN;
+  open (IN, "$perl -c -Mre=debug $tmpf 2>&1 |")
+    or die "cannot run $perl: ".exit_status_str($?,$!);
+
+  my($inbuf,$nread,$fullstr); $fullstr = '';
+  while ( $nread=read(IN,$inbuf,16384) ) { $fullstr .= $inbuf }
+  defined $nread  or die "error reading from pipe: $!";
+
+  close IN      or die "error closing pipe: $!";
+  unlink $tmpf  or die "cannot unlink $tmpf: $!";
+  defined $fullstr  or warn "empty result from a pipe";
 
   # now parse the -Mre=debug output.
   # perl 5.10 format
@@ -519,7 +565,7 @@ sub extract_hints {
   #
   DEBUG_RE_PARSING and warn "Mre=debug output: $opsstr";
 
-  my @ops = ();
+  my @ops;
   foreach my $op (split(/\n/s, $opsstr)) {
     next unless $op;
     if ($op =~ /^\s+\d+: (\s*)([A-Z]\w+)\b(.*)(?:\(\d+\))?$/) {
@@ -561,7 +607,7 @@ sub extract_hints {
   }
 
   # now find the longest DFA-friendly string in each unrolled version
-  my @longests = ();
+  my @longests;
   foreach my $opsarray (@unrolled) {
     my $longestexact = '';
     my $buf = '';
@@ -630,6 +676,11 @@ sub extract_hints {
       else {
         # not an /^EXACT/; clear the buffer
         $add_candidate->();
+        if ($item !~ /^(?:END|CLOSE\d|MINMOD)$/)
+        {
+          $lossy = 1;
+          DEBUG_RE_PARSING and warn "item $item makes regexp lossy";
+        }
       }
       $prevop = $op;
     }
@@ -640,12 +691,13 @@ sub extract_hints {
       # all unrolled versions must have a long string, otherwise
       # we cannot reliably match all variants of the rule
     } else {
-      push @longests, lc $longestexact;
+      push @longests, ($main->{bases_must_be_casei}) ?
+                            lc $longestexact : $longestexact;
     }
   }
 
   DEBUG_RE_PARSING and warn "longest base strings: /".join("/", @longests)."/";
-  return @longests;
+  return ($lossy, @longests);
 }
 
 ###########################################################################
@@ -656,7 +708,7 @@ sub unroll_branches {
   die "too deep" if ($depth++ > 5);
 
   my @ops = (@{$opslist});      # copy
-  my @pre_branch_ops = ();
+  my @pre_branch_ops;
   my $branch_spcs;
   my $trie_spcs;
   my $open_spcs;
@@ -769,8 +821,8 @@ sub unroll_branches {
 
   # otherwise we're at the start of a new branch set
   # /(foo|bar(baz|argh)boo)gab/
-  my @alts = ();
-  my @in_this_branch = ();
+  my @alts;
+  my @in_this_branch;
 
   DEBUG_RE_PARSING and warn "entering branch: ".
         "open='".(defined $open_spcs ? $open_spcs : 'undef')."' ".
@@ -860,7 +912,7 @@ sub unroll_branches {
   }
 
   # now recurse, to unroll the remaining branches (if any exist)
-  my @rets = ();
+  my @rets;
   foreach my $alt (@alts) {
     push @rets, $self->unroll_branches($depth, $alt);
   }
@@ -914,11 +966,11 @@ sub test_split_alt {
   }
 
   if ($failed) {
-    print "want: /".join('/ /', @want)."/\n";
-    print "got:  /".join('/ /', @got)."/\n";
+    print "want: /".join('/ /', @want)."/\n"  or die "error writing: $!";
+    print "got:  /".join('/ /', @got)."/\n"   or die "error writing: $!";
     return 0;
   } else {
-    print "ok\n";
+    print "ok\n"  or die "error writing: $!";
     return 1;
   }
 }
@@ -943,22 +995,24 @@ sub get_perl {
     $perl = $Config{perlpath};
     $perl =~ s|/[^/]*$|/$^X|;
   }
-  $perl =~ /^(.*)$/;
-  return $1;
+  untaint_var(\$perl);
+  return $perl;
 }
 
 ###########################################################################
 
 sub read_cachefile {
   my ($self, $cachefile) = @_;
+  local *IN;
   if (open(IN, "<".$cachefile)) {
-    my $str = join("", <IN>);
-    close IN;
-    $str =~ /^(.*)$/s;
-    my $untainted = $1;
+    my($inbuf,$nread,$str); $str = '';
+    while ( $nread=read(IN,$inbuf,16384) ) { $str .= $inbuf }
+    defined $nread  or die "error reading from $cachefile: $!";
+    close IN  or die "error closing $cachefile: $!";
 
-    my $VAR1;                 # Data::Dumper
-    if (eval $untainted) {
+    untaint_var(\$str);
+    my $VAR1;              # Data::Dumper
+    if (eval $str) {
       return $VAR1;        # Data::Dumper's naming
     }
   }
@@ -972,10 +1026,81 @@ sub write_cachefile {
   $dump->Deepcopy(1);
   $dump->Purity(1);
   $dump->Indent(1);
-  mkdir ($self->{main}->{bases_cache_dir});
-  open (CACHE, ">$cachefile") or warn "cannot write to $cachefile";
-  print CACHE $dump->Dump, ";1;";
-  close CACHE or warn "cannot close $cachefile";
+  if (mkdir($self->{main}->{bases_cache_dir})) {
+    # successfully created
+  } elsif ($! == EEXIST) {
+    dbg("zoom: ok, cache directory already existed");
+  } else {
+    warn "cannot create a directory: $!";
+  }
+  open(CACHE, ">$cachefile")  or warn "cannot write to $cachefile";
+  print CACHE ($dump->Dump, ";1;")  or die "error writing: $!";
+  close CACHE  or die "error closing $cachefile: $!";
+}
+
+=item my ($cleanregexp) = fixup_re($regexp);
+
+Converts encoded characters in a regular expression pattern into their
+equivalent characters
+
+=cut
+
+sub fixup_re {
+  my $re = shift;
+  
+  if ($fixup_re_test) { print "INPUT: /$re/\n"  or die "error writing: $!" }
+  
+  my $output = "";
+  my $TOK = qr([\"\\]);
+
+  my $STATE;
+  local ($1,$2);
+  while ($re =~ /\G(.*?)($TOK)/gc) {
+    my $pre = $1;
+    my $tok = $2;
+
+    if (length($pre)) {
+      $output .= "\"$pre\"";
+    }
+
+    if ($tok eq '"') {
+      $output .= '"\\""';
+    }
+    elsif ($tok eq '\\') {
+      $re =~ /\G(x\{[^\}]+\}|\d+|.)/gc or die "\\ at end of string!";
+      my $esc = $1;
+      if ($esc eq '"') {
+        $output .= '"\\""';
+      } elsif ($esc eq '\\') {
+        $output .= '"**BACKSLASH**"';   # avoid hairy escape-parsing
+      } elsif ($esc =~ /^x\{(\S+)\}$/) {
+        $output .= '"'.chr(hex($1)).'"';
+      } elsif ($esc =~ /^\d+/) {
+        $output .= '"'.chr(oct($esc)).'"';
+      } else {
+        $output .= "\"$esc\"";
+      }
+    }
+    else {
+      print "PRE: $pre\nTOK: $tok\n"  or die "error writing: $!";
+    }
+  }
+  
+  if (!defined(pos($re))) {
+    # no matches
+    $output .= "\"$re\"";
+  }
+  elsif (pos($re) <= length($re)) {
+    $output .= fixup_re(substr($re, pos($re)));
+  }
+
+  $output =~ s/^""/"/;  # protect start and end quotes
+  $output =~ s/(?<!\\)""$/"/;
+  $output =~ s/(?<!\\)""//g; # strip empty strings, or turn "abc""def" -> "abcdef"
+  $output =~ s/\*\*BACKSLASH\*\*/\\\\/gs;
+
+  if ($fixup_re_test) { print "OUTPUT: $output\n"  or die "error writing: $!" }
+  return $output;
 }
 
 1;

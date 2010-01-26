@@ -8,11 +8,12 @@ package Mail::SpamAssassin::Plugin::OneLineBodyRuleType;
 
 use Mail::SpamAssassin::Plugin;
 use Mail::SpamAssassin::Logger;
-use Mail::SpamAssassin::Util;
+use Mail::SpamAssassin::Util qw(untaint_var);
 use Mail::SpamAssassin::Constants qw(:sa);
 
 use strict;
 use warnings;
+use re 'taint';
 
 use vars qw(@ISA); @ISA = qw();
 
@@ -75,7 +76,6 @@ package Mail::SpamAssassin::Plugin::Check;
 
 sub do_one_line_body_tests {
   my ($self, $pms, $priority) = @_;
-  my $loopid = 0;
 
   # TODO: should have a consttype for plugin-defined "alien" rule types,
   # probably something like TYPE_ALIEN_TESTS.  it's only used as a key
@@ -89,11 +89,11 @@ sub do_one_line_body_tests {
     loop_body => sub
   {
     my ($self, $pms, $conf, $rulename, $pat, %opts) = @_;
+    $pat = untaint_var($pat);
     my $sub;
 
     if (($conf->{tflags}->{$rulename}||'') =~ /\bmultiple\b/)
     {
-      $loopid++;                 # support multiple matches
       $sub = '
       pos $_[1] = 0;
       '.$self->hash_line_for_rule($pms, $rulename).'
@@ -117,12 +117,15 @@ sub do_one_line_body_tests {
 
     }
 
+    return if ($opts{doing_user_rules} &&
+                  !$self->is_user_rule_sub($rulename.'_one_line_body_test'));
+
     $self->add_temporary_method ($rulename.'_one_line_body_test', '{'.$sub.'}');
   },
     pre_loop_body => sub
   {
     my ($self, $pms, $conf, %opts) = @_;
-    $self->add_evalstr ('
+    $self->add_evalstr($pms, '
  
       my $bodytext = $self->get_decoded_stripped_body_text_array();
       $self->{main}->call_plugins("run_body_fast_scan", {

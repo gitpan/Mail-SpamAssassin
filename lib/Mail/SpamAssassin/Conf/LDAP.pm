@@ -46,6 +46,7 @@ use Mail::SpamAssassin::Logger;
 use strict;
 use warnings;
 use bytes;
+use re 'taint';
 
 use vars qw{
   @ISA
@@ -104,11 +105,11 @@ sub load {
      require Net::LDAP;
      require URI;
      load_with_ldap($self, $username, $url);
+     1;
+   } or do {
+     my $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
+     warn "ldap: failed to load user ($username) scores from LDAP server, ignored: $eval_stat\n";
    };
-
-   if ($@) {
-     warn "ldap: failed to load user scores from LDAP server, ignored ($@)\n";
-   }
 }
 
 sub load_with_ldap {

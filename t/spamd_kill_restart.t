@@ -2,7 +2,9 @@
 
 use lib '.'; use lib 't';
 use SATest; sa_t_init("spamd_kill_restart");
-use constant TEST_ENABLED => !$SKIP_SPAMD_TESTS && !$RUNNING_ON_WINDOWS;
+
+use constant TEST_ENABLED => conf_bool('run_long_tests') &&
+                                !$SKIP_SPAMD_TESTS && !$RUNNING_ON_WINDOWS;
 
 use Test; BEGIN { plan tests => (TEST_ENABLED? 93 : 0) };
 
@@ -14,6 +16,10 @@ exit unless TEST_ENABLED;
 
 my $pid_file = "log/spamd.pid";
 my($pid1, $pid2);
+
+tstlocalrules("
+    use_auto_whitelist 0
+  ");
 
 dbgprint "Starting spamd...\n";
 start_spamd("-L -r ${pid_file}");

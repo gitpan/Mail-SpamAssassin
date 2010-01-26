@@ -23,6 +23,11 @@ my $LOCAL_RULES_DIR = '@@LOCAL_RULES_DIR@@';    # substituted at 'make' time
 my $LOCAL_STATE_DIR = '@@LOCAL_STATE_DIR@@';    # substituted at 'make' time
 use lib '@@INSTALLSITELIB@@';                   # substituted at 'make' time
 
+use strict;
+use warnings;
+use re 'taint';
+
+use Errno qw(EBADF);
 use File::Spec;
 use Config;
 
@@ -51,10 +56,9 @@ BEGIN {                          # see comments in "spamassassin.raw" for doco
   }
 }
 
-use strict;
-use warnings;
-
 use Mail::SpamAssassin;
+use Mail::SpamAssassin::Util qw(untaint_var exit_status_str);
+use Mail::SpamAssassin::Logger;
 use Getopt::Long;
 use File::Copy;
 use File::Path;
@@ -63,19 +67,7 @@ use Data::Dumper;
 
 use vars qw( %opt );
 Mail::SpamAssassin::Util::clean_path_in_taint_mode();
-Mail::SpamAssassin::Util::untaint_var( \%ENV );
-
-##############################################################################
-
-# testing purposes only
-my $fixup_re_test;
-#$fixup_re_test = 1; fixup_re("fr()|\\\\|"); die;
-#$fixup_re_test = 1; fixup_re("\\x{1b}\$b"); die;
-#$fixup_re_test = 1; fixup_re("\\33\$b"); die;
-#$fixup_re_test = 1; fixup_re("[link]"); die;
-#$fixup_re_test = 1; fixup_re("please do not resend your original message."); die;
-
-##############################################################################
+untaint_var( \%ENV );
 
 Getopt::Long::Configure(
   qw(bundling no_getopt_compat
@@ -85,6 +77,7 @@ Getopt::Long::Configure(
 GetOptions(
   'list'		=> \$opt{'list'},
   'sudo'		=> \$opt{'sudo'},
+  'quiet'               => \$opt{'quiet'},
   'keep-tmps'		=> \$opt{'keep-tmps'},
 
   'configpath|config-file|config-dir|c|C=s' => \$opt{'configpath'},
@@ -102,8 +95,23 @@ if ( defined $opt{'help'} ) {
   usage( 0, "For more information read the manual page" );
 }
 if ( defined $opt{'version'} ) {
-  print "SpamAssassin version " . Mail::SpamAssassin::Version() . "\n";
+  print "SpamAssassin version " . Mail::SpamAssassin::Version() . "\n"
+    or die "error writing: $!";
   exit 0;
+}
+
+# Check for some dependencies and provide useful error messages if they aren't
+# present
+eval("use ExtUtils::MakeMaker");
+if ($@) {
+  print "$0 requires ExtUtils::MakeMaker for proper operation.\n"
+    or die "error writing: $!";
+  exit 1;
+}
+unless (qx(re2c -V)) {
+  print "$0 requires re2c for proper operation.\n"
+    or die "error writing: $!";
+  exit 1;
 }
 
 sub usage {
@@ -112,7 +120,7 @@ sub usage {
 
   if ($exitval == 0) {
     print_version();
-    print("\n");
+    print("\n")  or die "error writing: $!";
   }
   pod2usage(
     -verbose => 0,
@@ -128,6 +136,8 @@ if (defined $opt{'debug'}) {
 
 # at least info
 $opt{'debug'} ||= 'info';
+
+my $quiet = $opt{'quiet'} || 0;
 
 # ensure the body-rule base extractor plugin is loaded, we use that
 my $post_config = q(
@@ -158,6 +168,7 @@ $spamtest->{bases_can_use_alternations} = 0;
 $spamtest->{bases_can_use_quantifiers} = 0;
 $spamtest->{bases_can_use_char_classes} = 0;
 $spamtest->{bases_split_out_alternations} = 1;
+$spamtest->{base_quiet} = $quiet;
 
 if (defined $opt{'updatedir'}) {
   $opt{'updatedir'} = Mail::SpamAssassin::Util::untaint_file_path($opt{'updatedir'});
@@ -195,6 +206,11 @@ else {
 }
 
 $spamtest->finish();
+
+# make sure we notice any write errors while flushing output buffer
+close STDOUT  or die "error closing STDOUT: $!";
+close STDIN   or die "error closing STDIN: $!";
+
 exit;
 
 ##############################################################################
@@ -243,47 +259,72 @@ sub compile_base_strings {
     my $basespath = "bases_$ruletype.in";
     $basespath =~ s/[^A-Za-z0-9_\.]/_/gs;
     open OUT, ">$dirpath/$basespath"
-          or die "cannot write to $dirpath/$basespath";
-    print OUT dump_base_strings($ruletype);
-    close OUT or die "cannot write to $dirpath/$basespath";
+      or die "cannot create $dirpath/$basespath: $!";
+    print OUT dump_base_strings($ruletype)
+      or die "error writing to $dirpath/$basespath: $!";
+    close OUT
+      or die "error closing $dirpath/$basespath: $!";
 
     # compile it...
 
-    chdir $dirpath; print "cd $dirpath\n";
+    chdir $dirpath  or die "cannot chdir to $dirpath: $!";
+    if (!$quiet) { print "cd $dirpath\n"  or die "error writing: $!" }
+
     rule2xs($basespath);
 
-    run(get_perl()." Makefile.PL ".
-          "PREFIX=$dirpath/ignored INSTALLSITEARCH=$installdir");
+    my $log = "";
+    if ($quiet) {
+      $log = ">>$dirpath/log";
+      # empty it
+      open(ZERO, ">$dirpath/log")  or die "cannot create $dirpath/log: $!";
+      close ZERO  or die "error closing $dirpath/log: $!";
+    }
 
-    run("make");
-    run($sudo."make install");	# into $installdir
+    run(get_perl()." Makefile.PL ".
+          "PREFIX=$dirpath/ignored INSTALLSITEARCH=$installdir $log");
+
+    run("make $log");
+    run($sudo."make install $log");	# into $installdir
 
     # and generate the bases.pl file, for perl consumers
 
     my $plpath = "bases_$ruletype.pl";
     $plpath =~ s/[^A-Za-z0-9_\.]/_/gs;
-    open OUT, ">$dirpath/$plpath"
-          or die "cannot write to $dirpath/$plpath";
-    print OUT dump_as_perl($ruletype);
-    close OUT or die "cannot write to $dirpath/$plpath";
+    open(OUT, ">$dirpath/$plpath")
+      or die "cannot create $dirpath/$plpath: $!";
+    print OUT dump_as_perl($ruletype)
+      or die "error writing to $dirpath/$plpath: $!";
+    close OUT
+      or die "error closing $dirpath/$plpath: $!";
 
     run($sudo."cp $dirpath/$plpath $installdir/$plpath");
   }
 
   if (!$opt{'keep-tmps'}) {
-    chdir '/'; print "cd /\n";      # saves trouble on MacOS, possibly
+    chdir '/'; 
+    if (!$quiet) {
+      # saves trouble on MacOS, possibly
+      print "cd /\n"  or die "error writing: $!";
+    }
     run($sudo."rm -rf $dirpath");       # cleanup
   }
   else {
-    print "temporary dir left due to --keep-tmps: $dirpath\n";
+    print "temporary dir left due to --keep-tmps: $dirpath\n"
+      or die "error writing: $!";
   }
 }
 
 sub run {
   my @cmd = @_;
-  print join(' ',@cmd)."\n";
-  system(@cmd);
-  ($?>>8 != 0) and die "command failed!";
+  if (!$quiet) { print join(' ',@cmd)."\n"  or die "error writing: $!" }
+  if (system(@cmd) != 0) {
+    my $msg = $? == -1 ? "failed to execute: $!"
+                       : "failed: ".exit_status_str($?);
+    if (!$quiet) { die "command ".$msg."\n" }
+    else { die "command '".join(' ',@cmd)."' ".$msg."\n" }
+    return 0;
+  }
+  return 1;
 }
 
 sub get_perl {
@@ -295,8 +336,7 @@ sub get_perl {
     $perl = $Config{perlpath};
     $perl =~ s|/[^/]*$|/$^X|;
   }
-  $perl =~ /^(.*)$/;
-  return $1;
+  return untaint_var($perl);
 }
 
 ##############################################################################
@@ -308,12 +348,14 @@ sub rule2xs {
   my $force = 1;
   my $FILE = shift;
 
-  open(my $fh, $FILE) || die "open($FILE): $!";
+  open(my $fh, $FILE)  or die "cannot open $FILE: $!";
 # read ruleset name from the first line in the file
   my $ruleset_name;
   $_ = <$fh>;
+  defined $_  or die "error reading $FILE: $!";
+  local ($1);
   if (/^name\s+(\S+)/) {
-    $ruleset_name = $1;
+    $ruleset_name = untaint_var($1);
   }
 
   if (!$modname) {
@@ -322,15 +364,17 @@ sub rule2xs {
 
   our $PATH = $modname;
   $PATH =~ s/::/-/g;
+  $PATH =~ s/[^-_A-Za-z0-9\.]/_/g;
   our $PMFILE = $modname;
   $PMFILE =~ s/.*:://;
   $PMFILE .= ".pm";
   our $XSFILE = $PMFILE;
   $XSFILE =~ s/\.pm$/.xs/;
 
-  $force and rmtree $PATH;
+  $force and system("rm -rf $PATH");
   mkdir $PATH or (!$force and die "mkdir($PATH): $!");
-  chdir $PATH; print "cd $PATH\n";
+  chdir $PATH;
+  if (!$quiet) { print "cd $PATH\n" or die "error writing: $!" }
 
   my $cprefix = $modname; $cprefix =~ s/[^A-ZA-z0-9]+/_/gs;
 
@@ -340,9 +384,10 @@ sub rule2xs {
   while (!eof($fh)) {
     $numscans++;
 
-    open(my $re, ">scanner${numscans}.re") || die "open(>scanner{$numscans}.re): $!";
+    open(my $re, ">scanner${numscans}.re")
+      or die "cannot create scanner${numscans}.re: $!";
 
-    print $re <<EOT;
+    print $re <<EOT  or die "error writing: $!";
 #define NULL            ((char*) 0)
 #define YYCTYPE         unsigned char
 #define YYCURSOR        *p
@@ -355,17 +400,18 @@ sub rule2xs {
 #define RET(x)          { YYCURSOR = YYMARKER; return (x); }
 EOT
 
-    print $re <<EOT;
+    print $re <<EOT  or die "error writing: $!";
 char *${cprefix}_scan${numscans}(unsigned char **p){
-unsigned char *q;
+unsigned char *q = 1 + *p;
 /*!re2c
 EOT
 
     my $line = 0;
     my $rulecount = 0;
-    while (<$fh>) {
+    for ($!=0; <$fh>; $!=0) {
       next if /^#/;
 
+      local ($1,$2);
       if (/^orig\s+(\S+)\s+(.*)$/) {
 	my $name = $1;
 	my $regexp = $2;
@@ -380,14 +426,22 @@ EOT
       die "no 'r REGEXP:REASON' in $_" unless defined $regexp;
 
       eval {
-	print $re "\t", fixup_re($regexp), "            {RET(\"$reason\");}\n";
-	$line++;
+	print $re "\t",
+          Mail::SpamAssassin::Plugin::BodyRuleBaseExtractor::fixup_re($regexp),
+          "            {RET(\"$reason\");}\n"
+          or die "error writing: $!";
+	$line++; 1;
+      } or do {
+        my $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
+        handle_fixup_error($eval_stat, $regexp, $reason);
       };
-      $@ and handle_fixup_error($@, $regexp, $reason);
       last if $line == MAX_RULES_PER_C_FILE;
     }
+    defined $_ || $!==0  or
+      $!==EBADF ? dbg("error reading from $FILE: $!")
+                : die "error reading from $FILE: $!";
 
-    print $re <<EOT;
+    print $re <<EOT  or die "error writing: $!";
   [\\000-\\377]        { return NULL; }
 */
 }
@@ -397,11 +451,9 @@ EOT
 
   for (1..$numscans) {
     my $cmd = "re2c -i -b -o scanner$_.c scanner$_.re";
-    run($cmd);
-
-    # this must be fatal; it can result in corrupt output modules missing
-    # scannerN() functions
-    if ($? >> 8 != 0) {
+    if (!run($cmd)) {
+      # this must be fatal; it can result in corrupt output modules missing
+      # scannerN() functions
       my $cwd = `pwd`; chop $cwd;
       die "'$cmd' failed, dying!\n".
           "Have you got a sufficiently-recent version of re2c?\n".
@@ -411,8 +463,8 @@ EOT
 
   my $ccopt = $Config{optimize};      # typically "-O2"
 
-  open(FILE, ">Makefile.PL") || die "write Makefile.PL: $!";
-  print FILE <<"EOT";
+  open(FILE, ">Makefile.PL")  or die "cannot create Makefile.PL: $!";
+  print FILE <<"EOT"  or die "error writing to Makefile.PL: $!";
     use ExtUtils::MakeMaker;
 
     WriteMakefile(
@@ -424,10 +476,10 @@ EOT
 	'AUTHOR' => 'A. U. Tomated <automated\@example.com>',
     );
 EOT
-  close FILE or die "write Makefile.PL: $!";
+  close FILE  or die "error closing Makefile.PL: $!";
 
-  open(FILE, ">MANIFEST.SKIP") || die "write MANIFEST.SKIP: $!";
-  print FILE <<'EOT';
+  open(FILE, ">MANIFEST.SKIP")  or die "cannot create MANIFEST.SKIP: $!";
+  print FILE <<'EOT'  or die "error writing to MANIFEST.SKIP: $!";
 CVS/.*
 \.bak$
 \.sw[a-z]$
@@ -445,10 +497,10 @@ CVS/.*
 ^pm_to_blib$
 ~$
 EOT
-  close FILE or die "write MANIFEST.SKIP: $!";
+  close FILE  or die "error closing MANIFEST.SKIP: $!";
 
-  open(my $re, ">$XSFILE") || die "write $XSFILE: $!";
-  print $re <<"EOT";
+  open(my $re, ">$XSFILE")  or die "cannot create $XSFILE: $!";
+  print $re <<"EOT"  or die "error writing to $XSFILE: $!";
 #include "EXTERN.h"
 #include "perl.h"
 #include "XSUB.h"
@@ -495,7 +547,6 @@ scan(psv)
 	SV* psv
 
   PREINIT:
-	int i;
 	char *match;
 	unsigned char *cursor;
 	unsigned char *pstart;
@@ -525,7 +576,7 @@ EOT
 
 	  cursor = pstart;
 	  while (cursor < pend) {
-	    while (match = ${funcname} (\&cursor)) {
+	    while ((match = ${funcname} (\&cursor)) != NULL) {
 	      split_and_add(results, match);
 	    }
 	  }
@@ -534,17 +585,17 @@ EOT
 
   }
 
-  print $re $xscode;
-  print $re <<EOT;
+  print $re $xscode  or die "error writing: $!";
+  print $re <<EOT  or die "error writing: $!";;
 	  RETVAL = newRV((SV *) results);
       OUTPUT:
 	  RETVAL
 
 EOT
 
-  close($re);
+  close($re)  or die "error closing $XSFILE: $!";
 
-  open(FILE, ">$PMFILE") || die "write $PMFILE: $!";
+  open(FILE, ">$PMFILE")  or die "cannot create $PMFILE: $!";
   my $str =<<"EOT";
 
 package $modname;
@@ -552,18 +603,18 @@ package $modname;
 use strict;
 use vars qw(\$VERSION \@ISA \@EXPORT_OK);
 
-use DynaLoader ();
+use XSLoader ();
 
 BEGIN {
 \$VERSION = '1.0';
-\@ISA = qw(DynaLoader);
+\@ISA = qw(XSLoader);
 \@EXPORT_OK = qw();
 
 our \$HAS_RULES = {
   $has_rules
 };
 
-bootstrap $modname \$VERSION;
+XSLoader::load '$modname', \$VERSION;
 }
 
 1;
@@ -592,65 +643,8 @@ fnord=cut
 EOT
 
   $str =~ s/^fnord//gm;
-  print FILE $str;
-  close FILE or die "write $PMFILE: $!";
-}
-
-sub fixup_re {
-  my $re = shift;
-  
-  $fixup_re_test and print "INPUT: /$re/\n";
-  
-  my $output = "";
-  my $TOK = qr([\"\\]);
-
-  my $STATE;
-  while ($re =~ /\G(.*?)($TOK)/gc) {
-    my $pre = $1;
-    my $tok = $2;
-
-    if (length($pre)) {
-      $output .= "\"$pre\"";
-    }
-
-    if ($tok eq '"') {
-      $output .= '"\\""';
-    }
-    elsif ($tok eq '\\') {
-      $re =~ /\G(x\{[^\}]+\}|\d+|.)/gc or die "\\ at end of string!";
-      my $esc = $1;
-      if ($esc eq '"') {
-        $output .= '"\\""';
-      } elsif ($esc eq '\\') {
-        $output .= '"**BACKSLASH**"';   # avoid hairy escape-parsing
-      } elsif ($esc =~ /^x\{(\S+)\}$/) {
-        $output .= '"'.chr(hex($1)).'"';
-      } elsif ($esc =~ /^\d+/) {
-        $output .= '"'.chr(oct($esc)).'"';
-      } else {
-        $output .= "\"$esc\"";
-      }
-    }
-    else {
-      print "PRE: $pre\nTOK: $tok\n";
-    }
-  }
-  
-  if (!defined(pos($re))) {
-    # no matches
-    $output .= "\"$re\"";
-  }
-  elsif (pos($re) <= length($re)) {
-    $output .= fixup_re(substr($re, pos($re)));
-  }
-
-  $output =~ s/^""/"/;  # protect start and end quotes
-  $output =~ s/(?<!\\)""$/"/;
-  $output =~ s/(?<!\\)""//g; # strip empty strings, or turn "abc""def" -> "abcdef"
-  $output =~ s/\*\*BACKSLASH\*\*/\\\\/gs;
-
-  $fixup_re_test and print "OUTPUT: $output\n";
-  return $output;
+  print FILE $str  or die "error writing to $PMFILE: $!";
+  close FILE  or die "error closing $PMFILE: $!";
 }
 
 sub handle_fixup_error {
@@ -684,7 +678,7 @@ Options:
   --siteconfigpath=path         Path for site configs
                                 (default: /etc/mail/spamassassin)
   --updatedir=path              Directory to place updates
-                      (default: /var/lib/spamassassin/compiled/<perlversion>/<version>)
+          (default: @@LOCAL_STATE_DIR@@/compiled/<perlversion>/@@VERSION@@)
   --cf='config line'            Additional line of configuration
   -D, --debug [area=n,...]	Print debugging messages
   -V, --version			Print version
@@ -727,6 +721,10 @@ the C extension code.
 Use C<sudo(8)> to run code as 'root' when writing files to the compiled-rules
 storage area (which is C<@@LOCAL_STATE_DIR@@/compiled/@@PERL_MAJOR_VER@@/@@VERSION@@> by default).
 
+=item B<--quiet>
+
+Produce less diagnostic output.  Errors will still be displayed.
+
 =item B<--keep-tmps>
 
 Keep temporary files after the script completes, instead of
@@ -746,7 +744,7 @@ the default directories (usually C</etc/mail/spamassassin> or similar).
 
 By default, C<sa-compile> will use the system-wide rules update directory:
 
-        @@LOCAL_STATE_DIR@@/spamassassin/compiled/@@PERL_MAJOR_VER@@/@@VERSION@@
+        @@LOCAL_STATE_DIR@@/compiled/@@PERL_MAJOR_VER@@/@@VERSION@@
 
 If the updates should be stored in another location, specify it here.
 

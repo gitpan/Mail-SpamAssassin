@@ -37,6 +37,7 @@ package Mail::SpamAssassin::BayesStore::PgSQL;
 use strict;
 use warnings;
 use bytes;
+use re 'taint';
 
 use Mail::SpamAssassin::BayesStore::SQL;
 use Mail::SpamAssassin::Logger;
@@ -139,7 +140,7 @@ sub token_expiration {
       goto token_expiration_final;
     }
 
-    $deleted = $rows;
+    $deleted = ($rows eq '0E0') ? 0 : $rows;
   }
 
   # Update the magic tokens as appropriate
@@ -757,7 +758,7 @@ sub tok_touch_allold {
 public instance (Boolean) cleanup ()
 
 Description:
-This method peroms any cleanup necessary before moving onto the next
+This method perfoms any cleanup necessary before moving onto the next
 operation.
 
 =cut
@@ -892,7 +893,8 @@ sub _connect_db {
 
   if ( $dbh->{pg_server_version} >= 80100 ) {
     $self->{_esc_prefix} = 'E';
-  } else {
+  }
+  else {
     $self->{_esc_prefix} = '';
   }
 
@@ -932,15 +934,14 @@ sub _put_token {
     # XXX - future optimization, since we have the existing spam/ham counts
     # we can make an educated guess on if the count would reach 0, for
     # instance, if we are decreasing spam_count but spam_count is currently
-    # > 1000, then there is no possible why this update or any others that
+    # > 1000, then there is no possible way this update or any others that
     # might currently be happening could reduce that value to 0, so there
     # would be no need to set the needs_cleanup flag
     $self->{needs_cleanup} = 1;
   }
 
   my $escaped_token = _quote_bytea($token);
-  my $sth = $self->{_dbh}->prepare("select put_tokens($self->{_userid},$self->{_esc_prefix}'{$escaped_token}',
-                                                      $spam_count,$ham_count,$atime)");
+  my $sth = $self->{_dbh}->prepare("select put_tokens($self->{_userid}, $self->{_esc_prefix}'{$escaped_token}', $spam_count,$ham_count,$atime)");
 
   unless (defined($sth)) {
     dbg("bayes: _put_token: SQL error: ".$self->{_dbh}->errstr());
@@ -995,7 +996,7 @@ sub _put_tokens {
     # XXX - future optimization, since we have the existing spam/ham counts
     # we can make an educated guess on if the count would reach 0, for
     # instance, if we are decreasing spam_count but spam_count is currently
-    # > 1000, then there is no possible why this update or any others that
+    # > 1000, then there is no possible way this update or any others that
     # might currently be happening could reduce that value to 0, so there
     # would be no need to set the needs_cleanup flag
     $self->{needs_cleanup} = 1;
@@ -1003,8 +1004,7 @@ sub _put_tokens {
 
   my $tokenarray = join(",", map { '"' . _quote_bytea($_) . '"' } sort keys %{$tokens});
 
-  my $sth = $self->{_dbh}->prepare("select put_tokens($self->{_userid}, $self->{_esc_prefix}'{$tokenarray}',
-                                                     $spam_count, $ham_count, $atime)");
+  my $sth = $self->{_dbh}->prepare("select put_tokens($self->{_userid}, $self->{_esc_prefix}'{$tokenarray}', $spam_count, $ham_count, $atime)");
 
   unless (defined($sth)) {
     dbg("bayes: _put_tokens: SQL error: ".$self->{_dbh}->errstr());

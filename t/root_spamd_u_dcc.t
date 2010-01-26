@@ -55,7 +55,7 @@ alarm 0;
 # the spamd kids to get hung
 for my $try (1 .. 5) {
   $SIG{ALRM} = sub { stop_spamd(); die "timed out"; };
-  alarm 30;
+  alarm 10;
   ok(spamcrun("< data/spam/gtubedcc.eml", \&patterns_run_cb));
   alarm 0;
   ok_all_patterns();

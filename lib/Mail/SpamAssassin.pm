@@ -35,6 +35,7 @@ Mail::SpamAssassin - Spam detector and markup engine
 
   $status->finish();
   $mail->finish();
+  $spamtest->finish();
 
 =head1 DESCRIPTION
 
@@ -61,6 +62,7 @@ package Mail::SpamAssassin;
 use strict;
 use warnings;
 use bytes;
+use re 'taint';
 
 require 5.006_001;
 
@@ -73,20 +75,16 @@ use Mail::SpamAssassin::PerMsgStatus;
 use Mail::SpamAssassin::Message;
 use Mail::SpamAssassin::PluginHandler;
 use Mail::SpamAssassin::DnsResolver;
+use Mail::SpamAssassin::Util::ScopedTimer;
 
 use Errno qw(ENOENT EACCES);
 use File::Basename;
 use File::Path;
 use File::Spec 0.8;
 use File::Copy;
+use Time::HiRes qw(time);
 use Cwd;
 use Config;
-
-# Load Time::HiRes if it's available
-BEGIN {
-  eval { require Time::HiRes };
-  Time::HiRes->import( qw(time) ) unless $@;
-}
 
 use vars qw{
   @ISA $VERSION $SUB_VERSION @EXTRA_VERSION $IS_DEVEL_BUILD $HOME_URL
@@ -95,7 +93,7 @@ use vars qw{
   @site_rules_path
 };
 
-$VERSION = "3.002005";      # update after release (same format as perl $])
+$VERSION = "3.003000";      # update after release (same format as perl $])
 # $IS_DEVEL_BUILD = 1;        # change for release versions
 
 # Used during the prerelease/release-candidate part of the official release
@@ -106,11 +104,11 @@ $VERSION = "3.002005";      # update after release (same format as perl $])
 @ISA = qw();
 
 # SUB_VERSION is now just <yyyy>-<mm>-<dd>
-$SUB_VERSION = (split(/\s+/,'$LastChangedDate: 2008-06-10 09:13:55 +0000 (Tue, 10 Jun 2008) $ updated by SVN'))[1];
+$SUB_VERSION = (split(/\s+/,'$LastChangedDate: 2010-01-18 23:42:44 +0000 (Mon, 18 Jan 2010) $ updated by SVN'))[1];
 
 if (defined $IS_DEVEL_BUILD && $IS_DEVEL_BUILD) {
   push(@EXTRA_VERSION,
-       ('r' . qw{$LastChangedRevision: 666026 $ updated by SVN}[1]));
+       ('r' . qw{$LastChangedRevision: 900609 $ updated by SVN}[1]));
 }
 
 sub Version {
@@ -194,7 +192,8 @@ The filename/directory to load spam-identifying rules from. (optional)
 
 =item site_rules_filename
 
-The directory to load site-specific spam-identifying rules from. (optional)
+The filename/directory to load site-specific spam-identifying rules from.
+(optional)
 
 =item userprefs_filename
 
@@ -216,6 +215,11 @@ from files, read them in yourself and set this instead.  As a result, this will
 override the settings for C<rules_filename>, C<site_rules_filename>,
 and C<userprefs_filename>.
 
+=item pre_config_text
+
+Similar to C<config_text>, this text is placed before config_text to allow an
+override of config files.
+
 =item post_config_text
 
 Similar to C<config_text>, this text is placed after config_text to allow an
@@ -225,6 +229,11 @@ override of config files.
 
 If set to 1, DNS tests will not attempt to use IPv6. Use if the existing tests
 for IPv6 availablity produce incorrect results or crashes.
+
+=item require_rules
+
+If set to 1, init() will die if no valid rules could be loaded. This is the
+default behaviour when called by C<spamassassin> or C<spamd>.
 
 =item languages_filename
 
@@ -238,6 +247,35 @@ found in the SpamAssassin B<rules> directory.
 
 If set to 1, no tests that require internet access will be performed. (default:
 0)
+
+=item need_tags
+
+The option provides a way to avoid more expensive processing when it is known
+in advance that some information will not be needed by a caller.
+
+A value of the option can either be a string (a comma-delimited list of tag
+names), or a reference to a list of individual tag names. A caller may provide
+the list in advance, specifying his intention to later collect the information
+through $pms->get_tag() calls. If a name of a tag starts with a 'NO' (case
+insensitive), it shows that a caller will not be interested in such tag,
+although there is no guarantee it would save any resources, nor that a tag
+value will be empty. Currently no built-in tags start with 'NO'. A later
+entry overrides previous one, e.g. ASN,NOASN,ASN,TIMING,NOASN is equivalent
+to TIMING,NOASN.
+
+For backwards compatibility, all tags available as of version 3.2.4 will
+be available by default (unless disabled by NOtag), even if not requested
+through need_tags option. Future versions may provide new tags conditionally
+available.
+
+Currently the only tag that needs to be explicitly requested is 'TIMING'.
+Not requesting it can save a millisecond or two - it mostly serves to
+illustrate the usage of need_tags.
+
+Example:
+  need_tags =>    'TIMING,noLANGUAGES,RELAYCOUNTRY,ASN,noASNCIDR',
+or:
+  need_tags => [qw(TIMING noLANGUAGES RELAYCOUNTRY ASN noASNCIDR)],
 
 =item ignore_site_cf_files
 
@@ -337,6 +375,20 @@ sub new {
   $self->{DEF_RULES_DIR}	||= '@@DEF_RULES_DIR@@';
   $self->{LOCAL_RULES_DIR}	||= '@@LOCAL_RULES_DIR@@';
   $self->{LOCAL_STATE_DIR}	||= '@@LOCAL_STATE_DIR@@';
+  dbg("generic: Perl %s, %s", $], join(", ", map { $_ . '=' . $self->{$_} } 
+      qw(PREFIX DEF_RULES_DIR LOCAL_RULES_DIR LOCAL_STATE_DIR)));
+
+  $self->{needed_tags} = {};
+  { my $ntags = $self->{need_tags};
+    if (defined $ntags) {
+      for my $t (ref $ntags ? @$ntags : split(/[, \s]+/,$ntags)) {
+        $self->{needed_tags}->{$2} = !defined($1)  if $t =~ /^(NO)?(.+)\z/si;
+      }
+    }
+  }
+  if (would_log('dbg','timing') || $self->{needed_tags}->{TIMING}) {
+    $self->timer_enable();
+  }
 
   $self->{conf} ||= new Mail::SpamAssassin::Conf ($self);
   $self->{plugins} = Mail::SpamAssassin::PluginHandler->new ($self);
@@ -382,14 +434,18 @@ sub create_locker {
   eval '
     use Mail::SpamAssassin::Locker::'.$class.';
     $self->{locker} = new Mail::SpamAssassin::Locker::'.$class.' ($self);
-  '; ($@) and die $@;
+    1;
+  ' or do {
+    my $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
+    die "Mail::SpamAssassin::Locker::$class error: $eval_stat\n";
+  };
 
   if (!defined $self->{locker}) { die "locker: oops! no locker"; }
 }
 
 ###########################################################################
 
-=item parse($message, $parse_now)
+=item parse($message, $parse_now [, $suppl_attrib])
 
 Parse will return a Mail::SpamAssassin::Message object with just the
 headers parsed.  When calling this function, there are two optional
@@ -406,15 +462,47 @@ handy, for instance, when running C<spamassassin -d>, which only
 needs the pristine header and body which is always parsed and stored
 by this function.
 
+The optional last argument I<$suppl_attrib> provides a way for a caller
+to pass additional information about a message to SpamAssassin. It is
+either undef, or a ref to a hash where each key/value pair provides some
+supplementary attribute of the message, typically information that cannot
+be deduced from the message itself, or is hard to do so reliably, or would
+represent unnecessary work for SpamAssassin to obtain it. The argument will
+be stored to a Mail::SpamAssassin::Message object as 'suppl_attrib', thus
+made available to the rest of the code as well as to plugins. The exact list
+of attributes will evolve through time, any unknown attribute should be
+ignored. Possible examples are: SMTP envelope information, a flag indicating
+that a message as supplied by a caller was truncated due to size limit, an
+already verified list of DKIM signature objects, or perhaps a list of rule
+hits predetermined by a caller, which makes another possible way for a
+caller to provide meta information (instead of having to insert made-up
+header fields in order to pass information), or maybe just plain rule hits.
+
 For more information, please see the C<Mail::SpamAssassin::Message>
 and C<Mail::SpamAssassin::Message::Node> POD.
 
 =cut
 
 sub parse {
-  my($self, $message, $parsenow) = @_;
+  my($self, $message, $parsenow, $suppl_attrib) = @_;
+
+  my $start_time = time;
   $self->init(1);
-  my $msg = Mail::SpamAssassin::Message->new({message=>$message, parsenow=>$parsenow, normalize=>$self->{conf}->{normalize_charset}});
+  my $timer = $self->time_method("parse");
+
+  my $msg = Mail::SpamAssassin::Message->new({
+    message=>$message, parsenow=>$parsenow,
+    normalize=>$self->{conf}->{normalize_charset},
+    suppl_attrib=>$suppl_attrib });
+
+  if (ref $suppl_attrib && exists $suppl_attrib->{master_deadline}) {
+    $msg->{master_deadline} = $suppl_attrib->{master_deadline};  # may be undef
+  } elsif ($self->{conf}->{time_limit}) {  # defined and nonzero
+    $msg->{master_deadline} = $start_time + $self->{conf}->{time_limit};
+  }
+  if (defined $msg->{master_deadline}) {
+    dbg("config: time limit %.1f s", $msg->{master_deadline} - $start_time);
+  }
 
   # bug 5069: The goal here is to get rendering plugins to do things
   # like OCR, convert doc and pdf to text, etc, though it could be anything
@@ -446,9 +534,10 @@ sub check {
   my ($self, $mail_obj) = @_;
 
   $self->init(1);
-  my $msg = Mail::SpamAssassin::PerMsgStatus->new($self, $mail_obj);
-  $msg->check();
-  $msg;
+  my $pms = Mail::SpamAssassin::PerMsgStatus->new($self, $mail_obj);
+  $pms->check();
+  dbg("timing: " . $self->timer_report())  if $self->{timer_enabled};
+  $pms;
 }
 
 =item $status = $f->check_message_text ($mailtext)
@@ -620,7 +709,7 @@ Finish learning.
 
 sub finish_learner {
   my $self = shift;
-  $self->{bayes_scanner}->sanity_check_is_untied(1) if $self->{bayes_scanner};
+  $self->{bayes_scanner}->force_close(1) if $self->{bayes_scanner};
   1;
 }
 
@@ -673,6 +762,7 @@ sub signal_user_changed {
   my $opts = shift;
   my $set = 0;
 
+  my $timer = $self->time_method("signal_user_changed");
   dbg("info: user has changed");
 
   if (defined $opts && $opts->{username}) {
@@ -708,7 +798,7 @@ sub signal_user_changed {
 
   $self->{conf}->set_score_set ($set);
 
-  $self->call_plugins ("signal_user_changed", {
+  $self->call_plugins("signal_user_changed", {
 		username => $self->{username},
 		userstate_dir => $self->{userstate_dir},
 		user_dir => $self->{user_dir},
@@ -758,6 +848,7 @@ sub report_as_spam {
   local ($_);
 
   $self->init(1);
+  my $timer = $self->time_method("report_as_spam");
 
   # learn as spam if enabled
   if ( $self->{conf}->{bayes_learn_during_report} ) {
@@ -799,6 +890,7 @@ sub revoke_as_spam {
   local ($_);
 
   $self->init(1);
+  my $timer = $self->time_method("revoke_as_spam");
 
   # learn as nonspam
   $self->learn ($mail, undef, 0, 0);
@@ -810,107 +902,125 @@ sub revoke_as_spam {
 
 ###########################################################################
 
-=item $f->add_address_to_whitelist ($addr)
+=item $f->add_address_to_whitelist ($addr, $cli_p)
 
 Given a string containing an email address, add it to the automatic
 whitelist database.
 
+If $cli_p is set then underlying plugin may give visual feedback on additions/failures.
+
 =cut
 
 sub add_address_to_whitelist {
-  my ($self, $addr) = @_;
+  my ($self, $addr, $cli_p) = @_;
 
-  $self->call_plugins("whitelist_address", { address => $addr });
+  $self->call_plugins("whitelist_address", { address => $addr,
+                                             cli_p => $cli_p });
 }
 
 ###########################################################################
 
-=item $f->add_all_addresses_to_whitelist ($mail)
+=item $f->add_all_addresses_to_whitelist ($mail, $cli_p)
 
 Given a mail message, find as many addresses in the usual headers (To, Cc, From
 etc.), and the message body, and add them to the automatic whitelist database.
 
+If $cli_p is set then underlying plugin may give visual feedback on additions/failures.
+
 =cut
 
 sub add_all_addresses_to_whitelist {
-  my ($self, $mail_obj) = @_;
+  my ($self, $mail_obj, $cli_p) = @_;
 
   foreach my $addr ($self->find_all_addrs_in_mail ($mail_obj)) {
-    $self->call_plugins("whitelist_address", { address => $addr });
+    $self->call_plugins("whitelist_address", { address => $addr,
+                                               cli_p => $cli_p });
   }
 }
 
 ###########################################################################
 
-=item $f->remove_address_from_whitelist ($addr)
+=item $f->remove_address_from_whitelist ($addr, $cli_p)
 
 Given a string containing an email address, remove it from the automatic
 whitelist database.
 
+If $cli_p is set then underlying plugin may give visual feedback on additions/failures.
+
 =cut
 
 sub remove_address_from_whitelist {
-  my ($self, $addr) = @_;
+  my ($self, $addr, $cli_p) = @_;
 
-  $self->call_plugins("remove_address", { address => $addr });
+  $self->call_plugins("remove_address", { address => $addr,
+                                          cli_p => $cli_p });
 }
 
 ###########################################################################
 
-=item $f->remove_all_addresses_from_whitelist ($mail)
+=item $f->remove_all_addresses_from_whitelist ($mail, $cli_p)
 
 Given a mail message, find as many addresses in the usual headers (To, Cc, From
 etc.), and the message body, and remove them from the automatic whitelist
 database.
 
+If $cli_p is set then underlying plugin may give visual feedback on additions/failures.
+
 =cut
 
 sub remove_all_addresses_from_whitelist {
-  my ($self, $mail_obj) = @_;
+  my ($self, $mail_obj, $cli_p) = @_;
 
   foreach my $addr ($self->find_all_addrs_in_mail ($mail_obj)) {
-    $self->call_plugins("remove_address", { address => $addr });
+    $self->call_plugins("remove_address", { address => $addr,
+                                            cli_p => $cli_p });
   }
 }
 
 ###########################################################################
 
-=item $f->add_address_to_blacklist ($addr)
+=item $f->add_address_to_blacklist ($addr, $cli_p)
 
 Given a string containing an email address, add it to the automatic
 whitelist database with a high score, effectively blacklisting them.
 
+If $cli_p is set then underlying plugin may give visual feedback on additions/failures.
+
 =cut
 
 sub add_address_to_blacklist {
-  my ($self, $addr) = @_;
-  $self->call_plugins("blacklist_address", { address => $addr });
+  my ($self, $addr, $cli_p) = @_;
+  $self->call_plugins("blacklist_address", { address => $addr,
+                                             cli_p => $cli_p });
 }
 
 ###########################################################################
 
-=item $f->add_all_addresses_to_blacklist ($mail)
+=item $f->add_all_addresses_to_blacklist ($mail, $cli_p)
 
 Given a mail message, find addresses in the From headers and add them to the
 automatic whitelist database with a high score, effectively blacklisting them.
 
 Note that To and Cc addresses are not used.
 
+If $cli_p is set then underlying plugin may give visual feedback on additions/failures.
+
 =cut
 
 sub add_all_addresses_to_blacklist {
-  my ($self, $mail_obj) = @_;
+  my ($self, $mail_obj, $cli_p) = @_;
 
   $self->init(1);
 
-  my @addrlist = ();
-  my @hdrs = $mail_obj->get_header ('From');
+  my @addrlist;
+  my @hdrs = $mail_obj->get_header('From');
   if ($#hdrs >= 0) {
     push (@addrlist, $self->find_all_addrs_in_line (join (" ", @hdrs)));
   }
 
   foreach my $addr (@addrlist) {
-    $self->call_plugins("blacklist_address", { address => $addr });
+    $self->call_plugins("blacklist_address", { address => $addr,
+                                               cli_p => $cli_p });
   }
 
 }
@@ -934,6 +1044,7 @@ sub remove_spamassassin_markup {
   my ($self, $mail_obj) = @_;
   local ($_);
 
+  my $timer = $self->time_method("remove_spamassassin_markup");
   my $mbox = $mail_obj->get_mbox_separator() || '';
 
   dbg("markup: removing markup");
@@ -1087,18 +1198,23 @@ the administrator settings.
 sub read_scoreonly_config {
   my ($self, $filename) = @_;
 
+  my $timer = $self->time_method("read_scoreonly_config");
+  local *IN;
   if (!open(IN,"<$filename")) {
     # the file may not exist; this should not be verbose
     dbg("config: read_scoreonly_config: cannot open \"$filename\": $!");
     return;
   }
 
-  my $text = "file start $filename\n"
-        . join ('', <IN>)
-        # add an extra \n in case file did not end in one.
-        . "\nfile end $filename\n";
+  my($inbuf,$nread,$text); $text = '';
+  while ( $nread=read(IN,$inbuf,16384) ) { $text .= $inbuf }
+  defined $nread  or die "error reading $filename: $!";
+  close IN  or die "error closing $filename: $!";
+  undef $inbuf;
 
-  close IN;
+  $text = "file start $filename\n" . $text;
+  # add an extra \n in case file did not end in one.
+  $text .= "\nfile end $filename\n";
 
   $self->{conf}->{main} = $self;
   $self->{conf}->parse_scores_only ($text);
@@ -1124,6 +1240,7 @@ the Mail::SpamAssassin object.
 sub load_scoreonly_sql {
   my ($self, $username) = @_;
 
+  my $timer = $self->time_method("load_scoreonly_sql");
   my $src = Mail::SpamAssassin::Conf::SQL->new ($self);
   $self->{username} = $username;
   unless ($src->load($username)) {
@@ -1151,6 +1268,7 @@ sub load_scoreonly_ldap {
   my ($self, $username) = @_;
 
   dbg("config: load_scoreonly_ldap($username)");
+  my $timer = $self->time_method("load_scoreonly_ldap");
   my $src = Mail::SpamAssassin::Conf::LDAP->new ($self);
   $self->{username} = $username;
   $src->load($username);
@@ -1202,23 +1320,12 @@ by a configuration option.  By default, this is disabled.
 sub compile_now {
   my ($self, $use_user_prefs, $deal_with_userstate) = @_;
 
-  # tell plugins we are here
-  $self->call_plugins("compile_now_start",
-		      { use_user_prefs => $use_user_prefs,
-			keep_userstate => $deal_with_userstate});
-
-  # note: this may incur network access. Good.  We want to make sure
-  # as much as possible is preloaded!
-  my @testmsg = ("From: ignore\@compiling.spamassassin.taint.org\n", 
-    "Message-Id:  <".time."\@spamassassin_spamd_init>\n", "\n",
-    "I need to make this message body somewhat long so TextCat preloads\n"x20);
-
-  dbg("ignore: test message to precompile patterns and load modules");
+  my $timer = $self->time_method("compile_now");
 
   # Backup default values which deal with userstate.
   # This is done so we can create any new files in, presumably, a temp dir.
   # see bug 2762 for more details.
-  my %backup = ();
+  my %backup;
   if (defined $deal_with_userstate && $deal_with_userstate) {
     while(my($k,$v) = each %{$self->{conf}}) {
       $backup{$k} = $v if (defined $v && !ref($v) && $v =~/__userstate__/);
@@ -1240,7 +1347,20 @@ sub compile_now {
     }
   }
 
-  my $mail = $self->parse(\@testmsg, 1);
+  dbg("ignore: test message to precompile patterns and load modules");
+
+  # tell plugins we are about to send a message for compiling purposes
+  $self->call_plugins("compile_now_start",
+		      { use_user_prefs => $use_user_prefs,
+			keep_userstate => $deal_with_userstate});
+
+  # note: this may incur network access. Good.  We want to make sure
+  # as much as possible is preloaded!
+  my @testmsg = ("From: ignore\@compiling.spamassassin.taint.org\n", 
+    "Message-Id:  <".time."\@spamassassin_spamd_init>\n", "\n",
+    "I need to make this message body somewhat long so TextCat preloads\n"x20);
+
+  my $mail = $self->parse(\@testmsg, 1, { master_deadline => undef });
   my $status = Mail::SpamAssassin::PerMsgStatus->new($self, $mail,
                         { disable_auto_learning => 1 } );
 
@@ -1266,7 +1386,7 @@ sub compile_now {
   }
 
   # make sure things are ready for scanning
-  $self->{bayes_scanner}->sanity_check_is_untied() if $self->{bayes_scanner};
+  $self->{bayes_scanner}->force_close() if $self->{bayes_scanner};
   $self->call_plugins("compile_now_finish",
 		      { use_user_prefs => $use_user_prefs,
 			keep_userstate => $deal_with_userstate});
@@ -1335,7 +1455,7 @@ sub lint_rules {
   $self->{'conf'}->{'use_auto_whitelist'} = 0;
   $self->{'conf'}->{'bayes_auto_learn'} = 0;
 
-  my $mail = $self->parse(\@testmsg, 1);
+  my $mail = $self->parse(\@testmsg, 1, { master_deadline => undef });
   my $status = Mail::SpamAssassin::PerMsgStatus->new($self, $mail,
                         { disable_auto_learning => 1 } );
   $status->check();
@@ -1343,7 +1463,7 @@ sub lint_rules {
   $self->{syntax_errors} += $status->{rule_errors};
   $status->finish();
   $mail->finish();
-
+  dbg("timing: " . $self->timer_report())  if $self->{timer_enabled};
   return ($self->{syntax_errors});
 }
 
@@ -1360,6 +1480,7 @@ method is called.
 sub finish {
   my ($self) = @_;
 
+  $self->timer_start("finish");
   $self->call_plugins("finish_tests", { conf => $self->{conf},
                                         main => $self });
 
@@ -1373,7 +1494,104 @@ sub finish {
 
   $self->{resolver}->finish();
 
+  $self->timer_end("finish");
   %{$self} = ();
+}
+
+###########################################################################
+# timers: bug 5356
+
+sub timer_enable {
+  my ($self) = @_;
+  dbg("config: timing enabled")  if !$self->{timer_enabled};
+  $self->{timer_enabled} = 1;
+}
+
+sub timer_disable {
+  my ($self) = @_;
+  dbg("config: timing disabled")  if $self->{timer_enabled};
+  $self->{timer_enabled} = 0;
+}
+
+# discard all timers, start afresh
+sub timer_reset {
+  my ($self) = @_;
+  delete $self->{timers};
+  delete $self->{timers_order};
+}
+
+sub timer_start {
+  my ($self, $name) = @_;
+
+  return unless $self->{timer_enabled};
+# dbg("timing: '$name' starting");
+
+  if (!exists $self->{timers}->{$name}) {
+    push @{$self->{timers_order}}, $name;
+  }
+  
+  $self->{timers}->{$name}->{start} = Time::HiRes::time();
+  # note that this will reset any existing, unstopped timer of that name;
+  # that's ok
+}
+
+sub timer_end {
+  my ($self, $name) = @_;
+  return unless $self->{timer_enabled};
+
+  my $t = $self->{timers}->{$name};
+  $t->{end} = time;
+
+  if (!$t->{start}) {
+    warn "timer_end('$name') with no timer_start";
+    return;
+  }
+
+  # add to any existing elapsed time for this event, since
+  # we may call the same timer name multiple times -- this is ok,
+  # as long as they are not nested
+  my $dt = $t->{end} - $t->{start};
+  $dt = 0  if $dt < 0;  # tolerate clock jumps, just in case
+  if (defined $t->{elapsed}) { $t->{elapsed} += $dt }
+  else { $t->{elapsed} = $dt }
+}
+
+sub time_method {
+  my ($self, $name) = @_;
+  return unless $self->{timer_enabled};
+  return Mail::SpamAssassin::Util::ScopedTimer->new($self, $name);
+}
+
+sub timer_report {
+  my ($self) = @_;
+
+  my $earliest;
+  my $latest;
+
+  while (my($name,$h) = each(%{$self->{timers}})) {
+  # dbg("timing: %s - %s", $name, join(", ",
+  #     map { sprintf("%s => %s", $_, $h->{$_}) } keys(%$h)));
+    my $start = $h->{start};
+    if (defined $start && (!defined $earliest || $earliest > $start)) {
+      $earliest = $start;
+    }
+    my $end = $h->{end};
+    if (defined $end && (!defined $latest || $latest < $end)) {
+      $latest = $end;
+    }
+    dbg("timing: start but no end: $name") if defined $start && !defined $end;
+  }
+  my $total =
+    (!defined $latest || !defined $earliest) ? 0 : $latest - $earliest;
+  my @str;
+  foreach my $name (@{$self->{timers_order}}) {
+    my $elapsed = $self->{timers}->{$name}->{elapsed} || 0;
+    my $pc = $total <= 0 || $elapsed >= $total ? 100 : ($elapsed/$total)*100;
+    my $fmt = $elapsed >= 0.002 ? "%.0f" : "%.2f";
+    push @str, sprintf("%s: $fmt (%.1f%%)", $name, $elapsed*1000, $pc);
+  }
+
+  return sprintf("total %.0f ms - %s", $total*1000, join(", ", @str));
 }
 
 ###########################################################################
@@ -1393,6 +1611,7 @@ sub init {
     return;
   }
 
+  my $timer = $self->time_method("init");
   # Note that this PID has run init()
   $self->{_initted} = $$;
 
@@ -1427,7 +1646,11 @@ sub init {
     }
 
     if ($sysrules) {
-      $self->{config_text} .= $self->read_cf($sysrules, 'default rules dir');
+      my $cftext = $self->read_cf($sysrules, 'default rules dir');
+      if ($self->{require_rules} && $cftext !~ /\S/) {
+        die "config: no rules were found!  Do you need to run 'sa-update'?\n";
+      }
+      $self->{config_text} .= $cftext;
     }
 
     if (!$self->{languages_filename}) {
@@ -1450,7 +1673,14 @@ sub init {
         # just use the last entry in the array as the default path.
         $fname ||= $self->sed_path($default_userprefs_path[-1]);
 
-	if (!-f $fname && !$self->create_default_prefs($fname)) {
+        my $stat_errn = stat($fname) ? 0 : 0+$!;
+        if ($stat_errn == 0 && -f _) {
+          # exists and is a regular file, nothing to do
+        } elsif ($stat_errn == 0) {
+          warn "config: default user preference file $fname is not a regular file\n";
+        } elsif ($stat_errn != ENOENT) {
+          warn "config: default user preference file $fname not accessible: $!\n";
+        } elsif (!$self->create_default_prefs($fname)) {
           warn "config: failed to create default user preference file $fname\n";
         }
       }
@@ -1459,20 +1689,37 @@ sub init {
     }
   }
 
-  $self->{config_text} .= $self->{post_config_text} if ($self->{post_config_text});
+  if ($self->{pre_config_text}) {
+    $self->{config_text} = $self->{pre_config_text} . $self->{config_text};
+  }
+  if ($self->{post_config_text}) {
+    $self->{config_text} .= $self->{post_config_text};
+  }
 
   if ($self->{config_text} !~ /\S/) {
-    warn "config: no configuration text or files found! please check your setup\n";
+    my $m = "config: no configuration text or files found! do you need to run 'sa-update'?\n";
+    if ($self->{require_rules}) {
+      die $m;
+    } else {
+      warn $m;
+    }
   }
 
   # Go and parse the config!
   $self->{conf}->{main} = $self;
+  if (would_log('dbg', 'config_text') > 1) {
+    dbg('config_text: '.$self->{config_text});
+  }
   $self->{conf}->parse_rules ($self->{config_text});
   $self->{conf}->finish_parsing(0);
   delete $self->{conf}->{main};	# to allow future GC'ing
 
   undef $self->{config_text};   # ensure it's actually freed
   delete $self->{config_text};
+
+  if ($self->{require_rules} && !$self->{conf}->found_any_rules()) {
+    die "config: no rules were found!  Do you need to run 'sa-update'?\n";
+  }
 
   # Initialize the Bayes subsystem
   if ($self->{conf}->{use_bayes}) {
@@ -1489,6 +1736,14 @@ sub init {
 
   if ($self->{only_these_rules}) {
     $self->{conf}->trim_rules($self->{only_these_rules});
+  }
+
+  if (!$self->{timer_enabled}) {
+    # enable timing implicitly if _TIMING_ is used in add_header templates
+    foreach my $hf_ref (@{$self->{conf}->{'headers_ham'}},
+                        @{$self->{conf}->{'headers_spam'}}) {
+      if ($hf_ref->[1] =~ /_TIMING_/) { $self->timer_enable(); last }
+    }
   }
 
   # TODO -- open DNS cache etc. if necessary
@@ -1514,12 +1769,16 @@ sub _read_cf_pre {
   {
     dbg("config: using \"$path\" for $desc");
 
-    if (-d $path) {
+    my $stat_errn = stat($path) ? 0 : 0+$!;
+    if ($stat_errn == ENOENT) {
+      # no file or directory
+    } elsif ($stat_errn != 0) {
+      dbg("config: file or directory $path not accessible: $!");
+    } elsif (-d _) {
       foreach my $file ($self->$filelistmethod($path)) {
         $txt .= read_cf_file($file);
       }
-
-    } elsif (-f $path && -s _ && -r _) {
+    } elsif (-f _ && -s _ && -r _) {
       $txt .= read_cf_file($path);
     }
   }
@@ -1532,12 +1791,19 @@ sub read_cf_file {
   my($path) = @_;
   my $txt = '';
 
+  local *IN;
   if (open (IN, "<".$path)) {
-    $txt = "file start $path\n";
-    $txt .= join ('', <IN>);
+
+    my($inbuf,$nread); $txt = '';
+    while ( $nread=read(IN,$inbuf,16384) ) { $txt .= $inbuf }
+    defined $nread  or die "error reading $path: $!";
+    close IN  or die "error closing $path: $!";
+    undef $inbuf;
+
+    $txt = "file start $path\n" . $txt;
     # add an extra \n in case file did not end in one.
     $txt .= "\nfile end $path\n";
-    close IN;
+
     dbg("config: read file $path");
   }
   else {
@@ -1574,9 +1840,21 @@ sub get_and_create_userstate_dir {
     dbg("config: using \"$fname\" for user state dir");
   }
 
-  if (!-d $fname) {
-    # not being able to create the *dir* is not worth a warning at all times
-    eval { mkpath($fname, 0, 0700) } or dbg("config: mkdir $fname failed: $@ $!\n");
+  # if this is not a dir, not readable, or we are unable to create the dir,
+  # this is not (yet) a serious error; in fact, it's not even worth
+  # a warning at all times, so use dbg().  see bug 6268
+  my $stat_errn = stat($fname) ? 0 : 0+$!;
+  if ($stat_errn == 0 && !-d _) {
+    dbg("config: $fname exists but is not a directory");
+  } elsif ($stat_errn != 0 && $stat_errn != ENOENT) {
+    dbg("config: error accessing $fname: $!");
+  } else {  # does not exist, create it
+    eval {
+      mkpath($fname, 0, 0700);  1;
+    } or do {
+      my $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
+      dbg("config: mkdir $fname failed: $eval_stat");
+    };
   }
 
   $fname;
@@ -1595,12 +1873,8 @@ it exists, or undef if it doesn't exist.
 sub find_rule_support_file {
   my ($self, $filename) = @_;
 
-  # take a copy to avoid modifying the real one (stupid map { } side-effect)
-  my @paths = @default_rules_path;
-  return $self->first_existing_path (map {
-      s/$/\/${filename}/;
-      $_;
-    } @paths);
+  return $self->first_existing_path(
+    map { my $p = $_; $p =~ s{$}{/$filename}; $p } @default_rules_path );
 }
 
 =item $f->create_default_prefs ($filename, $username [ , $userdir ] )
@@ -1625,43 +1899,48 @@ sub create_default_prefs {
 #    warn "config: hooray! user_dirs don't match! '$userdir' vs '$self->{user_dir}'\n";
 #  }
 
-  if (!-f $fname)
-  {
+  my $stat_errn = stat($fname) ? 0 : 0+$!;
+  if ($stat_errn == 0) {
+    # fine, it already exists
+  } elsif ($stat_errn != ENOENT) {
+    dbg("config: cannot access user preferences file $fname: $!");
+  } else {
     # Pass on the value of $userdir for virtual users in vpopmail
     # otherwise it is empty and the user's normal homedir is used
     $self->get_and_create_userstate_dir($userdir);
 
     # copy in the default one for later editing
-    my $defprefs = $self->first_existing_path (@Mail::SpamAssassin::default_prefs_path);
+    my $defprefs =
+      $self->first_existing_path(@Mail::SpamAssassin::default_prefs_path);
 
-    if (defined $defprefs && open (IN, "<$defprefs")) {
-      $fname = Mail::SpamAssassin::Util::untaint_file_path($fname);
-      if (open (OUT, ">$fname")) {
-        while (<IN>) {
-          /^\#\* / and next;
-          print OUT;
-        }
-        close OUT;
-        close IN;
-
-        if (($< == 0) && ($> == 0) && defined($user)) { # chown it
-          my ($uid,$gid) = (getpwnam($user))[2,3];
-          unless (chown($uid, $gid, $fname)) {
-            warn "config: couldn't chown $fname to $uid:$gid for $user: $!\n";
-          }
-        }
-        warn "config: created user preferences file: $fname\n";
-        return(1);
-      }
-      else {
-        warn "config: cannot write to $fname: $!\n";
-      }
-    }
-    elsif (defined $defprefs) {
-      warn "config: cannot open $defprefs: $!\n";
-    }
-    else {
+    local(*IN,*OUT);
+    $fname = Mail::SpamAssassin::Util::untaint_file_path($fname);
+    if (!defined $defprefs) {
       warn "config: can not determine default prefs path\n";
+    } elsif (!open(IN, "<$defprefs")) {
+      warn "config: cannot open $defprefs: $!\n";
+    } elsif (!open(OUT, ">$fname")) {
+      warn "config: cannot create user preferences file $fname: $!\n";
+    } else {
+      # former code skipped lines beginning with '#* ', the following copy
+      # procedure no longer does so, as it avoids reading line-by-line
+      my($inbuf,$nread);
+      while ( $nread=read(IN,$inbuf,16384) ) {
+        print OUT $inbuf  or die "cannot write to $fname: $!";
+      }
+      defined $nread  or die "error reading $defprefs: $!";
+      undef $inbuf;
+      close OUT or die "error closing $fname: $!";
+      close IN  or die "error closing $defprefs: $!";
+
+      if (($< == 0) && ($> == 0) && defined($user)) { # chown it
+        my ($uid,$gid) = (getpwnam($user))[2,3];
+        unless (chown($uid, $gid, $fname)) {
+          warn "config: couldn't chown $fname to $uid:$gid for $user: $!\n";
+        }
+      }
+      warn "config: created user preferences file: $fname\n";
+      return(1);
     }
   }
 
@@ -1729,7 +2008,7 @@ sub first_existing_path {
     if (defined $path) {
       my($errn) = stat($path) ? 0 : 0+$!;
       if    ($errn == ENOENT) { }  # does not exist
-      elsif ($errn) { warn "config: path \"$path\" is inaccessible: $!\n" }
+      elsif ($errn) {  warn "config: path \"$path\" is inaccessible: $!\n" }
       else { return $path }
     }
   }
@@ -1752,16 +2031,19 @@ sub _get_cf_pre_files_in_dir {
   my ($self, $dir, $type) = @_;
 
   if ($self->{config_tree_recurse}) {
-    my @cfs = ();
+    my @cfs;
 
     # use "eval" to avoid loading File::Find unless this is specified
-    eval {
-      use File::Find qw();
+    eval ' use File::Find qw();
       File::Find::find(
-        sub {
-          return unless (/\.${type}$/i && -f $_);
-          push @cfs, $File::Find::name;
-        }, $dir);
+        { untaint => 1,
+          follow => 1,
+          wanted =>
+            sub { push(@cfs, $File::Find::name) if /\.\Q$type\E$/i && -f $_ }
+        }, $dir); 1;
+    ' or do {
+      my $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
+      die "_get_cf_pre_files_in_dir error: $eval_stat";
     };
     return sort { $a cmp $b } @cfs;
 
@@ -1769,7 +2051,8 @@ sub _get_cf_pre_files_in_dir {
   }
   else {
     opendir(SA_CF_DIR, $dir) or warn "config: cannot opendir $dir: $!\n";
-    my @cfs = grep { /\.${type}$/i && -f "$dir/$_" } readdir(SA_CF_DIR);
+    my @cfs = grep { $_ ne '.' && $_ ne '..' &&
+                     /\.${type}$/i && -f "$dir/$_" } readdir(SA_CF_DIR);
     closedir SA_CF_DIR;
 
     return map { "$dir/$_" } sort { $a cmp $b } @cfs;
@@ -1793,8 +2076,11 @@ sub call_plugins {
   # We could potentially get called after a finish(), so just return.
   return unless $self->{plugins};
 
+  # safety net in case some plugin changes global settings, Bug 6218
+  local $/ = $/;  # prevent underlying modules from changing the global $/
+
   my $subname = shift;
-  return $self->{plugins}->callback ($subname, @_);
+  return $self->{plugins}->callback($subname, @_);
 }
 
 ###########################################################################
@@ -1804,22 +2090,22 @@ sub find_all_addrs_in_mail {
 
   $self->init(1);
 
-  my @addrlist = ();
+  my @addrlist;
   foreach my $header (qw(To From Cc Reply-To Sender
   				Errors-To Mail-Followup-To))
   {
-    my @hdrs = $mail_obj->get_header ($header);
+    my @hdrs = $mail_obj->get_header($header);
     if ($#hdrs < 0) { next; }
-    push (@addrlist, $self->find_all_addrs_in_line (join (" ", @hdrs)));
+    push (@addrlist, $self->find_all_addrs_in_line(join (" ", @hdrs)));
   }
 
   # find addrs in body, too
   foreach my $line (@{$mail_obj->get_body()}) {
-    push (@addrlist, $self->find_all_addrs_in_line ($line));
+    push (@addrlist, $self->find_all_addrs_in_line($line));
   }
 
-  my @ret = ();
-  my %done = ();
+  my @ret;
+  my %done;
 
   foreach $_ (@addrlist) {
     s/^mailto://;       # from Outlook "forwarded" message
@@ -1837,8 +2123,8 @@ sub find_all_addrs_in_line {
   my $ID_PATTERN   = '[-a-z0-9_\+\:\=\!\#\$\%\&\*\^\?\{\}\|\~\/\.]+';
   my $HOST_PATTERN = '[-a-z0-9_\+\:\/]+';
 
-  my @addrs = ();
-  my %seen = ();
+  my @addrs;
+  my %seen;
   while ($line =~ s/(?:mailto:)?\s*
 	      ($ID_PATTERN \@
 	      $HOST_PATTERN(?:\.$HOST_PATTERN)+)//oix) 
@@ -1875,7 +2161,7 @@ so that the object will use its current configuration.  i.e.:
   my $spamtest = Mail::SpamAssassin->new( ... );
 
   # backup configuration to %conf_backup
-  my %conf_backup = ();
+  my %conf_backup;
   $spamtest->copy_config(undef, \%conf_backup) ||
     die "config: error returned from copy_config!\n";
 
@@ -1899,6 +2185,8 @@ sub copy_config {
   {
     return 0;
   }
+
+  my $timer = $self->time_method("copy_config");
 
   # let the Conf object itself do all the heavy lifting.  It's better
   # than having this class know all about that class' internals...
@@ -1927,7 +2215,6 @@ sub get_loaded_plugins_list {
   my ($self) = @_;
   return $self->{plugins}->get_loaded_plugins_list();
 }
-
 
 1;
 __END__

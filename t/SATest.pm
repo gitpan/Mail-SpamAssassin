@@ -8,6 +8,7 @@ use File::Basename;
 use File::Copy;
 use File::Path;
 use File::Spec;
+use POSIX qw(WIFEXITED WIFSIGNALED WIFSTOPPED WEXITSTATUS WTERMSIG WSTOPSIG);
 
 BEGIN {
   # No spamd test in Windows unless env override says user figured out a way
@@ -15,27 +16,22 @@ BEGIN {
   #   <http://www.mail-archive.com/dev%40perl.apache.org/msg05466.html>
   #  -- mss, 2004-01-13
   our $RUNNING_ON_WINDOWS = ($^O =~ /^(mswin|dos|os2)/oi);
-  our $SKIP_SPAMD_TESTS = $RUNNING_ON_WINDOWS; 
+  our $SKIP_SPAMD_TESTS = ($RUNNING_ON_WINDOWS || ($ENV{'SPAMD_HOST'} && ($ENV{'SPAMD_HOST'} ne '127.0.0.1')));
   our $NO_SPAMC_EXE;
   our $SKIP_SPAMC_TESTS;
   our $SSL_AVAILABLE;
   our $SKIP_SETUID_NOBODY_TESTS = 0;
-
 }
 
 # Set up for testing. Exports (as global vars):
 # out: $home: $HOME env variable
 # out: $cwd: here
 # out: $scr: spamassassin script
+# in: if --override appears at start of command line, next 2 args are used to set
+# an environment variable to control test behaviour.
 #
 sub sa_t_init {
   my $tname = shift;
-
-  # optimisation -- don't setup spamd test parameters unless we're
-  # called "spamd_something" or "spamc_foo"
-  if ($tname !~ /spam[cd]/) {
-    $NO_SPAMD_REQUIRED = 1;
-  }
 
   if ($config{PERL_PATH}) {
     $perl_path = $config{PERL_PATH};
@@ -49,6 +45,18 @@ sub sa_t_init {
   }
 
   $perl_cmd  = $perl_path;
+
+  # propagate $PERL5OPT; seems to be necessary, at least for the common idiom of
+  # "PERL5OPT=-MFoo::Bar ./test.t"
+  if ($ENV{'PERL5OPT'}) {
+    my $o = $ENV{'PERL5OPT'};
+    if ($o =~ /(Devel::Cover)/) {
+      warn "# setting TEST_PERL_TAINT=no to avoid lack of taint-safety in $1\n";
+      $ENV{'TEST_PERL_TAINT'} = 'no';
+    }
+    $perl_cmd .= " \"$o\"";
+  }
+
   $perl_cmd .= " -T" if !defined($ENV{'TEST_PERL_TAINT'}) or $ENV{'TEST_PERL_TAINT'} ne 'no';
   $perl_cmd .= " -w" if !defined($ENV{'TEST_PERL_WARN'})  or $ENV{'TEST_PERL_WARN'}  ne 'no';
 
@@ -63,10 +71,20 @@ sub sa_t_init {
   $salearn = $ENV{'SALEARN_SCRIPT'};
   $salearn ||= "$perl_cmd ../sa-learn.raw";
 
+  $spamdlocalhost = $ENV{'SPAMD_LOCALHOST'};
+  $spamdlocalhost ||= '127.0.0.1';
   $spamdhost = $ENV{'SPAMD_HOST'};
-  $spamdhost ||= "127.0.0.1";
+  $spamdhost ||= $spamdlocalhost;
   $spamdport = $ENV{'SPAMD_PORT'};
   $spamdport ||= probably_unused_spamd_port();
+
+  # optimisation -- don't setup spamd test parameters unless we're
+  # not skipping all spamd tests and this particular test is called
+  # called "spamd_something" or "spamc_foo"
+  # We still run spamc tests when there is an external SPAMD_HOST, but don't have to set up the spamd parameters for it
+  if ($SKIP_SPAMD_TESTS or ($tname !~ /spam[cd]/)) {
+    $NO_SPAMD_REQUIRED = 1;
+  }
 
   $spamd_cf_args = "-C log/test_rules_copy";
   $spamd_localrules_args = " --siteconfigpath log/localrules.tmp";
@@ -124,33 +142,45 @@ sub sa_t_init {
   rmtree ("log/test_rules_copy");
   mkdir ("log/test_rules_copy", 0755);
 
-  for $file (<../rules/*.cf>, <../rules/*.pm>, <../rules/*.pre>) {
+  for $tainted (<../rules/*.cf>, <../rules/*.pm>, <../rules/*.pre>) {
+    $tainted =~ /(.*)/;
+    my $file = $1;
     $base = basename $file;
     copy ($file, "log/test_rules_copy/$base")
-      or warn "cannot copy $file to log/test_rules_copy/$base";
+      or warn "cannot copy $file to log/test_rules_copy/$base: $!";
   }
 
+  copy ("data/01_test_rules.pre", "log/test_rules_copy/01_test_rules.pre")
+    or warn "cannot copy data/01_test_rules.cf to log/test_rules_copy/01_test_rules.pre: $!";
   copy ("data/01_test_rules.cf", "log/test_rules_copy/01_test_rules.cf")
-    or warn "cannot copy data/01_test_rules.cf to log/test_rules_copy/01_test_rules.cf";
+    or warn "cannot copy data/01_test_rules.cf to log/test_rules_copy/01_test_rules.cf: $!";
 
   rmtree ("log/localrules.tmp");
   mkdir ("log/localrules.tmp", 0755);
 
-  for $file (<../rules/*.pre>) {
+  for $tainted (<../rules/*.pm>, <../rules/*.pre>) {
+    $tainted =~ /(.*)/;
+    my $file = $1;
     $base = basename $file;
     copy ($file, "log/localrules.tmp/$base")
-      or warn "cannot copy $file to log/localrules.tmp/$base";
+      or warn "cannot copy $file to log/localrules.tmp/$base: $!";
   }
 
   copy ("../rules/user_prefs.template", "log/test_rules_copy/99_test_default.cf")
-    or die "user prefs copy failed";
+    or die "user prefs copy failed: $!";
 
-  open (PREFS, ">>log/test_rules_copy/99_test_default.cf");
-  print PREFS $default_cf_lines;
-  close PREFS;
+  open (PREFS, ">>log/test_rules_copy/99_test_default.cf")
+    or die "cannot append to log/test_rules_copy/99_test_default.cf: $!";
+  print PREFS $default_cf_lines
+    or die "error writing to log/test_rules_copy/99_test_default.cf: $!";
+  close PREFS
+    or die "error closing log/test_rules_copy/99_test_default.cf: $!";
 
   # create an empty .prefs file
-  open (PREFS, ">>log/test_default.cf"); close PREFS;
+  open (PREFS, ">>log/test_default.cf")
+    or die "cannot append to log/test_default.cf: $!";
+  close PREFS
+    or die "error closing log/test_default.cf: $!";
 
   mkdir("log/user_state",$tmp_dir_mode);
   chmod ($tmp_dir_mode, "log/user_state");  # unaffected by umask
@@ -415,8 +445,8 @@ sub recreate_outputdir_tmp {
 
 # out: $spamd_stderr
 sub start_spamd {
-  die "NO_SPAMD_REQUIRED in start_spamd! oops" if $NO_SPAMD_REQUIRED;
   return if $SKIP_SPAMD_TESTS;
+  die "NO_SPAMD_REQUIRED in start_spamd! oops" if $NO_SPAMD_REQUIRED;
 
   my $spamd_extra_args = shift;
 
@@ -453,7 +483,7 @@ sub start_spamd {
   }
   if ($spamd_extra_args !~ /(?:--socketpath)/) {
     push(@spamd_args,
-      qq{-A}, $spamdhost,
+      qq{-A}, $spamdhost, qq(-i), $spamdhost
     );
   }
 
@@ -483,15 +513,22 @@ sub start_spamd {
                        qq{-s ${spamd_stderr}.timestamped},
                        qq{&},
                     );
+
+  # DEBUG instrumentation to trace spamd processes. See bug 5731 for history
+  # if (-f "/home/jm/capture_spamd_straces") {
+  # $spamd_cmd = "strace -ttt -fo log/d.$testname/spamd.strace.${Test::ntest} $spamd_cmd";
+  # }
+
   unlink ($spamd_stdout, $spamd_stderr, $spamd_stdlog);
   print ("\t${spamd_cmd}\n");
+  my $startat = time;
   system ($spamd_cmd);
 
   # now find the PID
   $spamd_pid = 0;
   # note that the wait period increases the longer it takes,
   # 20 retries works out to a total of 60 seconds
-  my $retries = 20;
+  my $retries = 30;
   my $wait = 0;
   while ($spamd_pid <= 0) {
     my $spamdlog = '';
@@ -514,9 +551,11 @@ sub start_spamd {
     }
 
     sleep (int($wait++ / 4) + 1) if $retries > 0;
+
     if ($retries-- <= 0) {
       warn "spamd start failed: log: $spamdlog";
-      warn "\n\nMaybe you need to kill a running spamd process?\n\n";
+      warn "\n\nMaybe you need to kill a running spamd process?\n";
+      warn "started at $startat, gave up at ".time."\n\n";
       return 0;
     }
   }
@@ -525,8 +564,8 @@ sub start_spamd {
 }
 
 sub stop_spamd {
-  die "NO_SPAMD_REQUIRED in stop_spamd! oops" if $NO_SPAMD_REQUIRED;
   return 0 if ( defined($spamd_already_killed) || $SKIP_SPAMD_TESTS);
+  die "NO_SPAMD_REQUIRED in stop_spamd! oops" if $NO_SPAMD_REQUIRED;
 
   $spamd_pid ||= 0;
   if ( $spamd_pid <= 1) {
@@ -575,7 +614,17 @@ sub create_saobj {
 
   return $sa;
 }
-  
+
+sub create_clientobj {
+  my $args = shift;
+
+  # We'll assume that the test has setup INC correctly
+  require Mail::SpamAssassin::Client;
+
+  my $client = Mail::SpamAssassin::Client->new($args);
+
+  return $client;
+}
 
 # ---------------------------------------------------------------------------
 
@@ -653,17 +702,17 @@ sub patterns_run_cb {
 
 sub ok_all_patterns {
   my ($dont_ok) = shift;
-
+  my (undef, $file, $line) = caller();
   my $wasfailure = 0;
   foreach my $pat (sort keys %patterns) {
     my $type = $patterns{$pat};
     print "\tChecking $type\n";
     if (defined $found{$type}) {
       if (!$dont_ok) {
-        ok ($found{$type} == 1) or warn "Found more than once: $type\n";
+        ok ($found{$type} == 1) or warn "Found more than once: $type at $file line $line.\n";
       }
     } else {
-      warn "\tNot found: $type = $pat\n";
+      warn "\tNot found: $type = $pat at $file line $line.\n";
       if (!$dont_ok) {
         ok (0);                     # keep the right # of tests
       }
@@ -672,9 +721,9 @@ sub ok_all_patterns {
   }
   foreach my $pat (sort keys %anti_patterns) {
     my $type = $anti_patterns{$pat};
-    print "\tChecking for anti-pattern $type\n";
+    print "\tChecking for anti-pattern $type at $file line $line.\n";
     if (defined $found_anti{$type}) {
-      warn "\tFound anti-pattern: $type = $pat\n";
+      warn "\tFound anti-pattern: $type = $pat at $file line $line.\n";
       if (!$dont_ok) { ok (0); }
       $wasfailure++;
     }
@@ -685,7 +734,8 @@ sub ok_all_patterns {
   }
 
   if ($wasfailure) {
-    warn "Output can be examined in: ".join(' ', @files_checked)."\n";
+    warn "Output can be examined in: ".
+         join(' ', @files_checked)."\n"  if @files_checked;
     return 0;
   } else {
     return 1;
@@ -694,17 +744,18 @@ sub ok_all_patterns {
 
 sub skip_all_patterns {
   my $skip = shift;
+  my (undef, $file, $line) = caller();
   foreach my $pat (sort keys %patterns) {
     my $type = $patterns{$pat};
     print "\tChecking $type\n";
     if (defined $found{$type}) {
-      skip ($skip, $found{$type} == 1) or warn "Found more than once: $type\n";
-      warn "\tThis test should have been skipped: $skip\n" if $skip;
+      skip ($skip, $found{$type} == 1) or warn "Found more than once: $type at $file line $line.\n";
+      warn "\tThis test should have been skipped: $skip at $file line $line.\n" if $skip;
     } else {
       if ($skip) {
-        warn "\tTest skipped: $skip\n";
+        warn "\tTest skipped: $skip at $file line $line.\n";
       } else {
-        warn "\tNot found: $type = $pat\n";
+        warn "\tNot found: $type = $pat at $file line $line.\n";
       }
       skip ($skip, 0);                     # keep the right # of tests
     }
@@ -713,7 +764,7 @@ sub skip_all_patterns {
     my $type = $anti_patterns{$pat};
     print "\tChecking for anti-pattern $type\n";
     if (defined $found_anti{$type}) {
-      warn "\tFound anti-pattern: $type = $pat\n";
+      warn "\tFound anti-pattern: $type = $pat at $file line $line.\n";
       skip ($skip, 0);
     }
     else
@@ -741,7 +792,7 @@ sub read_config {
 
   if (!open (CF, "<${prefix}config")) {
     if (!open (CF, "<${prefix}config.dist")) {   # fall back to defaults
-      die "cannot open test suite configuration file 'config.dist'";
+      die "cannot open test suite configuration file 'config.dist': $!";
     }
   }
 
@@ -749,6 +800,14 @@ sub read_config {
     s/#.*$//; s/^\s+//; s/\s+$//; next if /^$/;
     /^([^=]+)=(.*)$/ or next;
     $conf{$1} = $2;
+  }
+
+  # allow our xt test suite to override
+  if (defined $ARGV[0] && $ARGV[0] eq '--override') {
+    shift @ARGV;
+    my $k = shift @ARGV;
+    my $v = shift @ARGV;
+    $conf{$k} = $v;
   }
   close CF;
 }
@@ -866,6 +925,38 @@ sub read_from_pidfile {
   } until ($npid > 1 or $retries == 0);
 
   return $npid;
+}
+
+sub system_or_die {
+  my $cmd = $_[0];
+  print ("\t$cmd\n");
+  system($cmd);
+  $? == 0  or die "'$cmd' failed: ".exit_status_str($?,0);
+}
+
+# (sub exit_status_str copied from Util.pm)
+# map process termination status number to an informative string, and
+# append optional mesage (dual-valued errno or a string or a number),
+# returning the resulting string
+#
+sub exit_status_str($;$) {
+  my($stat,$errno) = @_;
+  my $str;
+  if (WIFEXITED($stat)) {
+    $str = sprintf("exit %d", WEXITSTATUS($stat));
+  } elsif (WIFSTOPPED($stat)) {
+    $str = sprintf("stopped, signal %d", WSTOPSIG($stat));
+  } else {
+    my $sig = WTERMSIG($stat);
+    $str = sprintf("%s, signal %d (%04x)",
+             $sig == 2 ? 'INTERRUPTED' : $sig == 6 ? 'ABORTED' :
+             $sig == 9 ? 'KILLED' : $sig == 15 ? 'TERMINATED' : 'DIED',
+             $sig, $stat);
+  }
+  if (defined $errno) {  # deal with dual-valued and plain variables
+    $str .= ', '.$errno  if (0+$errno) != 0 || ($errno ne '' && $errno ne '0');
+  }
+  return $str;
 }
 
 sub dbgprint { print STDOUT "[".time()."] ".$_[0]; }

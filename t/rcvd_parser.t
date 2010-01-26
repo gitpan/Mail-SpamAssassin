@@ -18,7 +18,7 @@ if (-e 'test_dir') {            # running from test directory, not ..
 
 use lib '.'; use lib 't';
 use SATest; sa_t_init("rcvd_parser");
-use Test; BEGIN { plan tests => 130 };
+use Test; BEGIN { plan tests => 142 };
 use strict;
 
 # format is:
@@ -54,7 +54,7 @@ my %data = (
   '',
 
   'from rc3.isc.org (rc3.isc.org [IPv6:2001:4f8:3:bb::25])       (using TLSv1 with cipher DHE-RSA-AES256-SHA (256/256 bits))        (No client certificate requested)  by sf1.isc.org (Postfix) with ESMTP id C986F284EE       for <jm@jmason.org>; Sat, 16 Oct 2004 21:30:02 +0000 (UTC) (envelope-from bind-users-bounce@isc.org)' =>
-  '',
+  '[ ip=2001:4f8:3:bb::25 rdns=rc3.isc.org helo=rc3.isc.org by=sf1.isc.org ident= envfrom=bind-users-bounce@isc.org id=C986F284EE auth= msa=0 ]',
 
   'from ausisaps301-dmz.aus.amer.dell.com ([143.166.226.16]) (SquirrelMail authenticated user hoolis); by www.penguintowne.org with HTTP; Mon, 22 Mar 2004 12:54:13 -0600 (CST)' =>
   '',
@@ -222,7 +222,7 @@ my %data = (
   '[ ip=207.213.27.129 rdns=adsl-207-213-27-129.dsl.lsan03.pacbell.net helo=merlin.net.au by=totor.example.net ident=Owner50 envfrom= id= auth= msa=0 ]',
 
   'from imo-m01.mx.aol.com ([64.12.136.4] verified) by xxx.com (CommuniGate Pro SMTP 4.1.8) with ESMTP id 875522 for yyy@xxx.com; Tue, 03 Feb 2004 08:37:38 -0800' =>
-  '[ ip=64.12.136.4 rdns= helo=imo-m01.mx.aol.com by=xxx.com ident= envfrom= id=875522 auth= msa=0 ]',
+  '[ ip=64.12.136.4 rdns=imo-m01.mx.aol.com helo=imo-m01.mx.aol.com by=xxx.com ident= envfrom= id=875522 auth= msa=0 ]',
 
   'from [65.17.198.50] (HELO 123greetings.info) by mail.wcg.org (CommuniGate Pro SMTP 5.1.3) with SMTP id 19467966 for xxxx@wcg.org; Fri, 08 Dec 2006 08:40:46 -0800' =>
   '[ ip=65.17.198.50 rdns= helo=123greetings.info by=mail.wcg.org ident= envfrom= id=19467966 auth= msa=0 ]',
@@ -418,6 +418,48 @@ my %data = (
 
   'from [86.122.158.69] by mta2.iomartmail.com; Thu, 2 Aug 2007 21:50:04 -0200' =>
   '[ ip=86.122.158.69 rdns= helo=!86.122.158.69! by=mta2.iomartmail.com ident= envfrom= id= auth= msa=0 ]',
+
+  'from p5498acaa.dip0.t-ipconnect.de (HELO JIMBOBSPC) (user@84.152.172.1) by msa.example.com with ESMTPA; 23 May 2007 15:05:04 -0000' =>
+  '[ ip=84.152.172.1 rdns=p5498acaa.dip0.t-ipconnect.de helo=JIMBOBSPC by=msa.example.com ident=user envfrom= id= auth=ESMTPA msa=0 ]',
+
+  # bug 5512
+  'from ([89.79.20.16]) by pop3.m80.net with MailEnable ESMTP; Tue, 20 Feb 2007 09:26:17 -0500' =>
+  '[ ip=89.79.20.16 rdns= helo= by=pop3.m80.net ident= envfrom= id= auth= msa=0 ]',
+
+  # bug 6239
+  'from [1.2.3.4] (account user@example.com) by webmail.example.com (CommuniGate Pro XIMSS 5.2.16) with HTTPU id 87581547 for user@example.org; Thu, 19 Nov 2009 20:08:10 -0500' =>
+  '[ ip=1.2.3.4 rdns= helo= by=webmail.example.com ident= envfrom= id=87581547 auth=HTTPU msa=0 ]',
+
+  # bug 5883
+  'from mail.tonet.ru ([213.183.114.1] verified) by relay2.tomsk.ru (CommuniGate Pro SMTP 5.1.13) with ESMTPS id 9837783 for hostmaster@ns.tomsk.ru; Tue, 08 Apr 2008 13:14:35 +0700' =>
+  '[ ip=213.183.114.1 rdns=mail.tonet.ru helo=mail.tonet.ru by=relay2.tomsk.ru ident= envfrom= id=9837783 auth= msa=0 ]',
+
+  'from dedic5.cmspanel.ru ([83.222.3.95] verified) by relay2.tomsk.ru (CommuniGate Pro SMTP 5.1.13) with ESMTPS id 9837912 for hostmaster@ns.tomsk.ru; Tue, 08 Apr 2008 13:39:27 +0700' =>
+  '[ ip=83.222.3.95 rdns=dedic5.cmspanel.ru helo=dedic5.cmspanel.ru by=relay2.tomsk.ru ident= envfrom= id=9837912 auth= msa=0 ]',
+
+  'from sibmail.com ([77.106.108.226] verified) by relay2.tomsk.ru (CommuniGate Pro SMTP 5.1.13) with ESMTPS id 9834928 for sudakov@sibptus.tomsk.ru; Mon, 07 Apr 2008 22:49:05 +0700' =>
+  '[ ip=77.106.108.226 rdns=sibmail.com helo=sibmail.com by=relay2.tomsk.ru ident= envfrom= id=9834928 auth= msa=0 ]',
+
+  'from [78.140.15.96] (HELO relay4.kvadro.net) by relay2.tomsk.ru (CommuniGate Pro SMTP 5.1.13) with ESMTPS id 9843045 for hostmaster@ns.tomsk.ru; Wed, 09 Apr 2008 02:31:33 +0700' =>
+  '[ ip=78.140.15.96 rdns= helo=relay4.kvadro.net by=relay2.tomsk.ru ident= envfrom= id=9843045 auth= msa=0 ]',
+
+  'from [78.140.0.68] (HELO mail.tomica.ru) by relay2.tomsk.ru (CommuniGate Pro SMTP 5.1.13) with ESMTP id 9837455 for hostmaster@ns.tomsk.ru; Tue, 08 Apr 2008 12:12:52 +0700' =>
+  '[ ip=78.140.0.68 rdns= helo=mail.tomica.ru by=relay2.tomsk.ru ident= envfrom= id=9837455 auth= msa=0 ]',
+
+  'from [88.204.72.252] (HELO tusur.ru) by relay2.tomsk.ru (CommuniGate Pro SMTP 5.1.13) with ESMTPS id 9823077 for hostmaster@ns.tomsk.ru; Fri, 04 Apr 2008 09:26:16 +0700' =>
+  '[ ip=88.204.72.252 rdns= helo=tusur.ru by=relay2.tomsk.ru ident= envfrom= id=9823077 auth= msa=0 ]',
+
+  'from [78.139.216.10] (HELO org-tms01.org.yukos.ru) by relay2.tomsk.ru (CommuniGate Pro SMTP 5.1.13) with SMTP id 9479501 for hostmaster@ns.tomsk.su; Wed, 26 Dec 2007 18:33:28 +0600' =>
+  '[ ip=78.139.216.10 rdns= helo=org-tms01.org.yukos.ru by=relay2.tomsk.ru ident= envfrom= id=9479501 auth= msa=0 ]',
+
+  'from [212.73.124.190] (account skudinva@sibptus.tomsk.ru HELO wxpskudinva.sibptus.transneft.ru) by relay2.tomsk.ru (CommuniGate Pro SMTP 5.1.13) with ESMTPSA id 9830625 for sudakov@sibptus.tomsk.ru; Mon, 07 Apr 2008 08:42:48 +0700' =>
+  '[ ip=212.73.124.190 rdns= helo=wxpskudinva.sibptus.transneft.ru by=relay2.tomsk.ru ident= envfrom= id=9830625 auth=ESMTPSA msa=0 ]',
+
+# 'from docsis-77-106-72-91.tomtelnet.ru (account moskalenko@postbox.tomsk.ru [77.106.72.91] verified) by relay2.tomsk.ru (CommuniGate Pro SMTP 5.1.13) with ESMTPSA id 9828571 for hostmaster@ns.tomsk.ru; Sun, 06 Apr 2008 04:00:16 +0700' =>
+# '[ ip=77.106.72.91 rdns=docsis-77-106-72-91.tomtelnet.ru helo=docsis-77-106-72-91.tomtelnet.ru by=relay2.tomsk.ru ident= envfrom= id=9828571 auth=ESMTPSA msa=0 ]',
+
+  'from  [140.211.11.9] (HELO example.com) by smtp-gw138.mailanyone.net with esmtp (MailAnyone incSMTP Exim) id f138m939701uh17Yipk65; Fri, 04 Dec 2009 09:15:01 -0600' =>
+  '[ ip=140.211.11.9 rdns= helo=example.com by=smtp-gw138.mailanyone.net ident= envfrom= id=f138m939701uh17Yipk65 auth= msa=0 ]',
 
 );
 

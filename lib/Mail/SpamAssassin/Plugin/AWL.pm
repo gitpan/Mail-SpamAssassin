@@ -61,8 +61,10 @@ package Mail::SpamAssassin::Plugin::AWL;
 use strict;
 use warnings;
 use bytes;
+use re 'taint';
 use Mail::SpamAssassin::Plugin;
 use Mail::SpamAssassin::AutoWhitelist;
+use Mail::SpamAssassin::Util qw(untaint_var);
 use Mail::SpamAssassin::Logger;
 
 use vars qw(@ISA);
@@ -88,7 +90,7 @@ sub new {
 
 sub set_config {
   my($self, $conf) = @_;
-  my @cmds = ();
+  my @cmds;
 
 =head1 USER PREFERENCES
 
@@ -147,6 +149,67 @@ mean; C<factor> = 0 mean just use the calculated score.
 		type => $Mail::SpamAssassin::Conf::CONF_TYPE_NUMERIC
 	       });
 
+=item auto_whitelist_ipv4_mask_len n	(default: 16, range [0..32])
+
+The AWL database keeps only the specified number of most-significant bits
+of an IPv4 address in its fields, so that different individual IP addresses
+within a subnet belonging to the same owner are managed under a single
+database record. As we have no information available on the allocated
+address ranges of senders, this CIDR mask length is only an approximation.
+The default is 16 bits, corresponding to a former class B. Increase the
+number if a finer granularity is desired, e.g. to 24 (class C) or 32.
+A value 0 is allowed but is not particularly useful, as it would treat the
+whole internet as a single organization. The number need not be a multiple
+of 8, any split is allowed.
+
+=cut
+
+  push (@cmds, {
+		setting => 'auto_whitelist_ipv4_mask_len',
+		default => 16,
+		type => $Mail::SpamAssassin::Conf::CONF_TYPE_NUMERIC,
+		code => sub {
+		  my ($self, $key, $value, $line) = @_;
+		  if (!defined $value || $value eq '') {
+		    return $Mail::SpamAssassin::Conf::MISSING_REQUIRED_VALUE;
+		  } elsif ($value !~ /^\d+$/ || $value < 0 || $value > 32) {
+		    return $Mail::SpamAssassin::Conf::INVALID_VALUE;
+		  }
+		  $self->{auto_whitelist_ipv4_mask_len} = $value;
+		}
+	       });
+
+=item auto_whitelist_ipv6_mask_len n	(default: 48, range [0..128])
+
+The AWL database keeps only the specified number of most-significant bits
+of an IPv6 address in its fields, so that different individual IP addresses
+within a subnet belonging to the same owner are managed under a single
+database record. As we have no information available on the allocated address
+ranges of senders, this CIDR mask length is only an approximation. The default
+is 48 bits, corresponding to an address range commonly allocated to individual
+(smaller) organizations. Increase the number for a finer granularity, e.g.
+to 64 or 96 or 128, or decrease for wider ranges, e.g. 32.  A value 0 is
+allowed but is not particularly useful, as it would treat the whole internet
+as a single organization. The number need not be a multiple of 4, any split
+is allowed.
+
+=cut
+
+  push (@cmds, {
+		setting => 'auto_whitelist_ipv6_mask_len',
+		default => 48,
+		type => $Mail::SpamAssassin::Conf::CONF_TYPE_NUMERIC,
+		code => sub {
+		  my ($self, $key, $value, $line) = @_;
+		  if (!defined $value || $value eq '') {
+		    return $Mail::SpamAssassin::Conf::MISSING_REQUIRED_VALUE;
+		  } elsif ($value !~ /^\d+$/ || $value < 0 || $value > 128) {
+		    return $Mail::SpamAssassin::Conf::INVALID_VALUE;
+		  }
+		  $self->{auto_whitelist_ipv6_mask_len} = $value;
+		}
+	       });
+
 =item user_awl_sql_override_username
 
 Used by the SQLBasedAddrList storage implementation.
@@ -161,6 +224,26 @@ or group based auto-whitelist databases.
 		setting => 'user_awl_sql_override_username',
 		default => '',
 		type => $Mail::SpamAssassin::Conf::CONF_TYPE_STRING
+	       });
+
+=item auto_whitelist_distinguish_signed
+
+Used by the SQLBasedAddrList storage implementation.
+
+If this option is set the SQLBasedAddrList module will keep separate
+database entries for DKIM-validated e-mail addresses and for non-validated
+ones. A pre-requisite when setting this option is that a field awl.signedby
+exists in a SQL table, otherwise SQL operations will fail (which is why we
+need this option at all - for compatibility with pre-3.3.0 database schema).
+A plugin DKIM should also be enabled, as otherwise there is no benefit from
+turning on this option.
+
+=cut
+
+  push (@cmds, {
+		setting => 'auto_whitelist_distinguish_signed',
+		default => 0,
+		type => $Mail::SpamAssassin::Conf::CONF_TYPE_BOOL
 	       });
 
 =back
@@ -200,6 +283,7 @@ across all users, although that is not recommended.
 		setting => 'auto_whitelist_path',
 		is_admin => 1,
 		default => '__userstate__/auto-whitelist',
+		type => $Mail::SpamAssassin::Conf::CONF_TYPE_STRING,
 		code => sub {
 		  my ($self, $key, $value, $line) = @_;
 		  unless (defined $value && $value !~ /^$/) {
@@ -236,7 +320,7 @@ preclude its use for the AWL (see SpamAssassin bug 4353).
 		type => $Mail::SpamAssassin::Conf::CONF_TYPE_STRING
 	       });
 
-=item auto_whitelist_file_mode		(default: 0600)
+=item auto_whitelist_file_mode		(default: 0700)
 
 The file mode bits used for the automatic-whitelist directory or file.
 
@@ -249,8 +333,15 @@ not have any execute bits set (the umask is set to 111).
   push (@cmds, {
 		setting => 'auto_whitelist_file_mode',
 		is_admin => 1,
-		default => '0600',
-		type => $Mail::SpamAssassin::Conf::CONF_TYPE_NUMERIC
+		default => '0700',
+		type => $Mail::SpamAssassin::Conf::CONF_TYPE_NUMERIC,
+		code => sub {
+		  my ($self, $key, $value, $line) = @_;
+		  if ($value !~ /^0?\d{3}$/) {
+                    return $Mail::SpamAssassin::Conf::INVALID_VALUE;
+                  }
+		  $self->{auto_whitelist_file_mode} = untaint_var($value);
+		}
 	       });
 
 =item user_awl_dsn DBI:databasetype:databasename:hostname:port
@@ -319,8 +410,11 @@ sub check_from_in_auto_whitelist {
 
     return 0 unless ($pms->{conf}->{use_auto_whitelist});
 
-    local $_ = lc $pms->get('From:addr');
-    return 0 unless /\S/;
+    my $timer = $self->{main}->time_method("total_awl");
+
+    my $from = lc $pms->get('From:addr');
+  # dbg("auto-whitelist: From: $from");
+    return 0 unless $from =~ /\S/;
 
     # find the earliest usable "originating IP".  ignore private nets
     my $origip;
@@ -335,13 +429,14 @@ sub check_from_in_auto_whitelist {
     my $scores = $pms->{conf}->{scores};
     my $tflags = $pms->{conf}->{tflags};
     my $points = 0;
+    my $signedby = $pms->get_tag('DKIMDOMAIN');
+    undef $signedby  if defined $signedby && $signedby eq '';
 
     foreach my $test (@{$pms->{test_names_hit}}) {
       # ignore tests with 0 score in this scoreset,
       # or if the test is marked as "noautolearn"
-      next if ($scores->{$test} == 0);
-      next if (exists $tflags->{$test} && $tflags->{$test} =~ /\bnoautolearn\b/);
-
+      next if !$scores->{$test};
+      next if exists $tflags->{$test} && $tflags->{$test} =~ /\bnoautolearn\b/;
       $points += $scores->{$test};
     }
 
@@ -349,21 +444,31 @@ sub check_from_in_auto_whitelist {
 
    # Create the AWL object
     my $whitelist;
-    my $evalok = eval {
+    eval {
       $whitelist = Mail::SpamAssassin::AutoWhitelist->new($pms->{main});
 
-      # check
-      my $meanscore = $whitelist->check_address($_, $origip);
+      my $meanscore;
+      { # check
+        my $timer = $self->{main}->time_method("check_awl");
+        $meanscore = $whitelist->check_address($from, $origip, $signedby);
+      }
       my $delta = 0;
-    
-      dbg("auto-whitelist: AWL active, pre-score: $pms->{score}, autolearn score: $awlpoints, ".
-	  "mean: ". ($meanscore || 'undef') .", IP: ". ($origip || 'undef'));
 
-      if (defined ($meanscore)) {
-	$delta = ($meanscore - $awlpoints) * $pms->{main}->{conf}->{auto_whitelist_factor};
+      dbg("auto-whitelist: AWL active, pre-score: %s, autolearn score: %s, ".
+	  "mean: %s, IP: %s, address: %s %s",
+          $pms->{score}, $awlpoints,
+          !defined $meanscore ? 'undef' : sprintf("%.3f",$meanscore),
+          $origip || 'undef',
+          $from,  $signedby ? "signed by $signedby" : '(not signed)');
+
+      if (defined $meanscore) {
+	$delta = $meanscore - $awlpoints;
+	$delta *= $pms->{main}->{conf}->{auto_whitelist_factor};
       
 	$pms->set_tag('AWL', sprintf("%2.1f",$delta));
-	$pms->set_tag('AWLMEAN', sprintf("%2.1f", $meanscore));
+        if (defined $meanscore) {
+	  $pms->set_tag('AWLMEAN', sprintf("%2.1f", $meanscore));
+	}
 	$pms->set_tag('AWLCOUNT', sprintf("%2.1f", $whitelist->count()));
 	$pms->set_tag('AWLPRESCORE', sprintf("%2.1f", $pms->{score}));
       }
@@ -372,30 +477,31 @@ sub check_from_in_auto_whitelist {
       # early high-scoring messages are reinforced compared to
       # later ones.  http://bugs.debian.org/cgi-bin/bugreport.cgi?bug=159704
       if (!$pms->{disable_auto_learning}) {
+        my $timer = $self->{main}->time_method("update_awl");
 	$whitelist->add_score($awlpoints);
       }
 
-      # current AWL score changes with each hit
-      for my $set (0..3) {
-	$pms->{conf}->{scoreset}->[$set]->{"AWL"} = sprintf("%0.3f", $delta);
-      }
+      # now redundant, got_hit() takes care of it
+      # for my $set (0..3) {  # current AWL score changes with each hit
+      #   $pms->{conf}->{scoreset}->[$set]->{"AWL"} = sprintf("%0.3f", $delta);
+      # }
 
       if ($delta != 0) {
-	$pms->got_hit("AWL", "AWL: ", ruletype => 'eval', score => $delta);
+	$pms->got_hit("AWL", "AWL: ", ruletype => 'eval',
+                      score => sprintf("%0.3f", $delta));
       }
 
       $whitelist->finish();
       1;
-    };
-
-    if (!$evalok) {
-      warn("auto-whitelist: open of auto-whitelist file failed: $@");
+    } or do {
+      my $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
+      warn("auto-whitelist: open of auto-whitelist file failed: $eval_stat\n");
       # try an unlock, in case we got that far
       eval { $whitelist->finish(); } if $whitelist;
       return 0;
-    }
+    };
 
-    dbg("auto-whitelist: post auto-whitelist score: ".$pms->{score});
+    dbg("auto-whitelist: post auto-whitelist score: %.3f", $pms->{score});
 
     # test hit is above
     return 0;
@@ -407,7 +513,8 @@ sub blacklist_address {
   return 0 unless ($self->{main}->{conf}->{use_auto_whitelist});
 
   unless ($args->{address}) {
-    print "SpamAssassin auto-whitelist: failed to add address to blacklist\n";
+    print "SpamAssassin auto-whitelist: failed to add address to blacklist\n" if ($args->{cli_p});
+    dbg("auto-whitelist: failed to add address to blacklist");
     return;
   }
   
@@ -417,22 +524,24 @@ sub blacklist_address {
   eval {
     $whitelist = Mail::SpamAssassin::AutoWhitelist->new($self->{main});
 
-    if ($whitelist->add_known_bad_address($args->{address})) {
-      print "SpamAssassin auto-whitelist: adding address to blacklist: " . $args->{address} . "\n";
+    if ($whitelist->add_known_bad_address($args->{address}, $args->{signedby})) {
+      print "SpamAssassin auto-whitelist: adding address to blacklist: " . $args->{address} . "\n" if ($args->{cli_p});
+      dbg("auto-whitelist: adding address to blacklist: " . $args->{address});
       $status = 0;
     }
     else {
-      print "SpamAssassin auto-whitelist: error adding address to blacklist\n";
+      print "SpamAssassin auto-whitelist: error adding address to blacklist\n" if ($args->{cli_p});
+      dbg("auto-whitelist: error adding address to blacklist");
       $status = 1;
     }
     $whitelist->finish();
-  };
-
-  if ($@) {
-    warn("auto-whitelist: open of auto-whitelist file failed: $@");
+    1;
+  } or do {
+    my $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
+    warn("auto-whitelist: open of auto-whitelist file failed: $eval_stat\n");
     eval { $whitelist->finish(); };
     return 0;
-  }
+  };
 
   return $status;
 }
@@ -443,7 +552,8 @@ sub whitelist_address {
   return 0 unless ($self->{main}->{conf}->{use_auto_whitelist});
 
   unless ($args->{address}) {
-    print "SpamAssassin auto-whitelist: failed to add address to whitelist\n";
+    print "SpamAssassin auto-whitelist: failed to add address to whitelist\n" if ($args->{cli_p});
+    dbg("auto-whitelist: failed to add address to whitelist");
     return 0;
   }
 
@@ -453,23 +563,25 @@ sub whitelist_address {
   eval {
     $whitelist = Mail::SpamAssassin::AutoWhitelist->new($self->{main});
 
-    if ($whitelist->add_known_good_address($args->{address})) {
-      print "SpamAssassin auto-whitelist: adding address to whitelist: " . $args->{address} . "\n";
+    if ($whitelist->add_known_good_address($args->{address}, $args->{signedby})) {
+      print "SpamAssassin auto-whitelist: adding address to whitelist: " . $args->{address} . "\n" if ($args->{cli_p});
+      dbg("auto-whitelist: adding address to whitelist: " . $args->{address});
       $status = 1;
     }
     else {
-      print "SpamAssassin auto-whitelist: error adding address to whitelist\n";
+      print "SpamAssassin auto-whitelist: error adding address to whitelist\n" if ($args->{cli_p});
+      dbg("auto-whitelist: error adding address to whitelist");
       $status = 0;
     }
 
     $whitelist->finish();
-  };
-
-  if ($@) {
-    warn("auto-whitelist: open of auto-whitelist file failed: $@");
+    1;
+  } or do {
+    my $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
+    warn("auto-whitelist: open of auto-whitelist file failed: $eval_stat\n");
     eval { $whitelist->finish(); };
     return 0;
-  }
+  };
 
   return $status;
 }
@@ -480,7 +592,8 @@ sub remove_address {
   return 0 unless ($self->{main}->{conf}->{use_auto_whitelist});
 
   unless ($args->{address}) {
-    print "SpamAssassin auto-whitelist: failed to remove address\n";
+    print "SpamAssassin auto-whitelist: failed to remove address\n" if ($args->{cli_p});
+    dbg("auto-whitelist: failed to remove address");
     return 0;
   }
 
@@ -490,23 +603,25 @@ sub remove_address {
   eval {
     $whitelist = Mail::SpamAssassin::AutoWhitelist->new($self->{main});
 
-    if ($whitelist->remove_address($args->{address})) {
-      print "SpamAssassin auto-whitelist: removing address: " . $args->{address} . "\n";
+    if ($whitelist->remove_address($args->{address}, $args->{signedby})) {
+      print "SpamAssassin auto-whitelist: removing address: " . $args->{address} . "\n" if ($args->{cli_p});
+      dbg("auto-whitelist: removing address: " . $args->{address});
       $status = 1;
     }
     else {
-      print "SpamAssassin auto-whitelist: error removing address\n";
+      print "SpamAssassin auto-whitelist: error removing address\n" if ($args->{cli_p});
+      dbg("auto-whitelist: error removing address");
       $status = 0;
     }
   
     $whitelist->finish();
-  };
-
-  if ($@) {
-    warn("auto-whitelist: open of auto-whitelist file failed: $@");
+    1;
+  } or do {
+    my $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
+    warn("auto-whitelist: open of auto-whitelist file failed: $eval_stat\n");
     eval { $whitelist->finish(); };
     return 0;
-  }
+  };
 
   return $status;
 }

@@ -31,6 +31,7 @@ use Mail::SpamAssassin::Logger;
 use strict;
 use warnings;
 use bytes;
+use re 'taint';
 use File::Spec;
 
 use vars qw{
@@ -159,7 +160,7 @@ sub have_callback {
     # nope.  run through all registered plugins and see which ones
     # implement this type of callback.  sort by priority
 
-    my %subsbypri = ();
+    my %subsbypri;
     foreach my $plugin (@{$self->{plugins}}) {
       my $methodref = $plugin->can ($subname);
       if (defined $methodref) {
@@ -172,7 +173,7 @@ sub have_callback {
       }
     }
 
-    my @subs = ();
+    my @subs;
     foreach my $pri (sort { $a <=> $b } keys %subsbypri) {
       push @subs, @{$subsbypri{$pri}};
     }
@@ -200,10 +201,11 @@ sub callback {
 
     eval {
       $ret = &$methodref ($plugin, @_);
+      1;
+    } or do {
+      my $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
+      warn "plugin: eval failed: $eval_stat\n";
     };
-    if ($@) {
-      warn "plugin: eval failed: $@";
-    }
 
     if ($ret) {
       #dbg("plugin: ${plugin}->${methodref} => $ret");

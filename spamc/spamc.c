@@ -99,6 +99,7 @@ int use_exit_code = 0;
 char **exec_argv;
 
 static int timeout = 600;
+static int connect_timeout = 0;	/* Sep 8, 2008 mrgus: separate connect timeout */
 
 
 void
@@ -153,8 +154,17 @@ print_usage(void)
     usg("  -t, --timeout timeout\n"
         "                      Timeout in seconds for communications to\n"
         "                      spamd. [default: 600]\n");
+    usg("  -n, --connect-timeout timeout\n"
+        "                      Timeout in seconds when opening a connection to\n"
+        "                      spamd. [default: 600]\n");
+    usg("  --filter-retries retries\n"
+        "                      Retry filtering this many times if the spamd\n"
+        "                      process fails (usually times out) [default: 1]\n");
+    usg("  --filter-retry-sleep sleep\n"
+        "                      Sleep for this time between failed filter\n"
+        "                      attempts, in seconds [default: 1]\n");
     usg("  --connect-retries retries\n"
-        "                      Try connecting to spamd this many times\n"
+        "                      Try connecting to spamd tcp socket this many times\n"
         "                      [default: 3]\n");
     usg("  --retry-sleep sleep Sleep for this time between attempts to\n"
         "                      connect to spamd, in seconds [default: 1]\n");
@@ -217,24 +227,27 @@ read_args(int argc, char **argv,
           struct transport *ptrn)
 {
 #ifndef _WIN32
-    const char *opts = "-BcrRd:e:fyp:t:s:u:L:C:xzSHU:ElhVKF:0:1:2";
+    const char *opts = "-BcrRd:e:fyp:n:t:s:u:L:C:xzSHU:ElhVKF:0:1:2";
 #else
-    const char *opts = "-BcrRd:fyp:t:s:u:L:C:xzSHElhVKF:0:1:2";
+    const char *opts = "-BcrRd:fyp:n:t:s:u:L:C:xzSHElhVKF:0:1:2";
 #endif
     int opt;
     int ret = EX_OK;
     int longind = 1;
 
     static struct option longoptions[] = {
-       { "dest" , required_argument, 0, 'd' },
+       { "dest", required_argument, 0, 'd' },
        { "randomize", no_argument, 0, 'H' },
        { "port", required_argument, 0, 'p' },
        { "ssl", optional_argument, 0, 'S' },
        { "socket", required_argument, 0, 'U' },
        { "config", required_argument, 0, 'F' },
        { "timeout", required_argument, 0, 't' },
+       { "connect-timeout", required_argument, 0, 'n'},
        { "connect-retries", required_argument, 0, 0 },
        { "retry-sleep", required_argument, 0, 1 },
+       { "filter-retries", required_argument, 0, 3 },
+       { "filter-retry-sleep", required_argument, 0, 4 },
        { "max-size", required_argument, 0, 's' },
        { "username", required_argument, 0, 'u' },
        { "learntype", required_argument, 0, 'L' },
@@ -359,7 +372,7 @@ read_args(int argc, char **argv,
 		  flags |= (SPAMC_SSLV2 | SPAMC_SSLV3);
 		}
 		else {
-		    libspamc_log(flags, LOG_ERR, "Please specifiy a legal ssl version (%s)", spamc_optarg);
+		    libspamc_log(flags, LOG_ERR, "Please specify a legal ssl version (%s)", spamc_optarg);
 		    ret = EX_USAGE;
 		}
                 break;
@@ -368,8 +381,16 @@ read_args(int argc, char **argv,
             case 't':
             {
                 timeout = atoi(spamc_optarg);
+		if(!connect_timeout) {
+		    connect_timeout = timeout;	/* Sep 8, 2008 mrgus: default to timeout if not specified */
+		}
                 break;
             }
+	    case 'n':
+	    {
+		connect_timeout = atoi(spamc_optarg);
+		break;
+	    }
             case 'u':
             {
                 *username = spamc_optarg;
@@ -388,7 +409,7 @@ read_args(int argc, char **argv,
 		    *extratype = 2;
 		}
 		else {
-		    libspamc_log(flags, LOG_ERR, "Please specifiy a legal learn type");
+		    libspamc_log(flags, LOG_ERR, "Please specify a legal learn type");
 		    ret = EX_USAGE;
 		}
 		break;
@@ -403,7 +424,7 @@ read_args(int argc, char **argv,
 		    *extratype = 1;
 		}
 		else {
-		    libspamc_log(flags, LOG_ERR, "Please specifiy a legal report type");
+		    libspamc_log(flags, LOG_ERR, "Please specify a legal report type");
 		    ret = EX_USAGE;
 		}
 		break;
@@ -471,6 +492,16 @@ read_args(int argc, char **argv,
                 flags |= SPAMC_HEADERS;
                 break;
             }
+            case 3:
+            {
+                ptrn->filter_retries = atoi(spamc_optarg);
+                break;
+            }
+            case 4:
+            {
+                ptrn->filter_retry_sleep = atoi(spamc_optarg);
+                break;
+            }
         }
     }
 
@@ -515,14 +546,15 @@ read_args(int argc, char **argv,
  *
  * lines beginning with # or blank lines are ignored
  *
- * returns EX_OK on success, EX_CONFIG on failure
+ * returns EX_OK on success, EX_NOINPUT on absence of a config file (success),
+ * and EX_CONFIG on failure
  */
 int
 combine_args(char *config_file, int argc, char **argv,
 	     int *combo_argc, char **combo_argv)
 {
     FILE *config;
-    char option[100];
+    char option[CONFIG_MAX_LINE_SIZE];
     int i, count = 0;
     char *tok = NULL;
     int is_user_defined_p = 1;
@@ -532,29 +564,47 @@ combine_args(char *config_file, int argc, char **argv,
       is_user_defined_p = 0;
     }
 
-    if((config = fopen(config_file, "r")) == NULL) {
-        if (is_user_defined_p == 1) { /* if the config file was user defined we should issue an error */
+    if ((config = fopen(config_file, "r")) == NULL) {
+        if (is_user_defined_p == 1) {
+	    /* if the config file was user defined we should issue an error */
 	    fprintf(stderr,"Failed to open config file: %s\n", config_file);
+
+	    return EX_CONFIG;
 	}
-	return EX_CONFIG;
+	return EX_NOINPUT;
     }
 
-    while(!(feof(config)) && (fgets(option, 100, config))) {
+    while (!feof(config) && fgets(option, CONFIG_MAX_LINE_SIZE, config)) {
+	int option_l = strlen(option);
 
         count++; /* increment the line counter */
 
-	if(option[0] == '#' || option[0] == '\n') {
+	if (option_l < 1 || option[0] == '#' || option[0] == '\n') {
 	    continue;
         }
+	if (option[option_l-1] != '\n') {
+	    if (option_l < CONFIG_MAX_LINE_SIZE-1) {
+	        fprintf(stderr,"Line not terminated with a newline in %s\n",
+                        config_file);
+	    } else {
+	        fprintf(stderr,"Exceeded max line size (%d) in %s\n",
+                        CONFIG_MAX_LINE_SIZE-2, config_file);
+	    }
+	    return EX_CONFIG;
+	}
 
 	tok = option;
 	while((tok = strtok(tok, " ")) != NULL) {
-       if(tok[0] == '\n')
-          break;
+	    if(tok[0] == '\n') break;
 	    for(i=strlen(tok); i>0; i--) {
 	        if(tok[i] == '\n')
 		    tok[i] = '\0';
 	    }
+            if (*combo_argc >= COMBO_ARGV_SIZE) {
+	        fprintf(stderr,"Exceeded max number of arguments (%d) in %s\n",
+	                COMBO_ARGV_SIZE, config_file);
+	        return EX_CONFIG;
+            }
             combo_argv[*combo_argc] = strdup(tok);
             check_malloc(combo_argv[*combo_argc]);
             /* TODO: leaked.  not a big deal since spamc exits quickly */
@@ -567,6 +617,11 @@ combine_args(char *config_file, int argc, char **argv,
 
     /* note: not starting at 0, that's the command name */
     for(i=1; i<argc; i++) {
+        if (*combo_argc >= COMBO_ARGV_SIZE) {
+	    fprintf(stderr,"Exceeded max number of arguments (%d) in %s\n",
+                    COMBO_ARGV_SIZE, config_file);
+	    return EX_CONFIG;
+        }
         combo_argv[*combo_argc] = strdup(argv[i]);
         check_malloc(combo_argv[*combo_argc]);
         /* TODO: leaked.  not a big deal since spamc exits quickly */
@@ -711,13 +766,14 @@ main(int argc, char *argv[])
     int out_fd = -1;
     int result = EX_SOFTWARE;
     int ret = EX_SOFTWARE;
+    int ret_conf = EX_SOFTWARE;
     int extratype = 0;
     int islearned = 0;
     int isreported = 0;
 
     /* these are to hold CLI and config options combined, to be passed
      * to read_args() */
-    char *combo_argv[24];
+    char *combo_argv[COMBO_ARGV_SIZE];
     int combo_argc;
 
     int i;
@@ -751,37 +807,40 @@ main(int argc, char *argv[])
        }
     }
  
-    if((combine_args(config_file, argc, argv, &combo_argc, combo_argv)) == EX_OK)
-    {
+    ret_conf = combine_args(config_file, argc, argv, &combo_argc, combo_argv);
+
+    if (ret_conf == EX_OK) {
       /* Parse the combined arguments of command line and config file */
       if ((ret = read_args(combo_argc, combo_argv, &max_size, &username, 
- 			  &extratype, &trans)) != EX_OK)
+ 			   &extratype, &trans)) != EX_OK)
       {
-        if (ret == EX_TEMPFAIL)
- 	 ret = EX_OK;
+        if (ret == EX_TEMPFAIL) ret = EX_OK;
         goto finish;
       }
     }
-    else {
+    else if (ret_conf == EX_NOINPUT) {  /* no config file read */
       /* parse only command line arguments (default behaviour) */
-      if((ret = read_args(argc, argv, &max_size, &username, 
- 			 &extratype, &trans)) != EX_OK)
+      if ((ret = read_args(argc, argv, &max_size, &username, 
+ 			   &extratype, &trans)) != EX_OK)
       {
-        if(ret == EX_TEMPFAIL)
- 	 ret = EX_OK;
+        if (ret == EX_TEMPFAIL) ret = EX_OK;
         goto finish;
       }
     }
- 
+    else {  /* ret_conf == EX_CONFIG. or some other error */
+      ret = EX_CONFIG;
+      goto finish;
+    }
+
     ret = get_current_user(&username);
     if (ret != EX_OK)
         goto finish;
-        
+
     if ((flags & SPAMC_RANDOMIZE_HOSTS) != 0) {
 	/* we don't need strong randomness; this is just so we pick
 	 * a random host for loadbalancing.
 	 */
-	srand(getpid() ^ time(NULL));
+	srand(getpid() ^ (unsigned int)time(NULL));
     }
 
     /**********************************************************************
@@ -798,6 +857,7 @@ main(int argc, char *argv[])
     m.priv = NULL;
     m.max_len = max_size;
     m.timeout = timeout;
+    m.connect_timeout = connect_timeout;	/* Sep 8, 2008 mrgus: separate connect timeout */
     m.is_spam = EX_NOHOST;	/* default err code if can't reach the daemon */
 #ifdef _WIN32
     setmode(STDIN_FILENO, O_BINARY);
@@ -927,12 +987,11 @@ main(int argc, char *argv[])
     free(username);
 
 /* FAIL: */
-#if 1
     result = m.is_spam;
     if (ret != EX_OK) {
         result = ret;
     }
-#endif
+
     if (flags & (SPAMC_LEARN|SPAMC_PING) ) {
         get_output_fd(&out_fd);
         message_cleanup(&m);

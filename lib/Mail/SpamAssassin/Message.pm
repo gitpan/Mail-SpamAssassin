@@ -44,6 +44,7 @@ package Mail::SpamAssassin::Message;
 
 use strict;
 use warnings;
+use re 'taint';
 
 use Mail::SpamAssassin;
 use Mail::SpamAssassin::Message::Node;
@@ -97,7 +98,7 @@ sub new {
   $class = ref($class) || $class;
 
   my($opts) = @_;
-  my $message = $opts->{'message'} || \*STDIN;
+  my $message = defined $opts->{'message'} ? $opts->{'message'} : \*STDIN;
   my $parsenow = $opts->{'parsenow'} || 0;
   my $normalize = $opts->{'normalize'} || 0;
 
@@ -113,6 +114,7 @@ sub new {
   $self->{pristine_body} =	'';
   $self->{mime_boundary_state} = {};
   $self->{line_ending} =	"\012";
+  $self->{suppl_attrib} = $opts->{'suppl_attrib'};
 
   bless($self,$class);
 
@@ -129,16 +131,26 @@ sub new {
   if (ref $message eq 'ARRAY') {
      @message = @{$message};
   }
-  elsif (ref $message eq 'GLOB' || ref $message eq 'IO::File') {
+  elsif (ref($message) eq 'GLOB' || ref($message) =~ /^IO::/) {
     if (defined fileno $message) {
-      @message = <$message>;
+
+      # sysread+split avoids a Perl I/O bug (Bug 5985)
+      # and is faster than (<$message>) by 10..25 %
+      # (a drawback is a short-term double storage of a text in $raw_str)
+      #
+      my($inbuf,$nread,$raw_str); $raw_str = '';
+      while ( $nread=sysread($message,$inbuf,16384) ) { $raw_str .= $inbuf }
+      defined $nread  or die "error reading: $!";
+      @message = split(/^/m, $raw_str, -1);
+
+      dbg("message: empty message read")  if $raw_str eq '';
     }
   }
   elsif (ref $message) {
     dbg("message: Input is a reference of unknown type!");
   }
   elsif (defined $message) {
-    @message = split ( /^/m, $message );
+    @message = split(/^/m, $message, -1);
   }
 
   # Pull off mbox and mbx separators
@@ -148,7 +160,8 @@ sub new {
     # if we get here, it means that the input was null, so fake the message
     # content as a single newline...
     @message = ("\n");
-  } elsif ($message[0] =~ /^From\s/) {
+  } elsif ($message[0] =~ /^From\s+(?!:)/) {
+    # careful not to confuse with obsolete syntax which allowed WSP before ':'
     # mbox formated mailbox
     $self->{'mbox_sep'} = shift @message;
   } elsif ($message[0] =~ MBX_SEPARATOR) {
@@ -158,7 +171,7 @@ sub new {
     # de facto portability standard in SA's internals.  We need to
     # to this so that Mail::SpamAssassin::Util::parse_rfc822_date
     # can parse the date string...
-    if (/([\s|\d]\d)-([a-zA-Z]{3})-(\d{4})\s(\d{2}):(\d{2}):(\d{2})/) {
+    if (/([\s\d]\d)-([a-zA-Z]{3})-(\d{4})\s(\d{2}):(\d{2}):(\d{2})/) {
       # $1 = day of month
       # $2 = month (text)
       # $3 = year
@@ -168,10 +181,10 @@ sub new {
       my @arr = localtime(timelocal($6,$5,$4,$1,$MONTH{lc($2)}-1,$3));
       my $address;
       foreach (@message) {
-  	if (/From:\s[^<]+<([^>]+)>/) {
+  	if (/^From:[^<]*<([^>]+)>/) {
   	    $address = $1;
   	    last;
-  	} elsif (/From:\s([^<^>]+)/) {
+  	} elsif (/^From:\s*([^<> ]+)/) {
   	    $address = $1;
   	    last;
   	}
@@ -188,14 +201,14 @@ sub new {
     dbg("message: line ending changed to CRLF");
   }
 
-  # Go through all the headers of the message
-  my $header = '';
-  while ( my $current = shift @message ) {
-    unless ($self->{'missing_head_body_separator'}) {
-      $self->{'pristine_headers'} .= $current;
-    }
+  # Go through all the header fields of the message
+  my $hdr_errors = 0;
+  my $header;
+  for (;;) {
+    # make sure not to lose the last header field when there is no body
+    my $eof = !@message;
+    my $current = $eof ? "\n" : shift @message;
 
-    # NB: Really need to figure out special folding rules here!
     if ( $current =~ /^[ \t]/ ) {
       # This wasn't useful in terms of a rule, but we may want to treat it
       # specially at some point.  Perhaps ignore it?
@@ -203,18 +216,18 @@ sub new {
       #  $self->{'obsolete_folding_whitespace'} = 1;
       #}
 
-      # append continuations if there's a header in process
-      if ($header) {
-        $header .= $current;
-      }
+      $header = ''  if !defined $header;  # header starts with a continuation!?
+      $header .= $current;  # append continuations, no matter what
+      $self->{'pristine_headers'} .= $current;
     }
-    else {
+    else {  # not a continuation
       # Ok, there's a header here, let's go ahead and add it in.
-      if ($header) {
+      if (defined $header) {  # deal with a previous header field
         my ($key, $value) = split (/:/s, $header, 2);
 
-        # If it's not a valid header (aka: not in the form "foo: bar"), skip it.
+        # If it's not a valid header (aka: not in the form "foo:bar"), skip it.
         if (defined $value) {
+	  $key =~ s/[ \t]+\z//;  # strip WSP before colon, obsolete rfc822 syn
 	  # limit the length of the pairs we store
 	  if (length($key) > MAX_HEADER_KEY_LENGTH) {
 	    $key = substr($key, 0, MAX_HEADER_KEY_LENGTH);
@@ -228,31 +241,37 @@ sub new {
         }
       }
 
-      # not a continuation...
-      $header = $current;
-    }
-
-    if ($header) {
-      if ($header =~ /^\r?$/) {
-        last;
+      if ($current =~ /^\r?$/) {  # a regular end of a header section
+	if ($eof) {
+	  $self->{'missing_head_body_separator'} = 1;
+	} else {
+	  $self->{'pristine_headers'} .= $current;
+	}
+	last;
       }
-      else {
-        # Check for missing head/body separator
-	# RFC 2822, s2.2:
+      elsif ($current =~ /^--/) {  # mime boundary encountered, bail out
+	$self->{'missing_head_body_separator'} = 1;
+	unshift(@message, $current);
+ 	last;
+      }
+      # should we assume entering a body on encountering invalid header field?
+      elsif ($current !~ /^[\041-\071\073-\176]+[ \t]*:/) {
 	# A field name MUST be composed of printable US-ASCII characters
-	# (i.e., characters that have values between 33 (041) and 126 (176), inclusive),
-	# except colon (072).
-	# FOR THIS NEXT PART: list off the valid REs for what can be next:
-	#	Header, header continuation, blank line
-        if (!@message || $message[0] !~ /^(?:[\041-\071\073-\176]+:|[ \t]|\r?$)/ || $message[0] =~ /^--/) {
-	  # No body or no separator before mime boundary is invalid
-          $self->{'missing_head_body_separator'} = 1;
-	  
-	  # we *have* to go back through again to make sure we catch the last
-	  # header, so fake a separator and loop again.
-	  unshift(@message, "\n");
-        }
+	# (i.e., characters that have values between 33 (041) and 126 (176),
+	# inclusive), except colon (072). Obsolete header field syntax
+	# allowed WSP before a colon.
+	if (++$hdr_errors <= 3) {
+	  # just consume but ignore a few invalid header fields
+	} else {  # enough is enough...
+	  $self->{'missing_head_body_separator'} = 1;
+	  unshift(@message, $current);
+ 	  last;
+ 	}
       }
+
+      # start collecting a new header field
+      $header = $current;
+      $self->{'pristine_headers'} .= $current;
     }
   }
   undef $header;
@@ -351,6 +370,10 @@ ie: If 'Subject' is specified as the header, and there are 2 Subject
 headers in a message, the last/bottom one in the message is returned in
 scalar context or both are returned in array context.
 
+Btw, returning the last header field (not the first) happens to be consistent
+with DKIM signatures, which search for and cover multiple header fields
+bottom-up according to the 'h' tag. Let's keep it this way.
+
 Note: the returned header will include the ending newline and any embedded
 whitespace folding.
 
@@ -359,20 +382,16 @@ whitespace folding.
 sub get_pristine_header {
   my ($self, $hdr) = @_;
   
-  return $self->{pristine_headers} unless $hdr;
-  my(@ret) = $self->{pristine_headers} =~ /^\Q$hdr\E:[ \t]+(.*?\n(?![ \t]))/smgi;
-  if (@ret) {
-    # ensure the response retains taintedness (bug 5283)
-    if (wantarray) {
-      return map {
-                Mail::SpamAssassin::Util::taint_var($_);
-              } @ret;
-    } else {
-      return Mail::SpamAssassin::Util::taint_var($ret[-1]);
-    }
-  }
-  else {
+  return $self->{pristine_headers} if !defined $hdr || $hdr eq '';
+  my(@ret) =
+    $self->{pristine_headers} =~ /^\Q$hdr\E[ \t]*:[ \t]*(.*?\n(?![ \t]))/smgi;
+  # taintedness is retained by "use re 'taint'" (fix in bug 5283 now redundant)
+  if (!@ret) {
     return $self->get_header($hdr);
+  } elsif (wantarray) {
+    return @ret;
+  } else {
+    return $ret[-1];
   }
 }
 
@@ -450,6 +469,8 @@ sub get_metadata {
   if (!$self->{metadata}) {
     warn "metadata: oops! get_metadata() called after finish_metadata()"; return;
   }
+# dbg("message: get_metadata - %s: %s", $hdr, defined $_ ? $_ : '<undef>')
+#   for $self->{metadata}->{strings}->{$hdr};
   $self->{metadata}->{strings}->{$hdr};
 }
 
@@ -462,6 +483,7 @@ sub put_metadata {
   if (!$self->{metadata}) {
     warn "metadata: oops! put_metadata() called after finish_metadata()"; return;
   }
+# dbg("message: put_metadata - %s: %s", $hdr, $text);
   $self->{metadata}->{strings}->{$hdr} = $text;
 }
 
@@ -487,9 +509,11 @@ sub get_all_metadata {
   if (!$self->{metadata}) {
     warn "metadata: oops! get_all_metadata() called after finish_metadata()"; return;
   }
-  my @ret = ();
+  my @ret;
   foreach my $key (sort keys %{$self->{metadata}->{strings}}) {
-    push (@ret, "$key: " . $self->{metadata}->{strings}->{$key} . "\n");
+    my $val = $self->{metadata}->{strings}->{$key};
+    $val = ''  if !defined $val;
+    push (@ret, "$key: $val\n");
   }
   return (wantarray ? @ret :  join('', @ret));
 }
@@ -539,7 +563,7 @@ sub finish {
   while (my $part = shift @toclean) {
     # bug 5557: windows requires tmp file be closed before it can be rm'd
     if (ref $part->{'raw'} eq 'GLOB') {
-      close ($part->{'raw'});
+      close($part->{'raw'})  or die "error closing input file: $!";
     }
 
     # bug 5858: avoid memory leak with deep MIME structure
@@ -568,7 +592,9 @@ sub finish {
 
   # delete temporary files
   if ($self->{'tmpfiles'}) {
-    unlink @{$self->{'tmpfiles'}};
+    for my $fn (@{$self->{'tmpfiles'}}) {
+      unlink($fn) or warn "cannot unlink $fn: $!";
+    }
     delete $self->{'tmpfiles'};
   }
 }
@@ -577,8 +603,13 @@ sub finish {
 # temporary files are deleted even if the finish() method is omitted
 sub DESTROY {
   my $self = shift;
+  # best practices: prevent potential calls to eval and to system routines
+  # in code of a DESTROY method from clobbering global variables $@ and $! 
+  local($@,$!);  # keep outer error handling unaffected by DESTROY
   if ($self->{'tmpfiles'}) {
-    unlink @{$self->{'tmpfiles'}};
+    for my $fn (@{$self->{'tmpfiles'}}) {
+      unlink($fn) or dbg("message: cannot unlink $fn: $!");
+    }
   }
 }
 
@@ -653,13 +684,16 @@ sub parse_body {
         # Just decode the part, but we don't care about the result here.
         $toparse->[0]->decode(0);
 
-	# bug 5051: sometimes message/* parts have no content, and we get
-	# stuck waiting for STDIN, which is bad. :(
-        if ($toparse->[0]->{'decoded'}) {
-	  # Ok, so this part is still semi-recursive, since M::SA::Message calls
-	  # M::SA::Message, but we don't subparse the new message, and pull a
-	  # sneaky "steal our child's queue" maneuver to deal with it on our own
-	  # time.  Reference the decoded array directly since it's faster.
+        # bug 5051, bug 3748: sometimes message/* parts have no content,
+        # and we get stuck waiting for STDIN, which is bad. :(
+        if (defined $toparse->[0]->{'decoded'} &&
+            $toparse->[0]->{'decoded'} ne '')
+        {
+	  # Ok, so this part is still semi-recursive, since M::SA::Message
+	  # calls M::SA::Message, but we don't subparse the new message,
+	  # and pull a sneaky "steal our child's queue" maneuver to deal
+	  # with it on our own time.  Reference the decoded array directly
+	  # since it's faster.
 	  # 
           my $msg_obj = Mail::SpamAssassin::Message->new({
     	    message	=>	$toparse->[0]->{'decoded'},
@@ -682,7 +716,8 @@ sub parse_body {
 	  # will have that data)
 	  if (ref $toparse->[0]->{'raw'} eq 'GLOB') {
 	    # Make sure we close it if it's a temp file -- Bug 5166
-	    close ($toparse->[0]->{'raw'});
+	    close($toparse->[0]->{'raw'})
+	      or die "error closing input file: $!";
 	  }
 
 	  delete $toparse->[0]->{'raw'};
@@ -732,6 +767,13 @@ sub _parse_multipart {
       if ($body->[$line] =~ /^--\Q$boundary\E\s*$/) {
 	# Make note that we found the opening boundary
 	$self->{mime_boundary_state}->{$boundary} = 1;
+
+	# if the line after the opening boundary isn't a header, flag it.
+	# we need to make sure that there's actually another line though.
+	if ($line+1 < $tmp_line && $body->[$line+1] !~ /^[\041-\071\073-\176]+:/) {
+	  $self->{'missing_mime_headers'} = 1;
+	}
+
         last;
       }
     }
@@ -789,10 +831,18 @@ sub _parse_multipart {
       # rfc 1521 says /^--boundary--$/, some MUAs may just require /^--boundary--/
       # but this causes problems with horizontal lines when the boundary is
       # made up of dashes as well, etc.
-      if (defined $boundary && $line =~ /^--\Q${boundary}\E--\s*$/) {
-	# Make a note that we've seen the end boundary
-	$self->{mime_boundary_state}->{$boundary}--;
-        last;
+      if (defined $boundary) {
+        if ($line =~ /^--\Q${boundary}\E--\s*$/) {
+	  # Make a note that we've seen the end boundary
+	  $self->{mime_boundary_state}->{$boundary}--;
+          last;
+        }
+	elsif ($line_count && $body->[-$line_count] !~ /^[\041-\071\073-\176]+:/) {
+          # if we aren't on an end boundary and there are still lines left, it
+	  # means we hit a new start boundary.  therefore, the next line ought
+	  # to be a mime header.  if it's not, mark it.
+	  $self->{'missing_mime_headers'} = 1;
+	}
       }
 
       # make sure we start with a new clean node
@@ -806,7 +856,7 @@ sub _parse_multipart {
 
     if (!$in_body) {
       # s/\s+$//;   # bug 5127: don't clean this up (yet)
-      if (m/^[\041-\071\073-\176]+:/) {
+      if (/^[\041-\071\073-\176]+[ \t]*:/) {
         if ($header) {
           my ( $key, $value ) = split ( /:\s*/, $header, 2 );
           $part_msg->header( $key, $value );
@@ -814,7 +864,7 @@ sub _parse_multipart {
         $header = $_;
 	next;
       }
-      elsif (/^[ \t]/) {
+      elsif (/^[ \t]/ && $header) {
         # $_ =~ s/^\s*//;   # bug 5127, again
         $header .= $_;
 	next;
@@ -838,7 +888,7 @@ sub _parse_multipart {
     }
 
     # we run into a perl bug if the lines are astronomically long (probably
-    # due to lots of regexp backtracking); so cut short any individual line
+    # due to lots of regexp backtracking); so split any individual line
     # over MAX_BODY_LINE_LENGTH bytes in length.  This can wreck HTML
     # totally -- but IMHO the only reason a luser would use
     # MAX_BODY_LINE_LENGTH-byte lines is to crash filters, anyway.
@@ -847,6 +897,19 @@ sub _parse_multipart {
       substr($_, 0, MAX_BODY_LINE_LENGTH) = '';
     }
     push ( @{$part_array}, $_ );
+  }
+
+  # Look for a message epilogue
+  # originally ignored whitespace:   0.185   0.2037   0.0654    0.757   0.00   0.00  TVD_TAB
+  # ham FPs were all "." on a line by itself.
+  # spams seem to only have NULL chars afterwards ?
+  if ($line_count) {
+    for(; $line_count > 0; $line_count--) {
+      if ($body->[-$line_count] =~ /[^\s.]/) {
+        $self->{mime_epilogue_exists} = 1;
+        last;
+      }
+    }
   }
 
 }
@@ -896,7 +959,7 @@ sub _parse_normal {
       # we cannot just delete immediately in the POSIX idiom, as this is
       # unportable (to win32 at least)
       push @{$self->{tmpfiles}}, $filepath;
-      $msg->{'raw'}->print(@{$body});
+      $msg->{'raw'}->print(@{$body})  or die "error writing to $filepath: $!";
     }
   }
 
@@ -1084,7 +1147,8 @@ sub get_decoded_body_text_array {
     next if ($parts[$pt]->{'type'} eq 'text/calendar');
 
     push(@{$self->{text_decoded}}, "\n") if ( @{$self->{text_decoded}} );
-    push(@{$self->{text_decoded}}, $parts[$pt]->decode());
+    push(@{$self->{text_decoded}},
+         split_into_array_of_short_paragraphs($parts[$pt]->decode()));
   }
 
   return $self->{text_decoded};
@@ -1093,7 +1157,7 @@ sub get_decoded_body_text_array {
 # ---------------------------------------------------------------------------
 
 sub split_into_array_of_short_lines {
-  my @result = ();
+  my @result;
   foreach my $line (split (/^/m, $_[0])) {
     while (length ($line) > MAX_BODY_LINE_LENGTH) {
       # try splitting "nicely" so that we don't chop an url in half or
@@ -1104,6 +1168,28 @@ sub split_into_array_of_short_lines {
     }
     push (@result, $line);
   }
+  @result;
+}
+
+# ---------------------------------------------------------------------------
+
+# split a text into array of paragraphs of sizes between
+# $chunk_size and 2 * $chunk_size, returning the resulting array
+
+sub split_into_array_of_short_paragraphs {
+  my @result;
+  my $chunk_size = 1024;
+  my $text_l = length($_[0]);
+  my($j,$ofs);
+  for ($ofs = 0;  $text_l - $ofs > 2 * $chunk_size;  $ofs = $j+1) {
+    $j = index($_[0], "\n", $ofs+$chunk_size);
+    if ($j < 0) {
+      $j = index($_[0], " ", $ofs+$chunk_size);
+      if ($j < 0) { $j = $ofs+$chunk_size }
+    }
+    push(@result, substr($_[0], $ofs, $j-$ofs+1));
+  }
+  push(@result, substr($_[0], $ofs))  if $ofs < $text_l;
   @result;
 }
 

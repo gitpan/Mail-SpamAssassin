@@ -23,12 +23,22 @@ use Mail::SpamAssassin;
 use Mail::SpamAssassin::HTML;
 use Mail::SpamAssassin::Util;
 
-plan tests => 89;
+plan tests => 95;
 
 ##############################################
 
+
+tstlocalrules ('
+
+  util_rb_2tld live.com
+  util_rb_3tld three.3ldlive.com
+
+');
+
 # initialize SpamAssassin
-my $sa = create_saobj({'dont_copy_prefs' => 1});
+my $sa = create_saobj({'dont_copy_prefs' => 1,
+        # 'debug' => 1
+});
 
 $sa->init(0); # parse rules
 
@@ -46,7 +56,7 @@ ok ($urimap{'http://66.92.69.221/'});
 ok ($urimap{'http://66.92.69.222/'});
 ok ($urimap{'http://66.92.69.223/'});
 ok ($urimap{'http://66.92.69.224/'});
-ok ($urimap{'spamassassin.org'});
+ok ($urimap{'http://spamassassin.org'});
 ok (!$urimap{'CUMSLUTS.'});
 ok (!$urimap{'CUMSLUTS..VIRGIN'});
 
@@ -58,9 +68,11 @@ sub try_domains {
 
   # undef is valid in some situations, so deal with it...
   if (!defined $expect) {
+    warn("try_domains: failed! expect: undefined got: '$result'\n") if (defined $result);
     return !defined $result;
   }
   elsif (!defined $result) {
+    warn "try_domains: failed! expect: '$expect' got: undefined\n";
     return 0;
   }
 
@@ -242,6 +254,19 @@ ok(try_canon([
    'http://127.0.0.1',
    ]));
 
+ok(try_canon([
+   'http://0xcc.0xf.0x50.0x89/',
+   ], [
+   'http://0xcc.0xf.0x50.0x89/',
+   'http://204.15.80.137/',
+       ]));
+
+ok(try_canon([
+   'http://0xcc.0x50.0x89.0xf/',
+   ], [
+   'http://0xcc.0x50.0x89.0xf/',
+   'http://204.80.137.15/',
+       ]));
 
 ##############################################
 
@@ -304,4 +329,10 @@ ok(try($base, "g?y/../x", "http://a/b/c/g?y/../x"));
 ok(try($base, "g#s/./x", "http://a/b/c/g#s/./x"));
 ok(try($base, "g#s/../x", "http://a/b/c/g#s/../x"));
 ok(try($base, "http:g", "http://a/b/c/g"));
+
+# uses the util_rb_*tld lines above
+ok(try_domains('WWW.LIVE.com', 'www.live.com'));
+ok(try_domains('WWW.foo.LIVE.com', 'foo.live.com'));
+ok(try_domains('WWW.three.3ldLIVE.com', 'www.three.3ldlive.com'));
+ok(try_domains('WWW.foo.basicLIVE.com', 'basiclive.com'));
 

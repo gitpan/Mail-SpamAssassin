@@ -2,7 +2,9 @@
 
 use lib '.'; use lib 't';
 use SATest; sa_t_init("spamd_kill_restart_rr");
-use constant TEST_ENABLED => !$SKIP_SPAMD_TESTS && !$RUNNING_ON_WINDOWS;
+
+use constant TEST_ENABLED => conf_bool('run_long_tests') &&
+                                !$SKIP_SPAMD_TESTS && !$RUNNING_ON_WINDOWS;
 
 use Test; BEGIN { plan tests => (TEST_ENABLED? 93 : 0) };
 
@@ -14,6 +16,10 @@ exit unless TEST_ENABLED;
 
 my $pid_file = "log/spamd.pid";
 my($pid1, $pid2);
+
+tstlocalrules("
+      use_auto_whitelist 0
+  ");
 
 dbgprint "Starting spamd...\n";
 start_spamd("-L --round-robin -r ${pid_file}");
@@ -43,11 +49,13 @@ for $retry (0 .. 9) {
   $spamd_pid = 0;
 
   dbgprint "starting new spamd, loop try $retry...\n";
+  my $startat = time;
   start_spamd("-D -L --round-robin -r ${pid_file}");
 
   dbgprint "Waiting for spamd at pid $pid1 to restart...\n";
-  wait_for_file_to_appear ($pid_file, 20);
-  ok (-e $pid_file) or warn "$pid_file does not exist post restart";
+  wait_for_file_to_appear ($pid_file, 40);
+  ok (-e $pid_file) or warn "$pid_file does not exist post restart; started at $startat, gave up at ".time;
+
   ok (!-z $pid_file) or warn "$pid_file is empty post restart";
   ok ($pid2 = read_from_pidfile($pid_file));
 

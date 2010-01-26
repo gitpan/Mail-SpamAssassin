@@ -45,14 +45,11 @@ package Mail::SpamAssassin::Util::Progress;
 use strict;
 use warnings;
 use bytes;
+use re 'taint';
+
+use Time::HiRes qw(time);
 
 use constant HAS_TERM_READKEY => eval { require Term::ReadKey };
-
-# Load Time::HiRes if it's available
-BEGIN {
-  eval { require Time::HiRes };
-  Time::HiRes->import( qw(time) ) unless $@;
-}
 
 =head2 new
 
@@ -142,8 +139,13 @@ sub init_bar {
   # The ideal case would be if they happen to have Term::ReadKey installed
   if (!defined($term_size) && HAS_TERM_READKEY) {
     my $term_readkey_term_size;
-    eval { $term_readkey_term_size = (Term::ReadKey::GetTerminalSize($self->{fh}))[0] };
-    unless ($@) { # an error will just keep the default
+    eval {
+      $term_readkey_term_size =
+        (Term::ReadKey::GetTerminalSize($self->{fh}))[0];
+      1;
+    } or do {  # an error will just keep the default
+      my $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
+      # dbg("progress: Term::ReadKey::GetTerminalSize failed: $eval_stat");
       # GetTerminalSize might have returned an empty array, so check the
       # value and set if it exists, if not we keep the default
       $term_size = $term_readkey_term_size if ($term_readkey_term_size);
@@ -258,9 +260,10 @@ sub update {
 public instance () final ([Integer $num_done])
 
 Description:
-This method should be called once all processing has finished.  It will print out the final msgs per sec
-calculation and the total time taken.  You can optionally pass in a num_done value, otherwise it will use
-the value calculated from the last call to update.
+This method should be called once all processing has finished.
+It will print out the final msgs per sec calculation and the total time taken.
+You can optionally pass in a num_done value, otherwise it will use the value
+calculated from the last call to update.
 
 =cut
 

@@ -1,4 +1,3 @@
-# NOTE: This interface is alpha at best, and almost guaranteed to change
 # <@LICENSE>
 # Licensed to the Apache Software Foundation (ASF) under one or more
 # contributor license agreements.  See the NOTICE file distributed with
@@ -20,13 +19,20 @@
 
 Mail::SpamAssassin::Client - Client for spamd Protocol
 
-NOTE: This interface is alpha at best, and almost guaranteed to change
-
 =head1 SYNOPSIS
 
-  my $client = new Mail::SpamAssassin::Client({port => 783,
-                                               host => 'localhost',
-                                               username => 'someuser'});
+  my $client = new Mail::SpamAssassin::Client({
+                                port => 783,
+                                host => 'localhost',
+                                username => 'someuser'});
+  or
+
+  my $client = new Mail::SpamAssassin::Client({
+                                socketpath => '/path/to/socket',
+                                username => 'someuser'});
+
+  Optionally takes timeout, which is applied to IO::Socket for the
+  initial connection.  If not supplied, it defaults to 30 seconds.
 
   if ($client->ping()) {
     print "Ping is ok\n";
@@ -40,18 +46,23 @@ NOTE: This interface is alpha at best, and almost guaranteed to change
 
 =head1 DESCRIPTION
 
-Mail::SpamAssassin::Client is a module that provides a perl implementation for
+Mail::SpamAssassin::Client is a module which provides a perl implementation of
 the spamd protocol.
 
 =cut
 
 package Mail::SpamAssassin::Client;
 
+use strict;
+use warnings;
+use re 'taint';
+
 use IO::Socket;
+use Errno qw(EBADF);
 
 my $EOL = "\015\012";
 my $BLANK = $EOL x 2;
-my $PROTOVERSION = 'SPAMC/1.3';
+my $PROTOVERSION = 'SPAMC/1.5';
 
 =head1 PUBLIC METHODS
 
@@ -80,8 +91,12 @@ sub new {
     $self->{host} = $args->{host};
   }
 
-  if ($args->{username}) {
+  if (defined $args->{username}) {
     $self->{username} = $args->{username};
+  }
+
+  if ($args->{timeout}) {
+    $self->{timeout} = $args->{timeout} || 30;
   }
 
   bless($self, $class);
@@ -91,11 +106,10 @@ sub new {
 
 =head2 process
 
-public instance (\%) process (String $msg, Boolean $is_check_p)
+public instance (\%) process (String $msg)
 
 Description:
-This method makes a call to the spamd server and depending on the value of
-C<$is_check_p> either calls PROCESS or CHECK.
+This method calls the spamd server with the PROCESS command.
 
 The return value is a hash reference containing several pieces of information,
 if available:
@@ -115,59 +129,14 @@ message
 sub process {
   my ($self, $msg, $is_check_p) = @_;
 
-  my %data;
+  my $command = 'PROCESS';
 
-  my $command = $is_check_p ? 'CHECK' : 'PROCESS';
-
-  $self->_clear_errors();
-
-  my $remote = $self->_create_connection();
-
-  return 0 unless ($remote);
-
-  my $msgsize = length($msg.$EOL);
-
-  print $remote "$command $PROTOVERSION$EOL";
-  print $remote "Content-length: $msgsize$EOL";
-  print $remote "User: $self->{username}$EOL" if ($self->{username});
-  print $remote "$EOL";
-  print $remote $msg;
-  print $remote "$EOL";
-
-  my $line = <$remote>;
-  return undef unless (defined $line);
-
-  my ($version, $resp_code, $resp_msg) = $self->_parse_response_line($line);
-
-  $self->{resp_code} = $resp_code;
-  $self->{resp_msg} = $resp_msg;
-
-  return undef unless ($resp_code == 0);
-
-  while ($line = <$remote>) {
-    if ($line =~ /Content-length: (\d+)/) {
-      $data{content_length} = $1;
-    }
-    elsif ($line =~ m!Spam: (\S+) ; (\S+) / (\S+)!) {
-      $data{isspam} = $1;
-      $data{score} = $2 + 0;
-      $data{threshold} = $3 + 0;
-    }
-    elsif ($line =~ /^${EOL}$/) {
-      last;
-    }
+  if ($is_check_p) {
+    warn "Passing in \$is_check_p is deprecated, just call the check method instead.\n";
+    $command = 'CHECK';
   }
 
-  my $return_msg;
-  while(<$remote>) {
-    $return_msg .= $_;
-  }
-
-  $data{message} = $return_msg if ($return_msg);
-
-  close $remote;
-
-  return \%data;
+  return $self->_filter($msg, $command);
 }
 
 =head2 check
@@ -177,10 +146,6 @@ public instance (\%) check (String $msg)
 Description:
 The method implements the check call.
 
-Since check and process are so similar, we simply pass this
-call along to the process method with a flag to indicate
-to actually make the CHECK call.
-
 See the process method for the return value.
 
 =cut
@@ -188,7 +153,24 @@ See the process method for the return value.
 sub check {
   my ($self, $msg) = @_;
 
-  return $self->process($msg, 1);
+  return $self->_filter($msg, 'CHECK');
+}
+
+=head2 headers
+
+public instance (\%) headers (String $msg)
+
+Description:
+This method implements the headers call.
+
+See the process method for the return value.
+
+=cut
+
+sub headers {
+  my ($self, $msg) = @_;
+
+  return $self->_filter($msg, 'HEADERS');
 }
 
 =head2 learn
@@ -219,7 +201,7 @@ sub learn {
 
   print $remote "TELL $PROTOVERSION$EOL";
   print $remote "Content-length: $msgsize$EOL";
-  print $remote "User: $self->{username}$EOL" if ($self->{username});
+  print $remote "User: $self->{username}$EOL" if defined $self->{username};
 
   if ($learntype == 0) {
     print $remote "Message-class: spam$EOL";
@@ -242,7 +224,11 @@ sub learn {
   print $remote $msg;
   print $remote "$EOL";
 
-  my $line = <$remote>;
+  $! = 0; my $line = <$remote>;
+  # deal gracefully with a Perl I/O bug which may return status EBADF at eof
+  defined $line || $!==0  or
+    $!==EBADF ? dbg("error reading from spamd (1): $!")
+              : die "error reading from spamd (1): $!";
   return undef unless (defined $line);
 
   my ($version, $resp_code, $resp_msg) = $self->_parse_response_line($line);
@@ -252,10 +238,11 @@ sub learn {
 
   return undef unless ($resp_code == 0);
 
-  my $did_set;
-  my $did_remove;
+  my $did_set = '';
+  my $did_remove = '';
 
-  while ($line = <$remote>) {
+  for ($!=0; defined($line=<$remote>); $!=0) {
+    local $1;
     if ($line =~ /DidSet: (.*)/i) {
       $did_set = $1;
     }
@@ -266,8 +253,10 @@ sub learn {
       last;
     }
   }
-
-  close $remote;
+  defined $line || $!==0  or
+    $!==EBADF ? dbg("error reading from spamd (2): $!")
+              : die "error reading from spamd (2): $!";
+  close $remote  or die "error closing socket: $!";
 
   if ($learntype == 0 || $learntype == 1) {
     return $did_set =~ /local/;
@@ -299,14 +288,17 @@ sub report {
 
   print $remote "TELL $PROTOVERSION$EOL";
   print $remote "Content-length: $msgsize$EOL";
-  print $remote "User: $self->{username}$EOL" if ($self->{username});
+  print $remote "User: $self->{username}$EOL" if defined $self->{username};
   print $remote "Message-class: spam$EOL";
   print $remote "Set: local,remote$EOL";
   print $remote "$EOL";
   print $remote $msg;
   print $remote "$EOL";
 
-  my $line = <$remote>;
+  $! = 0; my $line = <$remote>;
+  defined $line || $!==0  or
+    $!==EBADF ? dbg("error reading from spamd (3): $!")
+              : die "error reading from spamd (3): $!";
   return undef unless (defined $line);
 
   my ($version, $resp_code, $resp_msg) = $self->_parse_response_line($line);
@@ -318,7 +310,7 @@ sub report {
 
   my $reported_p = 0;
 
-  while (($line = <$remote>)) {
+  for ($!=0; defined($line=<$remote>); $!=0) {
     if ($line =~ /DidSet:\s+.*remote/i) {
       $reported_p = 1;
       last;
@@ -327,8 +319,10 @@ sub report {
       last;
     }
   }
-
-  close $remote;
+  defined $line || $!==0  or
+    $!==EBADF ? dbg("error reading from spamd (4): $!")
+              : die "error reading from spamd (4): $!";
+  close $remote  or die "error closing socket: $!";
 
   return $reported_p;
 }
@@ -355,7 +349,7 @@ sub revoke {
 
   print $remote "TELL $PROTOVERSION$EOL";
   print $remote "Content-length: $msgsize$EOL";
-  print $remote "User: $self->{username}$EOL" if ($self->{username});
+  print $remote "User: $self->{username}$EOL" if defined $self->{username};
   print $remote "Message-class: ham$EOL";
   print $remote "Set: local$EOL";
   print $remote "Remove: remote$EOL";
@@ -363,7 +357,10 @@ sub revoke {
   print $remote $msg;
   print $remote "$EOL";
 
-  my $line = <$remote>;
+  $! = 0; my $line = <$remote>;
+  defined $line || $!==0  or
+    $!==EBADF ? dbg("error reading from spamd (5): $!")
+              : die "error reading from spamd (5): $!";
   return undef unless (defined $line);
 
   my ($version, $resp_code, $resp_msg) = $self->_parse_response_line($line);
@@ -375,7 +372,7 @@ sub revoke {
 
   my $revoked_p = 0;
 
-  while (!$revoked_p && ($line = <$remote>)) {
+  for ($!=0; defined($line=<$remote>); $!=0) {
     if ($line =~ /DidRemove:\s+remote/i) {
       $revoked_p = 1;
       last;
@@ -384,8 +381,10 @@ sub revoke {
       last;
     }
   }
-
-  close $remote;
+  defined $line || $!==0  or
+    $!==EBADF ? dbg("error reading from spamd (6): $!")
+              : die "error reading from spamd (6): $!";
+  close $remote  or die "error closing socket: $!";
 
   return $revoked_p;
 }
@@ -409,10 +408,13 @@ sub ping {
   return 0 unless ($remote);
 
   print $remote "PING $PROTOVERSION$EOL";
-  print $remote "$EOL";
+  print $remote "$EOL";  # bug 6187, bumps protocol version to 1.5
 
-  my $line = <$remote>;
-  close $remote;
+  $! = 0; my $line = <$remote>;
+  defined $line || $!==0  or
+    $!==EBADF ? dbg("error reading from spamd (7): $!")
+              : die "error reading from spamd (7): $!";
+  close $remote  or die "error closing socket: $!";
   return undef unless (defined $line);
 
   my ($version, $resp_code, $resp_msg) = $self->_parse_response_line($line);
@@ -429,7 +431,7 @@ private instance (IO::Socket) _create_connection ()
 
 Description:
 This method sets up a proper IO::Socket connection based on the arguments
-used when greating the client object.
+used when creating the client object.
 
 On failure, it sets an internal error code and returns undef.
 
@@ -443,12 +445,14 @@ sub _create_connection {
   if ($self->{socketpath}) {
     $remote = IO::Socket::UNIX->new( Peer => $self->{socketpath},
 				     Type => SOCK_STREAM,
+				     Timeout => $self->{timeout},
 				   );
   }
   else {
     $remote = IO::Socket::INET->new( Proto     => "tcp",
 				     PeerAddr  => $self->{host},
 				     PeerPort  => $self->{port},
+				     Timeout   => $self->{timeout},
 				   );
   }
 
@@ -494,6 +498,96 @@ sub _clear_errors {
 
   $self->{resp_code} = undef;
   $self->{resp_msg} = undef;
+}
+
+=head2 _filter
+
+private instance (\%) _filter (String $msg, String $command)
+
+Description:
+Makes the actual call to the spamd server for the various filter method
+(ie PROCESS, CHECK, HEADERS, etc).  The command that is passed in is
+sent to the spamd server.
+
+The return value is a hash reference containing several pieces of information,
+if available:
+
+content_length
+
+isspam
+
+score
+
+threshold
+
+message (if available)
+
+=cut
+
+sub _filter {
+  my ($self, $msg, $command) = @_;
+
+  my %data;
+
+  $self->_clear_errors();
+
+  my $remote = $self->_create_connection();
+
+  return 0 unless ($remote);
+
+  my $msgsize = length($msg.$EOL);
+
+  print $remote "$command $PROTOVERSION$EOL";
+  print $remote "Content-length: $msgsize$EOL";
+  print $remote "User: $self->{username}$EOL" if defined $self->{username};
+  print $remote "$EOL";
+  print $remote $msg;
+  print $remote "$EOL";
+
+  $! = 0; my $line = <$remote>;
+  defined $line || $!==0  or
+    $!==EBADF ? dbg("error reading from spamd (8): $!")
+              : die "error reading from spamd (8): $!";
+  return undef unless (defined $line);
+
+  my ($version, $resp_code, $resp_msg) = $self->_parse_response_line($line);
+  
+  $self->{resp_code} = $resp_code;
+  $self->{resp_msg} = $resp_msg;
+
+  return undef unless ($resp_code == 0);
+
+  for ($!=0; defined($line=<$remote>); $!=0) {
+    local($1,$2,$3);
+    if ($line =~ /Content-length: (\d+)/) {
+      $data{content_length} = $1;
+    }
+    elsif ($line =~ m!Spam: (\S+) ; (\S+) / (\S+)!) {
+      $data{isspam} = $1;
+      $data{score} = $2 + 0;
+      $data{threshold} = $3 + 0;
+    }
+    elsif ($line =~ /^${EOL}$/) {
+      last;
+    }
+  }
+  defined $line || $!==0  or
+    $!==EBADF ? dbg("error reading from spamd (9): $!")
+              : die "error reading from spamd (9): $!";
+
+  my $return_msg;
+  for ($!=0; defined($line=<$remote>); $!=0) {
+    $return_msg .= $line;
+  }
+  defined $line || $!==0  or
+    $!==EBADF ? dbg("error reading from spamd (10): $!")
+              : die "error reading from spamd (10): $!";
+
+  $data{message} = $return_msg if ($return_msg);
+
+  close $remote  or die "error closing socket: $!";
+
+  return \%data;
 }
 
 1;

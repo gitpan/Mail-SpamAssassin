@@ -17,11 +17,14 @@
 
 package Mail::SpamAssassin::Plugin::HTMLEval;
 
-use Mail::SpamAssassin::Plugin;
-use Mail::SpamAssassin::Locales;
 use strict;
 use warnings;
 use bytes;
+use re 'taint';
+
+use Mail::SpamAssassin::Plugin;
+use Mail::SpamAssassin::Locales;
+use Mail::SpamAssassin::Util qw(untaint_var);
 
 use vars qw(@ISA);
 @ISA = qw(Mail::SpamAssassin::Plugin);
@@ -117,13 +120,15 @@ sub html_test {
 
 sub html_eval {
   my ($self, $pms, undef, $test, $rawexpr) = @_;
-  $rawexpr =~ /^([\<\>\=\!\-\+ 0-9]+)$/; my $expr = $1;
-
+  my $expr;
+  if ($rawexpr =~ /^[\<\>\=\!\-\+ 0-9]+$/) {
+    $expr = untaint_var($rawexpr);
+  }
   # workaround bug 3320: wierd perl bug where additional, very explicit
   # untainting into a new var is required.
   my $tainted = $pms->{html}{$test};
   return unless defined($tainted);
-  $tainted =~ /^(.*)$/; my $val = $1;
+  my $val = $tainted;
 
   # just use the value in $val, don't copy it needlessly
   return eval "\$val $expr";
@@ -143,7 +148,7 @@ sub html_title_subject_ratio {
   my ($self, $pms, undef, $ratio) = @_;
 
   my $subject = $pms->get('Subject');
-  if (! $subject) {
+  if ($subject eq '') {
     return 0;
   }
   my $max = 0;

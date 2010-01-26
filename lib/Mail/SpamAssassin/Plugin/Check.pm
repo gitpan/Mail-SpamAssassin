@@ -14,13 +14,17 @@ This plugin provides the primary message check functionality.
 
 package Mail::SpamAssassin::Plugin::Check;
 
-use Mail::SpamAssassin::Plugin;
-use Mail::SpamAssassin::Logger;
-use Mail::SpamAssassin::Util;
-use Mail::SpamAssassin::Constants qw(:sa);
-
 use strict;
 use warnings;
+use re 'taint';
+
+use Time::HiRes qw(time);
+
+use Mail::SpamAssassin::Plugin;
+use Mail::SpamAssassin::Logger;
+use Mail::SpamAssassin::Util qw(untaint_var);
+use Mail::SpamAssassin::Timeout;
+use Mail::SpamAssassin::Constants qw(:sa);
 
 use vars qw(@ISA @TEMPORARY_METHODS);
 @ISA = qw(Mail::SpamAssassin::Plugin);
@@ -47,6 +51,23 @@ sub check_main {
 
   my $pms = $args->{permsgstatus};
 
+  my $suppl_attrib = $pms->{msg}->{suppl_attrib};
+  if (ref $suppl_attrib && ref $suppl_attrib->{rule_hits}) {
+    my @caller_rule_hits = @{$suppl_attrib->{rule_hits}};
+    dbg("check: adding caller rule hits, %d rules", scalar(@caller_rule_hits));
+    for my $caller_rule_hit (@caller_rule_hits) {
+      next if ref $caller_rule_hit ne 'HASH';
+      my($rulename, $area, $score, $value, $ruletype, $tflags, $description) =
+        @$caller_rule_hit{qw(rule area score value ruletype tflags descr)};
+      $pms->got_hit($rulename, $area,
+                    !defined $score ? () : (score => $score),
+                    !defined $value ? () : (value => $value),
+                    !defined $tflags ? () : (tflags => $tflags),
+                    !defined $description ? () : (description => $description),
+                    ruletype => $ruletype);
+    }
+  }
+
   # bug 4353:
   # Do this before the RBL tests are kicked off.  The metadata parsing
   # will figure out the (un)trusted relays and such, which are used in the
@@ -61,21 +82,37 @@ sub check_main {
   my $decoded = $pms->get_decoded_stripped_body_text_array();
   my $bodytext = $pms->get_decoded_body_text_array();
   my $fulltext = $pms->{msg}->get_pristine();
+  my $master_deadline = $pms->{master_deadline};
+  dbg("check: check_main, time limit in %.3f s",
+      $master_deadline - time)  if $master_deadline;
 
   my @uris = $pms->get_uri_list();
 
   foreach my $priority (sort { $a <=> $b } keys %{$pms->{conf}->{priorities}}) {
     # no need to run if there are no priorities at this level.  This can
-    # happen in Conf.pm when we switch a rules from one priority to another
+    # happen in Conf.pm when we switch a rule from one priority to another
     next unless ($pms->{conf}->{priorities}->{$priority} > 0);
 
-    # if shortcircuiting is hit, we skip all other priorities...
-    last if $self->{main}->call_plugins("have_shortcircuited", { permsgstatus => $pms });
+    if ($pms->{deadline_exceeded}) {
+      last;
+    } elsif ($master_deadline && time > $master_deadline) {
+      info("check: exceeded time limit, skipping further tests");
+      $pms->{deadline_exceeded} = 1;
+      last;
+    } elsif ($self->{main}->call_plugins("have_shortcircuited",
+                                         { permsgstatus => $pms })) {
+      # if shortcircuiting is hit, we skip all other priorities...
+      last;
+    }
 
+    my $timer = $self->{main}->time_method("tests_pri_".$priority);
     dbg("check: running tests for priority: $priority");
 
     # only harvest the dnsbl queries once priority HARVEST_DNSBL_PRIORITY
     # has been reached and then only run once
+    #
+    # TODO: is this block still needed here? is HARVEST_DNSBL_PRIORITY used?
+    #
     if ($priority >= HARVEST_DNSBL_PRIORITY
         && $needs_dnsbl_harvest_p
         && !$self->{main}->call_plugins("have_shortcircuited",
@@ -99,33 +136,49 @@ sub check_main {
     # do head tests
     $self->do_head_tests($pms, $priority);
     $pms->harvest_completed_queries();
+    last if $pms->{deadline_exceeded};
+
     $self->do_head_eval_tests($pms, $priority);
     $pms->harvest_completed_queries();
+    last if $pms->{deadline_exceeded};
 
     $self->do_body_tests($pms, $priority, $decoded);
     $pms->harvest_completed_queries();
+    last if $pms->{deadline_exceeded};
+
     $self->do_uri_tests($pms, $priority, @uris);
     $pms->harvest_completed_queries();
+    last if $pms->{deadline_exceeded};
+
     $self->do_body_eval_tests($pms, $priority, $decoded);
     $pms->harvest_completed_queries();
+    last if $pms->{deadline_exceeded};
   
     $self->do_rawbody_tests($pms, $priority, $bodytext);
     $pms->harvest_completed_queries();
+    last if $pms->{deadline_exceeded};
+
     $self->do_rawbody_eval_tests($pms, $priority, $bodytext);
     $pms->harvest_completed_queries();
+    last if $pms->{deadline_exceeded};
   
     $self->do_full_tests($pms, $priority, \$fulltext);
     $pms->harvest_completed_queries();
+    last if $pms->{deadline_exceeded};
+
     $self->do_full_eval_tests($pms, $priority, \$fulltext);
     $pms->harvest_completed_queries();
+    last if $pms->{deadline_exceeded};
 
     $self->do_meta_tests($pms, $priority);
     $pms->harvest_completed_queries();
+    last if $pms->{deadline_exceeded};
 
     # we may need to call this more often than once through the loop, but
     # it needs to be done at least once, either at the beginning or the end.
     $self->{main}->call_plugins ("check_tick", { permsgstatus => $pms });
     $pms->harvest_completed_queries();
+    last if $pms->{deadline_exceeded};
   }
 
   # sanity check, it is possible that no rules >= HARVEST_DNSBL_PRIORITY ran so the harvest
@@ -144,15 +197,27 @@ sub check_main {
     $pms->{resolver}->finish_socket() if $pms->{resolver};
   }
 
+  if ($pms->{deadline_exceeded}) {
+    $pms->got_hit('TIME_LIMIT_EXCEEDED', '', score => 0.001,
+                  description => 'Exceeded time limit / deadline');
+  }
+
   # finished running rules
   delete $pms->{current_rule_name};
   undef $decoded;
   undef $bodytext;
   undef $fulltext;
 
-  # auto-learning
-  $pms->learn();
-  $self->{main}->call_plugins ("check_post_learn", { permsgstatus => $pms });
+  if ($pms->{deadline_exceeded}) {
+  # dbg("check: exceeded time limit, skipping auto-learning");
+  } elsif ($master_deadline && time > $master_deadline) {
+    info("check: exceeded time limit, skipping auto-learning");
+    $pms->{deadline_exceeded} = 1;
+  } else {
+    # auto-learning
+    $pms->learn();
+    $self->{main}->call_plugins ("check_post_learn", { permsgstatus => $pms });
+  }
 
   # track user_rules recompilations; each scanned message is 1 tick on this counter
   if ($self->{done_user_rules}) {
@@ -200,14 +265,14 @@ sub run_rbl_eval_tests {
 
     my $result;
     eval {
-       $result = $pms->$function($rulename, @args);
-    };
-
-    if ($@) {
-      warn "rules: failed to run $rulename RBL test, skipping:\n" . "\t($@)\n";
+      $result = $pms->$function($rulename, @args);  1;
+    } or do {
+      my $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
+      warn "rules: failed to run $rulename RBL test, skipping:\n".
+           "\t($eval_stat)\n";
       $pms->{rule_errors}++;
       next;
-    }
+    };
   }
 }
 
@@ -216,11 +281,20 @@ sub run_rbl_eval_tests {
 sub run_generic_tests {
   my ($self, $pms, $priority, %opts) = @_;
 
-  return if $self->{main}->call_plugins("have_shortcircuited",
-                                        { permsgstatus => $pms });
+  my $master_deadline = $pms->{master_deadline};
+  if ($pms->{deadline_exceeded}) {
+    return;
+  } elsif ($master_deadline && time > $master_deadline) {
+    info("check: (run_generic) exceeded time limit, skipping further tests");
+    $pms->{deadline_exceeded} = 1;
+    return;
+  } elsif ($self->{main}->call_plugins("have_shortcircuited",
+                                        { permsgstatus => $pms })) {
+    return;
+  }
 
   my $ruletype = $opts{type};
-  dbg("rules: running ".$ruletype." tests; score so far=".$pms->{score});
+  dbg("rules: running $ruletype tests; score so far=".$pms->{score});
   $pms->{test_log_msgs} = ();        # clear test state
 
   my $conf = $pms->{conf};
@@ -234,16 +308,19 @@ sub run_generic_tests {
   my $methodname = $package_name."::_".$ruletype."_tests_".$clean_priority;
 
   if (defined &{$methodname} && !$doing_user_rules) {
-    no strict "refs";
 run_compiled_method:
-    $methodname->($pms, @{$opts{args}});
-    use strict "refs";
+  # dbg("rules: run_generic_tests - calling %s", $methodname);
+    my $t = Mail::SpamAssassin::Timeout->new({ deadline => $master_deadline });
+    my $err = $t->run(sub {
+      no strict "refs";
+      $methodname->($pms, @{$opts{args}});
+    });
+    if ($t->timed_out() && $master_deadline && time > $master_deadline) {
+      info("check: exceeded time limit in $methodname, skipping further tests");
+      $pms->{deadline_exceeded} = 1;
+    }
     return;
   }
-
-  # build up the eval string...
-  $self->{evalstr} = $self->start_rules_plugin_code($ruletype, $priority);
-  $self->{evalstr2} = '';
 
   # use %nopts for named parameter-passing; it's more friendly to future-proof
   # subclassing, since new parameters can be added without breaking third-party
@@ -255,9 +332,24 @@ run_compiled_method:
     clean_priority => $clean_priority
   );
 
+  # build up the eval string...
+  $self->{evalstr_methodname} = $methodname;
+  $self->{evalstr_chunk_current_methodname} = undef;
+  $self->{evalstr_chunk_methodnames} = [];
+  $self->{evalstr_chunk_prefix} = [];  # stack (array) of source code sections
+  $self->{evalstr} = ''; $self->{evalstr_l} = 0;
+  $self->{evalstr2} = '';
+  $self->begin_evalstr_chunk($pms);
+
+  $self->push_evalstr_prefix($pms, '
+      # start_rules_plugin_code '.$ruletype.' '.$priority.'
+      my $scoresptr = $self->{conf}->{scores};
+  ');
   if (defined $opts{pre_loop_body}) {
     $opts{pre_loop_body}->($self, $pms, $conf, %nopts);
   }
+  $self->add_evalstr($pms,
+                     $self->start_rules_plugin_code($ruletype, $priority) );
   while (my($rulename, $test) = each %{$opts{testhash}->{$priority}}) {
     $opts{loop_body}->($self, $pms, $conf, $rulename, $test, %nopts);
   }
@@ -265,46 +357,147 @@ run_compiled_method:
     $opts{post_loop_body}->($self, $pms, $conf, %nopts);
   }
 
-  # clear out a previous version of this fn
-  undef &{$methodname};
+  $self->flush_evalstr($pms, 'run_generic_tests');
   $self->free_ruleset_source($pms, $ruletype, $priority);
 
-  my $evalstr = $self->{evalstr};
+  # clear out a previous version of this method
+  undef &{$methodname};
 
   # generate the loop that goes through each line...
-  $evalstr = <<"EOT";
+  my $evalstr = <<"EOT";
   {
     package $package_name;
 
     $self->{evalstr2}
 
     sub $methodname {
-      my \$self = shift;
-      $evalstr;
+EOT
+
+  for my $chunk_methodname (@{$self->{evalstr_chunk_methodnames}}) {
+    $evalstr .= "      $chunk_methodname(\@_);\n";
+  }
+
+  $evalstr .= <<"EOT";
     }
 
     1;
   }
 EOT
 
-  delete $self->{evalstr};
-  delete $self->{evalstr2}; # free up some RAM before we eval()
+  delete $self->{evalstr};   # free up some RAM before we eval()
+  delete $self->{evalstr2};
+  delete $self->{evalstr_methodname};
+  delete $self->{evalstr_chunk_current_methodname};
+  delete $self->{evalstr_chunk_methodnames};
+  delete $self->{evalstr_chunk_prefix};
 
-  ## dbg ("rules: eval code to compile: $evalstr");
-  eval $evalstr;
-  if ($@) {
-    warn("rules: failed to compile $ruletype tests, skipping:\n\t($@)\n");
+  dbg("rules: run_generic_tests - compiling eval code: %s, priority %s",
+      $ruletype, $priority);
+# dbg("rules: eval code to compile: $evalstr");
+  my $eval_result;
+  { my $timer = $self->{main}->time_method('compile_gen');
+    $eval_result = eval($evalstr);
+  }
+  if (!$eval_result) {
+    my $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
+    warn "rules: failed to compile $ruletype tests, skipping:\n".
+         "\t($eval_stat)\n";
     $pms->{rule_errors}++;
   }
   else {
-    dbg("rules: compiled ".$ruletype." tests");
+    dbg("rules: compiled $ruletype tests");
     goto run_compiled_method;
   }
 }
 
+sub begin_evalstr_chunk {
+  my ($self, $pms) = @_;
+  my $n = 0;
+  if ($self->{evalstr_chunk_methodnames}) {
+    $n = scalar(@{$self->{evalstr_chunk_methodnames}});
+  }
+  my $chunk_methodname = sprintf("%s_%d", $self->{evalstr_methodname}, $n+1);
+# dbg("rules: begin_evalstr_chunk %s", $chunk_methodname);
+  undef &{$chunk_methodname};
+  my $package_name = __PACKAGE__;
+  my $evalstr = <<"EOT";
+package $package_name;
+sub $chunk_methodname {
+  my \$self = shift;
+EOT
+  $evalstr .= '  '.$_  for @{$self->{evalstr_chunk_prefix}};
+  $self->{evalstr} = $evalstr;
+  $self->{evalstr_l} = length($evalstr);
+  $self->{evalstr_chunk_current_methodname} = $chunk_methodname;
+}
+
+sub end_evalstr_chunk {
+  my ($self, $pms) = @_;
+# dbg("rules: end_evalstr_chunk");
+  my $evalstr = "}; 1;\n";
+  $self->{evalstr} .= $evalstr;
+  $self->{evalstr_l} += length($evalstr);
+}
+
+sub flush_evalstr {
+  my ($self, $pms, $caller_name) = @_;
+  my $chunk_methodname = $self->{evalstr_chunk_current_methodname};
+  $self->end_evalstr_chunk($pms);
+  dbg("rules: flush_evalstr (%s) compiling %d chars of %s",
+      $caller_name, $self->{evalstr_l}, $chunk_methodname);
+# dbg("rules: %s", $self->{evalstr});
+  my $eval_result;
+  { my $timer = $self->{main}->time_method('compile_gen');
+    $eval_result = eval($self->{evalstr});
+  }
+  if (!$eval_result) {
+    my $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
+    warn "rules: failed to compile $chunk_methodname, skipping:\n".
+         "\t($eval_stat)\n";
+    $pms->{rule_errors}++;
+  } else {
+    push(@{$self->{evalstr_chunk_methodnames}}, $chunk_methodname);
+  }
+  $self->{evalstr} = '';  $self->{evalstr_l} = 0;
+  $self->begin_evalstr_chunk($pms);
+}
+
+sub push_evalstr_prefix {
+  my ($self, $pms, $str) = @_;
+  $self->add_evalstr_corked($pms, $str);  # must not flush!
+  push(@{$self->{evalstr_chunk_prefix}}, $str);
+# dbg("rules: push_evalstr_prefix (%d) - <%s>",
+#     scalar(@{$self->{evalstr_chunk_prefix}}), $str);
+}
+
+sub pop_evalstr_prefix {
+  my ($self) = @_;
+  pop(@{$self->{evalstr_chunk_prefix}});
+# dbg("rules: pop_evalstr_prefix (%d)",
+#     scalar(@{$self->{evalstr_chunk_prefix}}));
+}
+
 sub add_evalstr {
-  my ($self, $str) = @_;
-  $self->{evalstr} .= $str;
+  my ($self, $pms, $str) = @_;
+  if (defined $str && $str ne '') {
+    my $new_code_l = length($str);
+  # dbg("rules: add_evalstr %d - <%s>", $new_code_l, $str);
+    $self->{evalstr} .= $str;
+    $self->{evalstr_l} += $new_code_l;
+    if ($self->{evalstr_l} > 60000) {
+      $self->flush_evalstr($pms, 'add_evalstr');
+    }
+  }
+}
+
+# similar to add_evalstr, but avoids flushing on size
+sub add_evalstr_corked {
+  my ($self, $pms, $str) = @_;
+  if (defined $str) {
+    my $new_code_l = length($str);
+    $self->{evalstr} .= $str;
+    $self->{evalstr_l} += $new_code_l;
+  }
 }
 
 sub add_evalstr2 {
@@ -332,7 +525,7 @@ sub do_meta_tests {
     loop_body => sub
   {
     my ($self, $pms, $conf, $rulename, $rule, %opts) = @_;
-    my $token;
+    $rule = untaint_var($rule);  # presumably checked
 
     # Lex the rule into tokens using a rather simple RE method ...
     my $lexer = ARITH_EXPRESSION_LEXER;
@@ -345,7 +538,7 @@ sub do_meta_tests {
     $rule_deps{$rulename} = [ ];
 
     # Go through each token in the meta rule
-    foreach $token (@tokens) {
+    foreach my $token (@tokens) {
 
       # Numbers can't be rule names
       if ($token =~ /^(?:\W+|[+-]?\d+(?:\.\d+)?)$/) {
@@ -380,7 +573,7 @@ sub do_meta_tests {
     pre_loop_body => sub
   {
     my ($self, $pms, $conf, %opts) = @_;
-    $self->add_evalstr ('
+    $self->push_evalstr_prefix($pms, '
       my $r;
       my $h = $self->{tests_already_hit};
     ');
@@ -418,13 +611,13 @@ sub do_meta_tests {
               } split (' ', $conf->{meta_dependencies}->{ $metas[$i] } );
 
         if ($alldeps ne '') {
-          $self->add_evalstr ('
+          $self->add_evalstr($pms, '
             $self->ensure_rules_are_complete(q{'.$metas[$i].'}, qw{'.$alldeps.'});
           ');
         }
 
         # Add this meta rule to the eval line
-        $self->add_evalstr ('
+        $self->add_evalstr($pms, '
           $r = '.$meta{$metas[$i]}.';
           if ($r) { $self->got_hit(q#'.$metas[$i].'#, "", ruletype => "meta", value => $r); }
         ');
@@ -456,8 +649,11 @@ sub do_meta_tests {
 sub do_head_tests {
   my ($self, $pms, $priority) = @_;
   # hash to hold the rules, "header\tdefault value" => rulename
-  my %ordered = ();
-  my %testcode = ();
+  my %ordered;
+  my %testcode;  # tuples: [op_type, op, arg]
+     # op_type: 1=infix, 0:prefix/function
+     # op: operator, e.g. '=~', '!~', or a function like 'defined'
+     # arg: additional argument like a regexp for a patt matching op
 
   $self->run_generic_tests ($pms, $priority,
     consttype => $Mail::SpamAssassin::Conf::TYPE_HEAD_TESTS,
@@ -467,22 +663,30 @@ sub do_head_tests {
     loop_body => sub
   {
     my ($self, $pms, $conf, $rulename, $rule, %opts) = @_;
-    my $def = '';
-    my ($hdrname, $testtype, $pat) =
-        $rule =~ /^\s*(\S+)\s*(\=|\!)\~\s*(\S.*?\S)\s*$/;
-
-    if (!defined $pat) {
-      warn "rules: invalid rule: $rulename\n";
+    my $def;
+    $rule = untaint_var($rule);  # presumably checked
+    my ($hdrname, $op, $op_infix, $pat);
+    if ($rule =~ /^\s* (\S+) \s* ([=!]~) \s* (\S .*? \S) \s*$/x) {
+      ($hdrname, $op, $pat) = ($1,$2,$3);  # e.g.: Subject =~ /patt/
+      $op_infix = 1;
+      if (!defined $pat) {
+        warn "rules: invalid rule: $rulename\n";
+        $pms->{rule_errors}++;
+        next;
+      }
+      if ($pat =~ s/\s+\[if-unset:\s+(.+)\]\s*$//) { $def = $1 }
+    } elsif ($rule =~ /^\s* (\S+) \s* \( \s* (\S+) \s* \) \s*$/x) {
+      # implements exists:name_of_header (and similar function or prefix ops)
+      ($hdrname, $op) = ($2,$1);  # e.g.: !defined(Subject)
+      $op_infix = 0;
+    } else {
+      warn "rules: unrecognized rule: $rulename\n";
       $pms->{rule_errors}++;
       next;
     }
 
-    if ($pat =~ s/\s+\[if-unset:\s+(.+)\]\s*$//) { $def = $1; }
-
-    $hdrname =~ s/#/[HASH]/g;                # avoid probs with eval below
-    $def =~ s/#/[HASH]/g;
-
-    push(@{$ordered{"$hdrname\t$def"}}, $rulename);
+    push(@{ $ordered{$hdrname . (!defined $def ? '' : "\t".$def)} },
+         $rulename);
 
     next if ($opts{doing_user_rules} &&
             !$self->is_user_rule_sub($rulename.'_head_test'));
@@ -490,25 +694,40 @@ sub do_head_tests {
     # caller can set this member of the Mail::SpamAssassin object to
     # override this; useful for profiling rule runtimes, although I think
     # the HitFreqsRuleTiming.pm plugin is probably better nowadays anyway
-      if ($self->{main}->{use_rule_subs}) {
+    if ($self->{main}->{use_rule_subs}) {
+      my $matching_string_unavailable = 0;
+      my $expr;
+      if ($op =~ /^!?[A-Za-z_]+$/) {  # function or its negation
+        $expr = $op . '($text)';
+        $matching_string_unavailable = 1;
+      } else {  # infix operator
+        $expr = '$text ' . $op . ' ' . $pat;
+        if ($op eq '=~' || $op eq '!~') {
+          $expr .= 'g';
+        } else {
+          $matching_string_unavailable = 1;
+        }
+      }
       $self->add_temporary_method ($rulename.'_head_test', '{
           my($self,$text) = @_;
           '.$self->hash_line_for_rule($pms, $rulename).'
-	    while ($text '.$testtype.'~ '.$pat.'g) {
-            $self->got_hit(q#'.$rulename.'#, "", ruletype => "header");
-            '. $self->hit_rule_plugin_code($pms, $rulename, "header", "last") . '
+	    while ('.$expr.') {
+            $self->got_hit(q{'.$rulename.'}, "", ruletype => "header");
+            '. $self->hit_rule_plugin_code($pms, $rulename, "header", "last",
+                                           $matching_string_unavailable) . '
             }
         }');
     }
     else {
       # store for use below
-      $testcode{$rulename} = $testtype.'~ '.$pat;
+      $testcode{$rulename} = [$op_infix, $op, $pat];
     }
   },
     pre_loop_body => sub
   {
     my ($self, $pms, $conf, %opts) = @_;
-    $self->add_evalstr ('
+    $self->push_evalstr_prefix($pms, '
+      no warnings q(uninitialized);
       my $hval;
     ');
   },
@@ -518,46 +737,62 @@ sub do_head_tests {
     # setup the function to run the rules
     while(my($k,$v) = each %ordered) {
       my($hdrname, $def) = split(/\t/, $k, 2);
-      $self->add_evalstr ('
-        $hval = $self->get(q#'.$hdrname.'#, q#'.$def.'#);
+      $self->push_evalstr_prefix($pms, '
+        $hval = $self->get(q{'.$hdrname.'}, ' .
+                           (!defined($def) ? 'undef' : 'q{'.$def.'}') . ');
       ');
       foreach my $rulename (@{$v}) {
         if ($self->{main}->{use_rule_subs}) {
-          $self->add_evalstr ('
-            if ($scoresptr->{q#'.$rulename.'#}) {
+          $self->add_evalstr($pms, '
+            if ($scoresptr->{q{'.$rulename.'}}) {
               '.$rulename.'_head_test($self, $hval);
               '.$self->ran_rule_plugin_code($rulename, "header").'
             }
           ');
         }
         else {
-          my $testcode = $testcode{$rulename};
+          my $tc_ref = $testcode{$rulename};
+          my ($op_infix, $op, $pat);
+          ($op_infix, $op, $pat) = @$tc_ref  if defined $tc_ref;
 
           my $posline = '';
           my $ifwhile = 'if';
           my $hitdone = '';
           my $matchg = '';
-          if (($conf->{tflags}->{$rulename}||'') =~ /\bmultiple\b/)
-          {
-            $posline = 'pos $hval = 0;';
-            $ifwhile = 'while';
-            $hitdone = 'last';
-            $matchg = 'g';
+
+          my $matching_string_unavailable = 0;
+          my $expr;
+          if (!$op_infix) {  # function or its negation
+            $expr = $op . '($hval)';
+            $matching_string_unavailable = 1;
+          }
+          else {  # infix operator
+            if (! ($op eq '=~' || $op eq '!~') ) { # not a pattern matching op.
+              $matching_string_unavailable = 1;
+            } elsif ( ($conf->{tflags}->{$rulename}||'') =~ /\bmultiple\b/ ) {
+              $posline = 'pos $hval = 0;';
+              $ifwhile = 'while';
+              $hitdone = 'last';
+              $matchg = 'g';
+            }
+            $expr = '$hval ' . $op . ' ' . $pat . $matchg;
           }
 
-          $self->add_evalstr ('
-          if ($scoresptr->{q#'.$rulename.'#}) {
+          $self->add_evalstr($pms, '
+          if ($scoresptr->{q{'.$rulename.'}}) {
             '.$posline.'
             '.$self->hash_line_for_rule($pms, $rulename).'
-            '.$ifwhile.' ($hval '.$testcode.$matchg.') {
-              $self->got_hit(q#'.$rulename.'#, "", ruletype => "header");
-              '.$self->hit_rule_plugin_code($pms, $rulename, "header", $hitdone).'
+            '.$ifwhile.' ('.$expr.') {
+              $self->got_hit(q{'.$rulename.'}, "", ruletype => "header");
+              '.$self->hit_rule_plugin_code($pms, $rulename, "header", $hitdone,
+                                            $matching_string_unavailable).'
             }
             '.$self->ran_rule_plugin_code($rulename, "header").'
           }
           ');
         }
       }
+      $self->pop_evalstr_prefix();
     }
   }
   );
@@ -577,6 +812,7 @@ sub do_body_tests {
     loop_body => sub
   {
     my ($self, $pms, $conf, $rulename, $pat, %opts) = @_;
+    $pat = untaint_var($pat);  # presumably checked
     my $sub;
     if (($conf->{tflags}->{$rulename}||'') =~ /\bmultiple\b/)
     {
@@ -609,7 +845,7 @@ sub do_body_tests {
     }
 
     if ($self->{main}->{use_rule_subs}) {
-      $self->add_evalstr ('
+      $self->add_evalstr($pms, '
         if ($scoresptr->{q{'.$rulename.'}}) {
           '.$rulename.'_body_test($self,@_); 
           '.$self->ran_rule_plugin_code($rulename, "body").'
@@ -617,7 +853,7 @@ sub do_body_tests {
       ');
     }
     else {
-      $self->add_evalstr ('
+      $self->add_evalstr($pms, '
         if ($scoresptr->{q{'.$rulename.'}}) {
           '.$sub.'
           '.$self->ran_rule_plugin_code($rulename, "body").'
@@ -649,6 +885,7 @@ sub do_uri_tests {
     loop_body => sub
   {
     my ($self, $pms, $conf, $rulename, $pat, %opts) = @_;
+    $pat = untaint_var($pat);  # presumably checked
     my $sub;
     if (($conf->{tflags}->{$rulename}||'') =~ /\bmultiple\b/) {
       $loopid++;
@@ -676,7 +913,7 @@ sub do_uri_tests {
     }
 
     if ($self->{main}->{use_rule_subs}) {
-      $self->add_evalstr ('
+      $self->add_evalstr($pms, '
         if ($scoresptr->{q{'.$rulename.'}}) {
           '.$rulename.'_uri_test($self, @_);
           '.$self->ran_rule_plugin_code($rulename, "uri").'
@@ -684,7 +921,7 @@ sub do_uri_tests {
       ');
     }
     else {
-      $self->add_evalstr ('
+      $self->add_evalstr($pms, '
         if ($scoresptr->{q{'.$rulename.'}}) {
           '.$sub.'
           '.$self->ran_rule_plugin_code($rulename, "uri").'
@@ -716,6 +953,7 @@ sub do_rawbody_tests {
     loop_body => sub
   {
     my ($self, $pms, $conf, $rulename, $pat, %opts) = @_;
+    $pat = untaint_var($pat);  # presumably checked
     my $sub;
     if (($pms->{conf}->{tflags}->{$rulename}||'') =~ /\bmultiple\b/)
     {
@@ -746,7 +984,7 @@ sub do_rawbody_tests {
     }
 
     if ($self->{main}->{use_rule_subs}) {
-      $self->add_evalstr ('
+      $self->add_evalstr($pms, '
         if ($scoresptr->{q{'.$rulename.'}}) {
            '.$rulename.'_rawbody_test($self, @_);
            '.$self->ran_rule_plugin_code($rulename, "rawbody").'
@@ -754,7 +992,7 @@ sub do_rawbody_tests {
       ');
     }
     else {
-      $self->add_evalstr ('
+      $self->add_evalstr($pms, '
         if ($scoresptr->{q{'.$rulename.'}}) {
           '.$sub.'
           '.$self->ran_rule_plugin_code($rulename, "rawbody").'
@@ -786,14 +1024,15 @@ sub do_full_tests {
     pre_loop_body => sub
   {
     my ($self, $pms, $conf, %opts) = @_;
-    $self->add_evalstr ('
+    $self->push_evalstr_prefix($pms, '
       my $fullmsgref = shift;
     ');
   },
                 loop_body => sub
   {
     my ($self, $pms, $conf, $rulename, $pat, %opts) = @_;
-    $self->add_evalstr ('
+    $pat = untaint_var($pat);  # presumably checked
+    $self->add_evalstr($pms, '
       if ($scoresptr->{q{'.$rulename.'}}) {
         pos $$fullmsgref = 0;
         '.$self->hash_line_for_rule($pms, $rulename).'
@@ -813,6 +1052,7 @@ sub do_full_tests {
 sub do_head_eval_tests {
   my ($self, $pms, $priority) = @_;
   return unless (defined($pms->{conf}->{head_evals}->{$priority}));
+  dbg("rules: running head_eval tests; score so far=".$pms->{score});
   $self->run_eval_tests ($pms, $Mail::SpamAssassin::Conf::TYPE_HEAD_EVALS,
 			 $pms->{conf}->{head_evals}->{$priority}, '', $priority);
 }
@@ -820,6 +1060,7 @@ sub do_head_eval_tests {
 sub do_body_eval_tests {
   my ($self, $pms, $priority, $bodystring) = @_;
   return unless (defined($pms->{conf}->{body_evals}->{$priority}));
+  dbg("rules: running body_eval tests; score so far=".$pms->{score});
   $self->run_eval_tests ($pms, $Mail::SpamAssassin::Conf::TYPE_BODY_EVALS,
 			 $pms->{conf}->{body_evals}->{$priority}, 'BODY: ',
 			 $priority, $bodystring);
@@ -828,6 +1069,7 @@ sub do_body_eval_tests {
 sub do_rawbody_eval_tests {
   my ($self, $pms, $priority, $bodystring) = @_;
   return unless (defined($pms->{conf}->{rawbody_evals}->{$priority}));
+  dbg("rules: running rawbody_eval tests; score so far=".$pms->{score});
   $self->run_eval_tests ($pms, $Mail::SpamAssassin::Conf::TYPE_RAWBODY_EVALS,
 			 $pms->{conf}->{rawbody_evals}->{$priority}, 'RAW: ',
 			 $priority, $bodystring);
@@ -836,6 +1078,7 @@ sub do_rawbody_eval_tests {
 sub do_full_eval_tests {
   my ($self, $pms, $priority, $fullmsgref) = @_;
   return unless (defined($pms->{conf}->{full_evals}->{$priority}));
+  dbg("rules: running full_eval tests; score so far=".$pms->{score});
   $self->run_eval_tests($pms, $Mail::SpamAssassin::Conf::TYPE_FULL_EVALS,
 			$pms->{conf}->{full_evals}->{$priority}, '',
 			$priority, $fullmsgref);
@@ -844,8 +1087,17 @@ sub do_full_eval_tests {
 sub run_eval_tests {
   my ($self, $pms, $testtype, $evalhash, $prepend2desc, $priority, @extraevalargs) = @_;
  
-  return if $self->{main}->call_plugins("have_shortcircuited",
-                                        { permsgstatus => $pms });
+  my $master_deadline = $pms->{master_deadline};
+  if ($pms->{deadline_exceeded}) {
+    return;
+  } elsif ($master_deadline && time > $master_deadline) {
+    info("check: (run_eval) exceeded time limit, skipping further tests");
+    $pms->{deadline_exceeded} = 1;
+    return;
+  } elsif ($self->{main}->call_plugins("have_shortcircuited",
+                                        { permsgstatus => $pms })) {
+    return;
+  }
 
   my $conf = $pms->{conf};
   my $doing_user_rules = $conf->{want_rebuild_for_type}->{$testtype};
@@ -854,9 +1106,7 @@ sub run_eval_tests {
   # clean up priority value so it can be used in a subroutine name 
   my $clean_priority;
   ($clean_priority = $priority) =~ s/-/neg/;
-
   my $scoreset = $conf->get_score_set();
-
   my $package_name = __PACKAGE__;
 
   my $methodname = '_eval_tests'.
@@ -869,9 +1119,17 @@ sub run_eval_tests {
   if (defined &{"${package_name}::${methodname}"}
       && !$doing_user_rules)
   {
-    no strict "refs";
-    &{"${package_name}::${methodname}"}($pms,@extraevalargs);
-    use strict "refs";
+    my $method = "${package_name}::${methodname}";
+  # dbg("rules: run_eval_tests - calling %s", $methodname);
+    my $t = Mail::SpamAssassin::Timeout->new({ deadline => $master_deadline });
+    my $err = $t->run(sub {
+      no strict "refs";
+      &{$method}($pms,@extraevalargs);
+    });
+    if ($t->timed_out() && $master_deadline && time > $master_deadline) {
+      info("check: exceeded time limit in $method, skipping further tests");
+      $pms->{deadline_exceeded} = 1;
+    }
     return;
   }
 
@@ -905,6 +1163,7 @@ sub run_eval_tests {
       }
     }
  
+    $test = untaint_var($test);  # presumably checked
     my ($function, $argstr) = ($test,'');
     if ($test =~ s/^([^,]+)(,.*)$//gs) {
       ($function, $argstr) = ($1,$2);
@@ -1005,18 +1264,31 @@ sub run_eval_tests {
 EOT
 
   undef &{$methodname};
-  eval $evalstr;
 
-  if ($@) {
-    warn "rules: failed to compile eval tests, skipping some: $@\n";
+  dbg("rules: run_eval_tests - compiling eval code: %s, priority %s",
+       $testtype, $priority);
+  my $eval_result;
+  { my $timer = $self->{main}->time_method('compile_eval');
+    $eval_result = eval($evalstr);
+  }
+  if (!$eval_result) {
+    my $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
+    warn "rules: failed to compile eval tests, skipping some: $eval_stat\n";
     $self->{rule_errors}++;
   }
   else {
     my $method = "${package_name}::${methodname}";
     push (@TEMPORARY_METHODS, $methodname);
-    no strict "refs";
-    &{$method}($pms,@extraevalargs);
-    use strict "refs";
+  # dbg("rules: run_eval_tests - calling %s", $methodname);
+    my $t = Mail::SpamAssassin::Timeout->new({ deadline => $master_deadline });
+    my $err = $t->run(sub {
+      no strict "refs";
+      &{$method}($pms,@extraevalargs);
+    });
+    if ($t->timed_out() && $master_deadline && time > $master_deadline) {
+      info("check: exceeded time limit in $method, skipping further tests");
+      $pms->{deadline_exceeded} = 1;
+    }
   }
 }
 
@@ -1025,9 +1297,9 @@ EOT
 
 sub hash_line_for_rule {
   my ($self, $pms, $rulename) = @_;
-  return "\n".'#line 1 "'.
-        $pms->{conf}->{source_file}->{$rulename}.
-        ', rule '.$rulename.',"';
+  return sprintf("\n#line 1 \"%s, rule %s,\"",
+                 untaint_var($pms->{conf}->{source_file}->{$rulename}),
+                 $rulename);
 }
 
 sub is_user_rule_sub {
@@ -1040,13 +1312,7 @@ sub is_user_rule_sub {
 sub start_rules_plugin_code {
   my ($self, $ruletype, $pri) = @_;
 
-  my $evalstr = '
-
-      # start_rules_plugin_code '.$ruletype.' '.$pri.'
-      my $scoresptr = $self->{conf}->{scores};
-
-  ';
-
+  my $evalstr = '';
   if ($self->{main}->have_plugin("start_rules")) {
     $evalstr .= '
 
@@ -1061,13 +1327,19 @@ sub start_rules_plugin_code {
 }
 
 sub hit_rule_plugin_code {
-  my ($self, $pms, $rulename, $ruletype, $loop_break_directive) = @_;
+  my ($self, $pms, $rulename, $ruletype, $loop_break_directive,
+      $matching_string_unavailable) = @_;
 
   # note: keep this in 'single quotes' to avoid the $ & performance hit,
   # unless specifically requested by the caller.   Also split the
   # two chars, just to be paranoid and ensure that a buggy perl interp
   # doesn't impose that hit anyway (just in case)
-  my $match = '($' . '&' . '|| "negative match")';
+  my $match;
+  if ($matching_string_unavailable) {
+    $match = '"<YES>"'; # nothing better to report, $& is not set by this rule
+  } else {
+    $match = '($' . '&' . '|| "negative match")';
+  }
 
   my $debug_code = '';
   if (exists($pms->{should_log_rule_hits})) {

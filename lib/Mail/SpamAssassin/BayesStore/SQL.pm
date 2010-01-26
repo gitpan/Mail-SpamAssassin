@@ -32,10 +32,16 @@ package Mail::SpamAssassin::BayesStore::SQL;
 use strict;
 use warnings;
 use bytes;
+use re 'taint';
+use Errno qw(EBADF);
+
+BEGIN {
+  eval { require Digest::SHA; import Digest::SHA qw(sha1); 1 }
+  or do { require Digest::SHA1; import Digest::SHA1 qw(sha1) }
+}
 
 use Mail::SpamAssassin::BayesStore;
 use Mail::SpamAssassin::Logger;
-use Digest::SHA1 qw(sha1);
 
 use vars qw( @ISA );
 
@@ -47,7 +53,7 @@ use constant HAS_DBI => eval { require DBI; };
 
 =head2 new
 
-public class (Mail::SpamAssassin::BayesStore::SQL) new (Mail::Spamassassin::Bayes $bayes)
+public class (Mail::SpamAssassin::BayesStore::SQL) new (Mail::Spamassassin::Plugin::Bayes $bayes)
 
 Description:
 This methods creates a new instance of the Mail::SpamAssassin::BayesStore::SQL
@@ -91,7 +97,7 @@ sub new {
 
     # Need to make sure that a username is set, so just in case there is
     # no username set in main, set one here.
-    unless ($self->{_username}) {
+    if (!defined $self->{_username} || $self->{_username} eq '') {
       $self->{_username} = "GLOBALBAYES";
     }
   }
@@ -152,7 +158,7 @@ sub tie_db_readonly {
 public instance (Boolean) tie_db_writable ()
 
 Description:
-This method ensures that the database connetion is properly setup
+This method ensures that the database connection is properly setup
 and working. If necessary it will initialize a users bayes variables
 so that they can begin using the database immediately.
 
@@ -203,7 +209,7 @@ sub tie_db_writable {
 public instance () untie_db ()
 
 Description:
-This method is unused for the SQL based implementation.
+Disconnects from an SQL server.
 
 =cut
 
@@ -233,7 +239,7 @@ atime for token expiration.
 sub calculate_expire_delta {
   my ($self, $newest_atime, $start, $max_expire_mult) = @_;
 
-  my %delta = (); # use a hash since an array is going to be very sparse
+  my %delta;  # use a hash since an array is going to be very sparse
 
   return %delta unless (defined($self->{_dbh}));
 
@@ -348,7 +354,7 @@ sub token_expiration {
       goto token_expiration_final;
     }
 
-    $deleted = $rows;
+    $deleted = ($rows eq '0E0') ? 0 : $rows;
   }
 
   # Update the magic tokens as appropriate
@@ -370,9 +376,9 @@ sub token_expiration {
 
   # If we didn't remove any tokens, the oldest token age wouldn't have changed
   if ($deleted) {
-    # Now lets update the oldest_token_age value, shouldn't need to worry about
-    # newest_token_age. There is a slight race condition here, but the chance is
-    # small that we'll insert a new token with such an old atime
+    # Now let's update the oldest_token_age value, shouldn't need to worry
+    # about newest_token_age. There is a slight race condition here, but the
+    # chance is small that we'll insert a new token with such an old atime
     my $oldest_token_age = $self->_get_oldest_token_age();
 
     $sql = "UPDATE bayes_vars SET oldest_token_age = ? WHERE id = ?";
@@ -647,13 +653,14 @@ sub dump_db_toks {
   }  
 
   while (my ($token, $spam_count, $ham_count, $atime) = $sth->fetchrow_array()) {
-    my $prob = $self->{bayes}->compute_prob_for_token($token, $vars[1], $vars[2],
+    my $prob = $self->{bayes}->_compute_prob_for_token($token, $vars[1], $vars[2],
 						      $spam_count, $ham_count);
     $prob ||= 0.5;
 
     my $encoded_token = unpack("H*", $token);
     
-    printf $template,$prob,$spam_count,$ham_count,$atime,$encoded_token;
+    printf $template,$prob,$spam_count,$ham_count,$atime,$encoded_token
+      or die "Error writing tokens: $!";
   }
 
   $sth->finish();
@@ -951,7 +958,7 @@ public instance (Boolean) multi_tok_count_change (Integer $spam_count,
 
 Description:
 This method takes a C<$spam_count> and C<$ham_count> and adds it to all
-of the tokens in the C<$tokens> hash ref along with updating each tokens
+of the tokens in the C<$tokens> hash ref along with updating each token's
 atime with C<$atime>.
 
 =cut
@@ -1162,7 +1169,7 @@ sub tok_touch_all {
 public instance (Boolean) cleanup ()
 
 Description:
-This method peroms any cleanup necessary before moving onto the next
+This method perfoms any cleanup necessary before moving onto the next
 operation.
 
 =cut
@@ -1261,7 +1268,7 @@ Description:
 This method deletes all records for a particular user.
 
 Callers should be aware that any errors returned by this method
-could causes the database to be inconsistent for the given user.
+could cause the database to be inconsistent for the given user.
 
 =cut
 
@@ -1315,7 +1322,7 @@ sub clear_database {
 public instance (Boolean) backup_database ()
 
 Description:
-This method will dump the users database in a marchine readable format.
+This method will dump the users database in a machine readable format.
 
 =cut
 
@@ -1331,9 +1338,10 @@ sub backup_database {
   my $num_spam = $vars[1] || 0;
   my $num_ham = $vars[2] || 0;
 
-  print "v\t$vars[6]\tdb_version # this must be the first line!!!\n";
-  print "v\t$num_spam\tnum_spam\n";
-  print "v\t$num_ham\tnum_nonspam\n";
+  print "v\t$vars[6]\tdb_version # this must be the first line!!!\n"
+                                      or die "Error writing: $!";
+  print "v\t$num_spam\tnum_spam\n"    or die "Error writing: $!";
+  print "v\t$num_ham\tnum_nonspam\n"  or die "Error writing: $!";
 
   my $token_select = $self->_token_select_string();
 
@@ -1362,7 +1370,8 @@ sub backup_database {
 
   while (my @values = $sth->fetchrow_array()) {
     $values[3] = unpack("H*", $values[3]);
-    print "t\t" . join("\t", @values) . "\n";
+    print "t\t" . join("\t", @values) . "\n"
+      or die "Error writing: $!";
   }
 
   $sth->finish();
@@ -1382,7 +1391,7 @@ sub backup_database {
   }
 
   while (my @values = $sth->fetchrow_array()) {
-    print "s\t" . join("\t",@values) . "\n";
+    print "s\t" . join("\t",@values) . "\n"  or die "Error writing: $!";
   }
 
   $sth->finish();
@@ -1407,6 +1416,7 @@ could causes the database to be inconsistent for the given user.
 sub restore_database {
   my ($self, $filename, $showdots) = @_;
 
+  local *DUMPFILE;
   if (!open(DUMPFILE, '<', $filename)) {
     dbg("bayes: unable to open backup file $filename: $!");
     return 0;
@@ -1438,6 +1448,7 @@ sub restore_database {
   my $line_count = 0;
 
   my $line = <DUMPFILE>;
+  defined $line  or die "Error reading dump file: $!";
   $line_count++;
   # We require the database version line to be the first in the file so we can
   # figure out how to properly deal with the file.  If it is not the first
@@ -1458,7 +1469,7 @@ sub restore_database {
   my $token_error_count = 0;
   my $seen_error_count = 0;
 
-  while (my $line = <DUMPFILE>) {
+  for ($!=0; defined($line=<DUMPFILE>); $!=0) {
     chomp($line);
     $line_count++;
 
@@ -1567,7 +1578,10 @@ sub restore_database {
       return 0;
     }
   }
-  close(DUMPFILE);
+  defined $line || $!==0  or
+    $!==EBADF ? dbg("bayes: error reading dump file: $!")
+              : die "error reading dump file: $!";
+  close(DUMPFILE) or die "Can't close dump file: $!";
 
   print STDERR "\n" if ($showdots);
 
@@ -1724,9 +1738,8 @@ initialized. If not then it will perform this initialization.
 sub _initialize_db {
   my ($self, $create_entry_p) = @_;
 
-  return 0 unless (defined($self->{_dbh}));
-
-  return 0 if (!$self->{_username});
+  return 0 if !defined $self->{_dbh};
+  return 0 if !defined $self->{_username} || $self->{_username} eq '';
 
   # Check to see if we should call the services_authorized_for_username plugin
   # hook to see if this user is allowed/able to use bayes.  If not, do nothing
@@ -1909,7 +1922,7 @@ sub _put_token {
       # XXX - future optimization, since we have the existing spam/ham counts
       # we can make an educated guess on if the count would reach 0, for
       # instance, if we are decreasing spam_count but spam_count is currently
-      # > 1000, then there is no possible why this update or any others that
+      # > 1000, then there is no possible way this update or any others that
       # might currently be happening could reduce that value to 0, so there
       # would be no need to set the needs_cleanup flag
       $self->{needs_cleanup} = 1;
@@ -2081,7 +2094,7 @@ sub _put_tokens {
 	# XXX - future optimization, since we have the existing spam/ham counts
 	# we can make an educated guess on if the count would reach 0, for
 	# instance, if we are decreasing spam_count but spam_count is currently
-	# > 1000, then there is no possible why this update or any others that
+	# > 1000, then there is no possible way this update or any others that
 	# might currently be happening could reduce that value to 0, so there
 	# would be no need to set the needs_cleanup flag
 	$self->{needs_cleanup} = 1;

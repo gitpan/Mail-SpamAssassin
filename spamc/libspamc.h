@@ -128,6 +128,9 @@
 /* Jan 16, 2007 jm: get markup headers from spamd */
 #define SPAMC_HEADERS         (1<<15)
 
+/* December 5, 2007 duncf: send log messages to callback */
+#define SPAMC_LOG_TO_CALLBACK (1<<14)
+
 #define SPAMC_MESSAGE_CLASS_SPAM 1
 #define SPAMC_MESSAGE_CLASS_HAM  2
 
@@ -156,6 +159,7 @@ struct message
     /* Set before passing the struct on! */
     unsigned int max_len; /* messages larger than this will return EX_TOOBIG */
     int timeout;		/* timeout for read() system calls */
+    int connect_timeout;	/* Sep 8, 2008 mrgus: timeout for opening sockets */
 
     /* Filled in by message_read */
     message_type_t type;
@@ -233,12 +237,16 @@ struct transport
     /* added in SpamAssassin 3.2.0 */
     int connect_retries;
     int retry_sleep;
+
+    /* Added for filterloop */
+    int filter_retries;
+    int filter_retry_sleep;
 };
 
 /* Initialise and setup transport-specific context for the connection
  * to spamd.  Note that this may leak a small amount of string data for
- * the remote hostname (bug 5531) if called repeatedly; SpamAssassin
- * 3.3.0 will include a new API to free this leakage. */
+ * the remote hostname (bug 5531) if called repeatedly; use
+ *  transport_cleanup() to clean this up. */
 extern void transport_init(struct transport *tp);
 extern int transport_setup(struct transport *tp, int flags);
 
@@ -293,6 +301,19 @@ int process_message(struct transport *tp, char *username,
 		    int max_size, int in_fd, int out_fd,
 		    const int check_only, const int safe_fallback);
 
+void register_spamc_header_callback(const struct message *m, void (*func)(struct message *m, int flags, char *buf, int len));
+void register_spamd_header_callback(const struct message *m, void (*func)(struct message *m, int flags, const char *buf, int len));
+
+void register_libspamc_log_callback(void (*function)(int flags, int level, char *msg, va_list args));
+
 void libspamc_log(int flags, int level, char *msg, ...);
+
+/* Cleanup the resources allocated for storing details of the transport.
+ * Added in SpamAssassin 3.3.0. */
+void transport_cleanup(struct transport *tp);
+
+/* define a preprocessor symbol so that calling code can tell if the
+ * transport_cleanup() API function is available. */
+#define SPAMC_HAS_TRANSPORT_CLEANUP
 
 #endif

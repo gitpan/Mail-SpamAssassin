@@ -37,13 +37,15 @@ RETVAL=0
 # See how we were called.
 case "$1" in
   start)
+	# tell portreserve to release the port
+	[ -x /sbin/portrelease ] && /sbin/portrelease spamd &>/dev/null || :
 	# Start daemon.
 	echo -n $"Starting $prog: "
 	daemon $NICELEVEL spamd $SPAMDOPTIONS -r $SPAMD_PID
 	RETVAL=$?
         echo
 	if [ $RETVAL = 0 ]; then
-		touch /var/lock/subsys/spamassassin
+		touch /var/lock/subsys/spamd
 	fi
         ;;
   stop)
@@ -53,7 +55,7 @@ case "$1" in
         RETVAL=$?
         echo
 	if [ $RETVAL = 0 ]; then
-		rm -f /var/lock/subsys/spamassassin
+		rm -f /var/lock/subsys/spamd
 		rm -f $SPAMD_PID
 	fi
         ;;
@@ -63,7 +65,7 @@ case "$1" in
         $0 start
         ;;
   condrestart)
-       [ -e /var/lock/subsys/spamassassin ] && $0 restart
+       [ -e /var/lock/subsys/spamd ] && $0 restart
        ;;
   status)
 	status spamd
