@@ -18,7 +18,7 @@
 # </@LICENSE>
 
 my $VERSION = 'svn' . (split(/\s+/,
-	'$Id: sa-update.raw 897929 2010-01-11 16:32:34Z mmartinec $'))[2];
+	'$Id: sa-update.raw 917659 2010-03-01 19:24:41Z mmartinec $'))[2];
 
 my $PREFIX          = '@@PREFIX@@';             # substituted at 'make' time
 my $DEF_RULES_DIR   = '@@DEF_RULES_DIR@@';      # substituted at 'make' time
@@ -1409,8 +1409,6 @@ sub lint_check_dir {
 }
 
 ##############################################################################
-
-=cut
 
 =head1 NAME
 

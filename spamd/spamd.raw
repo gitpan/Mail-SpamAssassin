@@ -89,7 +89,8 @@ use Mail::SpamAssassin::NetSet;
 use Mail::SpamAssassin::SubProcBackChannel;
 use Mail::SpamAssassin::SpamdForkScaling qw(:pfstates);
 use Mail::SpamAssassin::Logger qw(:DEFAULT log_message);
-use Mail::SpamAssassin::Util qw(untaint_var exit_status_str);
+use Mail::SpamAssassin::Util qw(untaint_var exit_status_str
+                                am_running_on_windows);
 use Mail::SpamAssassin::Timeout;
 
 use Getopt::Long;
@@ -420,14 +421,33 @@ if ( $listen_ssl ) {
 #   of a specific logfile
 my $log_facility = $opt{'syslog'} || 'mail';
 
-# The socket to log over can be changed on the command line with the
-# --syslog-socket flag. Logging to any file handler (either a specific log
-# file or STDERR) is internally represented by a socket 'file', no logging
-# at all is 'none'. The latter is different from --syslog-socket=none which
-# gets mapped to --syslog=stderr and such --syslog-socket=file. An internal
-# socket of 'none' means as much as --syslog=null. Sounds complicated? It is.
-# But it works.
-my $log_socket = lc($opt{'syslog-socket'}) || 'unix';
+# The --syslog-socket option specifies one of the possible socket types or
+# logging mechanisms as accepted by the Sys::Syslog::setlogsock() subroutine.
+# Depending on a version of Sys::Syslog and on the underlying operating system,
+# one of the following values (or their subset) can be used: native, eventlog,
+# tcp, udp, inet, unix, stream, pipe, console. The value 'eventlog' is
+# specific to Win32 events logger and requires a perl module Win32::EventLog.
+#
+# In addition to values acceptable by Sys::Syslog::setlogsock(),
+# a --syslog-socket=none is mapped to --syslog=stderr and $log_socket='file'.
+#
+# A value 'file' in variable $log_socket implies logging to any file handler
+# (either a specific log file or STDERR), A value 'none' in $log_socket
+# represents no logging, equivalent to --syslog=null.
+#
+# (old text: The socket to log over can be changed on the command line with
+#  the --syslog-socket flag. Logging to any file handler (either a specific log
+#  file or STDERR) is internally represented by a socket 'file', no logging
+#  at all is 'none'. The latter is different from --syslog-socket=none which
+#  gets mapped to --syslog=stderr and such --syslog-socket=file. An internal
+#  socket of 'none' means as much as --syslog=null. Sounds complicated? It is.
+#  But it works.
+# )
+my $log_socket = lc($opt{'syslog-socket'});
+
+if (!defined $log_socket || $log_socket eq '') {
+  $log_socket = am_running_on_windows() ? 'none' : 'unix';
+}
 
 # This is the default log file; it can be changed on the command line
 # via a --syslog flag containing non-word characters.
@@ -1017,7 +1037,8 @@ sub spawn {
     }
     sigprocmask( POSIX::SIG_UNBLOCK(), $sigset )
       or die "spamd: cannot unblock SIGINT/SIGCHLD for fork: $!\n";
-    return;
+    #Changing to return the process id to improve communications for bug 6304
+    return $pid;
   }
   else {
     ## CHILD
@@ -1333,16 +1354,17 @@ sub handle_setuid_to_user {
   if ($spamtest->{paranoid}) {
     die("spamd: in paranoid mode, still running as root: closing connection");
   }
-  warn("spamd: still running as root: user not specified with -u, "
-       . "not found, or set to root, falling back to nobody\n");
+  if (!am_running_on_windows()) {
+    warn("spamd: still running as root: user not specified with -u, "
+         . "not found, or set to root, falling back to nobody\n");
 
-  my ($name, $pwd, $uid, $gid, $quota, $comment, $gcos, $dir, $etc) =
-      getpwnam('nobody');
+    my ($name, $pwd, $uid, $gid, $quota, $comment, $gcos, $dir, $etc) =
+        getpwnam('nobody');
   
-  $) = "$gid $gid";                   # eGID
-  $> = $uid;                          # eUID
-  if (!defined($uid) || ($> != $uid and $> != ($uid - 2**32))) {
-    die("spamd: setuid to nobody failed");
+    $) = "$gid $gid";                   # eGID
+    $> = $uid;                          # eUID
+    if (!defined($uid) || ($> != $uid and $> != ($uid - 2**32))) {
+      die("spamd: setuid to nobody failed");
   }
 
   $spamtest->signal_user_changed(
@@ -1351,6 +1373,7 @@ sub handle_setuid_to_user {
       user_dir => $dir
     }
   );
+  }
 }
 
 sub parse_body {
@@ -1381,8 +1404,9 @@ sub parse_body {
   
   # Now parse *only* the message headers; the MIME tree won't be generated 
   # yet, it will be done on demand later on.
-  my $mail = $spamtest->parse(\@msglines, 0, !$timeout_child ? () :
-                         { master_deadline => $start_time + $timeout_child } );
+  my $mail = $spamtest->parse(\@msglines, 0,
+                       !$timeout_child || !$start_time ? ()
+                       : { master_deadline => $start_time + $timeout_child } );
 
   return ($mail, $actual_length);
 }
@@ -1478,7 +1502,9 @@ sub check {
   }
 
   return 0 unless do_user_handling();
-  if ($> == 0) { die "spamd: still running as root! dying"; }
+  if ($> == 0 && !am_running_on_windows()) {
+	die "spamd: still running as root! dying";
+  }
 
   my $resp = "EX_OK";
 
@@ -1674,7 +1700,9 @@ sub dotell {
   my $compress_zlib = $hdrs->{compress_zlib};
 
   return 0 unless do_user_handling();
-  if ($> == 0) { die "spamd: still running as root! dying"; }
+  if ($> == 0 && !am_running_on_windows()) {
+	die "spamd: still running as root! dying";
+  }
 
   if (!$opt{tell}) {
     service_unavailable_error("TELL commands are not enabled, set the --allow-tell switch.");
@@ -1705,8 +1733,9 @@ sub dotell {
   my $resp = "EX_OK";
 
   # generate mail object from input
-  my ($mail, $actual_length) = parse_body($client, $expected_length,
-                $compress_zlib);
+  my($mail, $actual_length) =
+    parse_body($client, $expected_length, $compress_zlib, $start_time);
+
   return 0 unless defined($mail);       # error
 
   if ($compress_zlib) {
@@ -2074,7 +2103,7 @@ sub handle_user_setuid_basic {
     $suidto = $opt{'username'};
   }
   my ($name, $pwd, $uid, $gid, $quota, $comment, $gcos, $suiddir, $etc) =
-      getpwnam($suidto);
+      am_running_on_windows() ? ('nobody') : getpwnam($suidto);
 
   if (!defined $uid) {
       my $errmsg = "spamd: handle_user unable to find user: '$suidto'\n";
@@ -2156,21 +2185,37 @@ sub handle_user_vpopmail {
 
   $vptimer->run(sub {
     my $vpopusername = $username;
-    local $1;
-    do {
-      my $vpopusername_tainted = `$vpopdir/bin/valias \Q$vpopusername\E`;
-      if ($vpopusername_tainted =~ /.+ -> &?(.+)/) {
+    my @aliases = split(/\n/, `$vpopdir/bin/valias \Q$vpopusername\E`);
+    while (@aliases) {
+      my $vpopusername_tainted = shift(@aliases);
+      local $1;
+      if ($vpopusername_tainted =~ /->  &?(.+)$/) {
         $vpopusername = untaint_var($1);
-      } else {
-        die "failed to resolve vpopmail user/alias '$username' using vuserinfo/valias";
+        if ($vpopusername =~ s{^(/.+)/Maildir/$}{$1}) {
+          # this is the path to a real mailbox
+          $userdir = $vpopusername;
+        } elsif ($vpopusername !~ /^[#| \t]/ &&
+                 $vpopusername =~ /^[^@ \t]+\@[^@ \t]+\s*$/) {
+          # this is a forward to another e-mail address
+          $vpopusername =~ s{^.+ -> (.+)}{$1};
+          $vpopusername_tainted = `$vpopdir/bin/vuserinfo -d \Q$vpopusername\E`;
+          if ($? == 0 && $vpopusername_tainted ne '') {
+            $userdir = untaint_var($vpopusername_tainted);
+          } else {
+            unshift(@aliases,
+                    split(/\n/, `$vpopdir/bin/valias \Q$vpopusername\E`));
+          }
+        }
+        last if defined $userdir;
       }
-    } until (($userdir = `$vpopdir/bin/vuserinfo -d \Q$vpopusername\E`) && $? == 0);
-    $userdir =~ s{.+ -> (/.+)/Maildir/}{$1};
+    }
   });
 
   if ($vptimer->timed_out()) {
+    dbg("spamd: timed out resolving vpopmail user/alias '%s'", $username);
     undef $userdir;
-    die "failed to resolve vpopmail user/alias '$username' in time ($vpoptimeout seconds)";
+  } elsif (!defined($userdir)) {
+    dbg("spamd: failed to resolve vpopmail user/alias '%s'", $username);
   } else {
     chomp($userdir);
   }
@@ -2274,8 +2319,14 @@ sub handle_user_ldap {
 
 sub handle_user_setuid_with_sql {
   my $username = shift;
+
+  # Bug 6313: interestingly, if $username is not tainted than $pwd, $gcos and
+  # $etc end up tainted but other fields not;  if $username _is_ tainted,
+  # getpwnam does not complain, but all returned fields are tainted (which
+  # makes sense, but is worth remembering)
+  #
   my ($name, $pwd, $uid, $gid, $quota, $comment, $gcos, $dir, $etc) =
-      getpwnam($username);
+      getpwnam(untaint_var($username));
 
   if (!$spamtest->{'paranoid'} && !defined($uid)) {
     # if we are given a username, but can't look it up, maybe name
@@ -2298,7 +2349,8 @@ sub handle_user_setuid_with_sql {
   }
 
   my $spam_conf_dir = $dir . '/.spamassassin'; # needed for Bayes, etc.
-  if (! -d $spam_conf_dir) {
+  if ( ($opt{'user-config'} || defined $opt{'home_dir_for_helpers'})
+       && ! -d $spam_conf_dir ) {
     if (mkdir $spam_conf_dir, 0700) {
       info("spamd: created $spam_conf_dir for $username");
     }
@@ -3008,17 +3060,28 @@ considered a fatal error.)
 
 =item B<--syslog-socket>=I<type>
 
-Specify how spamd should send messages to syslogd.  The options are C<unix>,
-C<inet> or C<none>.   The default is to try C<unix> first, falling back to
-C<inet> if perl detects errors in its C<unix> support.
+Specify how spamd should send messages to syslogd. The I<type> can be any
+of the socket types or logging mechanisms as accepted by the subroutine
+Sys::Syslog::setlogsock(). Depending on a version of Sys::Syslog and on the
+underlying operating system, one of the following values (or their subset) can
+be used: C<native>, C<eventlog>, C<tcp>, C<udp>, C<inet>, C<unix>, C<stream>,
+C<pipe>, or C<console>.  The value C<eventlog> is specific to Win32 events
+logger and requires a perl module Win32::EventLog to be installed.
+For more information please consult the Sys::Syslog documentation.
 
-Some platforms, or versions of perl, are shipped with dysfunctional versions of
-the B<Sys::Syslog> package which do not support some socket types, so you may
-need to set this.  If you get error messages regarding B<__PATH_LOG> or similar
-from spamd, try changing this setting.
+A historical setting --syslog-socket=none is mapped to --syslog=stderr.
 
-The socket type C<file> is used internally and should not be specified.  Use
-the C<-s> switch instead.
+A default for Windows platforms is C<none>, otherwise the default is
+to try C<unix> first, falling back to C<inet> if perl detects errors
+in its C<unix> support.
+
+Some platforms, or versions of perl, are shipped with old or dysfunctional
+versions of the B<Sys::Syslog> module which do not support some socket types,
+so you may need to set this option explicitly.  If you get error messages
+regarding B<__PATH_LOG> or similar spamd, try changing this setting.
+
+The socket types C<file> is used internally and should not be specified.
+Use the C<-s> switch instead.
 
 =item B<-u> I<username>, B<--username>=I<username>
 
@@ -3103,7 +3166,7 @@ please see the documentation at:
 =item B< --ipv4only>, B<--ipv4-only>, B<--ipv4>
 
 Do not use IPv6 for DNS tests. Use if the existing tests
-for IPv6 availablity produce incorrect results or crashes.
+for IPv6 availability produce incorrect results or crashes.
 
 =item B<-L>, B<--local>
 

@@ -123,10 +123,6 @@ up first for speed.
 
 =back
 
-=head1 METHODS
-
-=over 4
-
 =cut
 
 package Mail::SpamAssassin::Conf::Parser;
@@ -546,8 +542,10 @@ sub cond_clause_plugin_loaded {
 sub cond_clause_can {
   my ($self, $method) = @_;
 
+  local($1,$2);
   if ($method =~ /^(.*)::([^:]+)$/) {
-    return UNIVERSAL::can($1, $2);
+    my($module, $meth) = ($1, $2);
+    return UNIVERSAL::can($module, $meth);
   } else {
     $self->lint_warn("bad 'if' line, cannot find '::' in can($method), ".
                 "in \"$self->{currentfile}\"", undef);
@@ -1127,7 +1125,8 @@ sub add_test {
   }
   if ($type == $Mail::SpamAssassin::Conf::TYPE_HEAD_TESTS)
   {
-    if ($text =~ /^!?defined\([A-Za-z][A-Za-z0-9-]*\)$/) {
+    # RFC 5322 section 3.6.8, ftext printable US-ASCII chars not including ":"
+    if ($text =~ /^!?defined\([!-9;-\176]+\)$/) {
       # fine, implements 'exists:'
     } else {
       my ($pat) = ($text =~ /^\s*\S+\s*(?:\=|\!)\~\s*(\S.*?\S)\s*$/);

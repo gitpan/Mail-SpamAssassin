@@ -1,5 +1,3 @@
-=cut
-
 <@LICENSE>
 Copyright 2004 Apache Software Foundation
 
@@ -208,7 +206,7 @@ list plugin enabled for this to work.
 
 Do not use IPv6 for DNS tests. Normally, SpamAssassin will try to detect if
 IPv6 is available, using only IPv4 if it is not. Use if the existing tests
-for IPv6 availablity produce incorrect results or crashes.
+for IPv6 availability produce incorrect results or crashes.
 
 =item B<-L>, B<--local>
 
@@ -278,7 +276,7 @@ circumstances are available with an area of "info".
 For more information about which areas (also known as channels) are available,
 please see the documentation at:
 
-	C<http://wiki.apache.org/spamassassin/DebugChannels>
+	L<http://wiki.apache.org/spamassassin/DebugChannels>
 
 =item B<-x>, B<--nocreate-prefs>
 

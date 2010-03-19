@@ -81,10 +81,19 @@ Specify a DNSBL-style domain lookup with a sub-test.  C<NAME_OF_RULE> is the
 name of the rule to be used, C<dnsbl_zone> is the zone to look up IPs in,
 and C<lookuptype> is the type of lookup (B<TXT> or B<A>).
 
-C<subtest> is the sub-test to run against the returned data.  The sub-test may
-either be an IPv4 dotted address for DNSBLs that return multiple A records or a
-non-negative decimal number to specify a bitmask for DNSBLs that return a
-single A record containing a bitmask of results.
+C<subtest> is a sub-test to run against the returned data.  The sub-test may
+be in one of the following forms: m, n1-n2, or n/m, where n,n1,n2,m can be
+any of: decimal digits, 0x followed by up to 8 hexadecimal digits, or an IPv4
+address in quad-dot form. The 'A' records (IPv4 dotted address) as returned
+by DNSBLs lookups are converted into a numerical form (r) and checked against
+the specified sub-test as follows:
+for a range n1-n2 the following must be true: (r >= n1 && r <= n2);
+for a n/m form the following must be true: (r & m) == (n & m);
+for a single value in quad-dot form the following must be true: r == n;
+for a single decimal or hex form the following must be true: (r & n) != 0.
+
+Some typical examples of a sub-test are: 127.0.1.2, 127.0.1.20-127.0.1.39,
+127.0.1.0/255.255.255.0, 0.0.0.16/0.0.0.16, 0x10/0x10, 16, 0x10 .
 
 Note that, as with C<uridnsbl>, you must also define a body-eval rule calling
 C<check_uridnsbl()> to use this.
@@ -121,10 +130,19 @@ Specify a RHSBL-style domain lookup with a sub-test.  C<NAME_OF_RULE> is the
 name of the rule to be used, C<rhsbl_zone> is the zone to look up domain names
 in, and C<lookuptype> is the type of lookup (B<TXT> or B<A>).
 
-C<subtest> is the sub-test to run against the returned data.  The sub-test may
-either be an IPv4 dotted address for RHSBLs that return multiple A records or a
-non-negative decimal number to specify a bitmask for RHSBLs that return a
-single A record containing a bitmask of results.
+C<subtest> is a sub-test to run against the returned data.  The sub-test may
+be in one of the following forms: m, n1-n2, or n/m, where n,n1,n2,m can be
+any of: decimal digits, 0x followed by up to 8 hexadecimal digits, or an IPv4
+address in quad-dot form. The 'A' records (IPv4 dotted address) as returned
+by DNSBLs lookups are converted into a numerical form (r) and checked against
+the specified sub-test as follows:
+for a range n1-n2 the following must be true: (r >= n1 && r <= n2);
+for a n/m form the following must be true: (r & m) == (n & m);
+for a single value in quad-dot form the following must be true: r == n;
+for a single decimal or hex form the following must be true: (r & n) != 0.
+
+Some typical examples of a sub-test are: 127.0.1.2, 127.0.1.20-127.0.1.39,
+127.2.3.0/255.255.255.0, 0.0.0.16/0.0.0.16, 0x10/0x10, 16, 0x10 .
 
 Note that, as with C<urirhsbl>, you must also define a body-eval rule calling
 C<check_uridnsbl()> to use this.
@@ -186,6 +204,16 @@ B<A>).  C<subtest> is the sub-test to run against the returned data; see
 
 Note that, as with C<urirhsbl>, you must also define a body-eval rule calling
 C<check_uridnsbl()> to use this.
+
+=item tflags NAME_OF_RULE ips_only
+
+Only URIs containing IP addresses as the "host" component will be matched
+against the named "urirhsbl"/"urirhssub" rule.
+
+=item tflags NAME_OF_RULE domains_only
+
+Only URIs containing a non-IP-address "host" component will be matched against
+the named "urirhsbl"/"urirhssub" rule.
 
 =back
 
@@ -273,6 +301,8 @@ sub parsed_metadata {
 
   # only hit DNSBLs for active rules (defined and score != 0)
   $scanner->{'uridnsbl_active_rules_rhsbl'} = { };
+  $scanner->{'uridnsbl_active_rules_rhsbl_ipsonly'} = { };
+  $scanner->{'uridnsbl_active_rules_rhsbl_domsonly'} = { };
   $scanner->{'uridnsbl_active_rules_nsrhsbl'} = { };
   $scanner->{'uridnsbl_active_rules_fullnsrhsbl'} = { };
   $scanner->{'uridnsbl_active_rules_revipbl'} = { };
@@ -281,7 +311,14 @@ sub parsed_metadata {
     next unless ($scanner->{conf}->is_rule_active('body_evals',$rulename));
 
     my $rulecf = $scanner->{conf}->{uridnsbls}->{$rulename};
-    if ($rulecf->{is_rhsbl}) {
+    my $tflags = $scanner->{conf}->{tflags}->{$rulename};
+    $tflags = ''  if !defined $tflags;
+
+    if ($rulecf->{is_rhsbl} && $tflags =~ /\b ips_only \b/x) {
+      $scanner->{uridnsbl_active_rules_rhsbl_ipsonly}->{$rulename} = 1;
+    } elsif ($rulecf->{is_rhsbl} && $tflags =~ /\b domains_only \b/x) {
+      $scanner->{uridnsbl_active_rules_rhsbl_domsonly}->{$rulename} = 1;
+    } elsif ($rulecf->{is_rhsbl}) {
       $scanner->{uridnsbl_active_rules_rhsbl}->{$rulename} = 1;
     } elsif ($rulecf->{is_fullnsrhsbl}) {
       $scanner->{uridnsbl_active_rules_fullnsrhsbl}->{$rulename} = 1;
@@ -370,7 +407,6 @@ sub parsed_metadata {
     }
     else {
       # trim down to a limited number - pick randomly
-      my $i;
       while (@domains && keys %domlist < $umd) {
         my $r = int rand (scalar @domains);
         $domlist{splice (@domains, $r, 1)} = 1;
@@ -385,6 +421,49 @@ sub parsed_metadata {
   }
 
   return 1;
+}
+
+# Accepts argument in one of the following forms: m, n1-n2, or n/m,
+# where n,n1,n2,m can be any of: decimal digits, 0x followed by up to 8
+# hexadecimal digits, or an IPv4 address in quad-dot form. The argument
+# is checked for syntax (undef is returned on syntax errors), hex numbers
+# are converted to decimal, and quad-dot is converted to decimal, then
+# reassembled into original string delimited by '-' or '/'. As a special
+# backward compatibility measure, a single quad-dot (with no second number)
+# is converted into n-n, to distinguish it from a traditional mask-only form.
+#
+# In practice, arguments like the following are anticipated:
+#   127.0.1.2  (same as 127.0.1.2-127.0.1.2 or 127.0.1.2/255.255.255.255)
+#   127.0.1.20-127.0.1.39  (= 0x7f000114-0x7f000127 or 2130706708-2130706727)
+#   0.0.0.16/0.0.0.16  (same as 0x10/0x10 or 16/0x10 or 16/16)
+#   16  (traditional style mask-only, same as 0x10)
+#
+sub parse_and_canonicalize_subtest {
+  my($subtest) = @_;
+  my $digested_subtest;
+
+  local($1,$2,$3);
+  if ($subtest =~ m{^ ([^/-]+) (?: ([/-]) (.+) )? \z}xs) {
+    my($n1,$delim,$n2) = ($1,$2,$3);
+    my $any_quad_dot;
+    for ($n1,$n2) {
+      if (!defined $_) {
+        # ok, $n2 may not exist
+      } elsif (/^\d{1,10}\z/) {
+        # ok, already a decimal number
+      } elsif (/^0x[0-9a-zA-Z]{1,8}\z/) {
+        $_ = hex($_);  # hex -> number
+      } elsif (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\z/) {
+        $_ = Mail::SpamAssassin::Util::my_inet_aton($_);  # quad-dot -> number
+        $any_quad_dot = 1;
+      } else {
+        return undef;
+      }
+    }
+    $digested_subtest = defined $n2 ? $n1.$delim.$n2
+                         : $any_quad_dot ? $n1.'-'.$n1 : "$n1";
+  }
+  return $digested_subtest;
 }
 
 sub set_config {
@@ -432,7 +511,8 @@ sub set_config {
     is_priv => 1,
     code => sub {
       my ($self, $key, $value, $line) = @_;
-      if ($value =~ /^(\S+)\s+(\S+)\s+(\S+)\s+(\d{1,10}|\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/) {
+      local($1,$2,$3,$4);
+      if ($value =~ /^(\S+)\s+(\S+)\s+(\S+)\s+(.*?)\s*$/) {
         my $rulename = $1;
         my $zone = $2;
         my $type = $3;
@@ -442,7 +522,10 @@ sub set_config {
           is_rhsbl => 0, is_subrule => 1
         };
         $self->{uridnsbl_subs}->{$zone} ||= { };
-        push (@{$self->{uridnsbl_subs}->{$zone}->{$subrule}->{rulenames}}, $rulename);
+        $subrule = parse_and_canonicalize_subtest($subrule);
+        defined $subrule or return $Mail::SpamAssassin::Conf::INVALID_VALUE;
+        push(@{$self->{uridnsbl_subs}->{$zone}->{$subrule}->{rulenames}},
+             $rulename);
       }
       elsif ($value =~ /^$/) {
         return $Mail::SpamAssassin::Conf::MISSING_REQUIRED_VALUE;
@@ -481,7 +564,8 @@ sub set_config {
     is_priv => 1,
     code => sub {
       my ($self, $key, $value, $line) = @_;
-      if ($value =~ /^(\S+)\s+(\S+)\s+(\S+)\s+(\d{1,10}|\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/) {
+      local($1,$2,$3,$4);
+      if ($value =~ /^(\S+)\s+(\S+)\s+(\S+)\s+(.*?)\s*$/) {
         my $rulename = $1;
         my $zone = $2;
         my $type = $3;
@@ -491,7 +575,10 @@ sub set_config {
           is_rhsbl => 1, is_subrule => 1
         };
         $self->{uridnsbl_subs}->{$zone} ||= { };
-        push (@{$self->{uridnsbl_subs}->{$zone}->{$subrule}->{rulenames}}, $rulename);
+        $subrule = parse_and_canonicalize_subtest($subrule);
+        defined $subrule or return $Mail::SpamAssassin::Conf::INVALID_VALUE;
+        push(@{$self->{uridnsbl_subs}->{$zone}->{$subrule}->{rulenames}},
+             $rulename);
       }
       elsif ($value =~ /^$/) {
         return $Mail::SpamAssassin::Conf::MISSING_REQUIRED_VALUE;
@@ -530,7 +617,8 @@ sub set_config {
     is_priv => 1,
     code => sub {
       my ($self, $key, $value, $line) = @_;
-      if ($value =~ /^(\S+)\s+(\S+)\s+(\S+)\s+(\d{1,10}|\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/) {
+      local($1,$2,$3,$4);
+      if ($value =~ /^(\S+)\s+(\S+)\s+(\S+)\s+(.*?)\s*$/) {
         my $rulename = $1;
         my $zone = $2;
         my $type = $3;
@@ -540,7 +628,10 @@ sub set_config {
           is_nsrhsbl => 1, is_subrule => 1
         };
         $self->{uridnsbl_subs}->{$zone} ||= { };
-        push (@{$self->{uridnsbl_subs}->{$zone}->{$subrule}->{rulenames}}, $rulename);
+        $subrule = parse_and_canonicalize_subtest($subrule);
+        defined $subrule or return $Mail::SpamAssassin::Conf::INVALID_VALUE;
+        push(@{$self->{uridnsbl_subs}->{$zone}->{$subrule}->{rulenames}},
+             $rulename);
       }
       elsif ($value =~ /^$/) {
         return $Mail::SpamAssassin::Conf::MISSING_REQUIRED_VALUE;
@@ -579,7 +670,8 @@ sub set_config {
     is_priv => 1,
     code => sub {
       my ($self, $key, $value, $line) = @_;
-      if ($value =~ /^(\S+)\s+(\S+)\s+(\S+)\s+(\d{1,10}|\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/) {
+      local($1,$2,$3,$4);
+      if ($value =~ /^(\S+)\s+(\S+)\s+(\S+)\s+(.*?)\s*$/) {
         my $rulename = $1;
         my $zone = $2;
         my $type = $3;
@@ -589,7 +681,10 @@ sub set_config {
           is_fullnsrhsbl => 1, is_subrule => 1
         };
         $self->{uridnsbl_subs}->{$zone} ||= { };
-        push (@{$self->{uridnsbl_subs}->{$zone}->{$subrule}->{rulenames}}, $rulename);
+        $subrule = parse_and_canonicalize_subtest($subrule);
+        defined $subrule or return $Mail::SpamAssassin::Conf::INVALID_VALUE;
+        push(@{$self->{uridnsbl_subs}->{$zone}->{$subrule}->{rulenames}},
+             $rulename);
       }
       elsif ($value =~ /^$/) {
         return $Mail::SpamAssassin::Conf::MISSING_REQUIRED_VALUE;
@@ -644,7 +739,10 @@ sub query_domain {
 
   my $obj = { dom => $dom };
 
-  my $single_dnsbl = 0;
+  my $tflags = $scanner->{conf}->{tflags};
+  my $cf = $scanner->{uridnsbl_active_rules_revipbl};
+
+  my ($is_ip, $single_dnsbl);
   if ($dom =~ /^\d+\.\d+\.\d+\.\d+$/) {
     my $IPV4_ADDRESS = IPV4_ADDRESS;
     my $IP_PRIVATE = IP_PRIVATE;
@@ -652,9 +750,11 @@ sub query_domain {
     if ($dom =~ /^$IPV4_ADDRESS$/ && $dom !~ /^$IP_PRIVATE$/) {
       $self->lookup_dnsbl_for_ip($scanner, $obj, $dom);
       # and check the IP in RHSBLs too
+      local($1,$2,$3,$4);
       if ($dom =~ /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/) {
 	$dom = "$4.$3.$2.$1";
 	$single_dnsbl = 1;
+        $is_ip = 1;
       }
     }
   }
@@ -663,13 +763,24 @@ sub query_domain {
   }
 
   my $rhsblrules = $scanner->{uridnsbl_active_rules_rhsbl};
+  my $rhsbliprules = $scanner->{uridnsbl_active_rules_rhsbl_ipsonly};
+  my $rhsbldomrules = $scanner->{uridnsbl_active_rules_rhsbl_domsonly};
   my $nsrhsblrules = $scanner->{uridnsbl_active_rules_nsrhsbl};
   my $fullnsrhsblrules = $scanner->{uridnsbl_active_rules_fullnsrhsbl};
   my $reviprules = $scanner->{uridnsbl_active_rules_revipbl};
 
   if ($single_dnsbl) {
-    # look up the domain in the RHSBL subset
-    foreach my $rulename (keys %{$rhsblrules}) {
+    # look up the domain in the basic RHSBL subset
+    my @rhsbldoms = keys %{$rhsblrules};
+
+    # and add the "domains_only" and "ips_only" subsets as appropriate
+    if ($is_ip) {
+      push @rhsbldoms, keys %{$rhsbliprules};
+    } else {
+      push @rhsbldoms, keys %{$rhsbldomrules};
+    }
+
+    foreach my $rulename (@rhsbldoms) {
       my $rulecf = $scanner->{conf}->{uridnsbls}->{$rulename};
       $self->lookup_single_dnsbl($scanner, $obj, $rulename,
 				 $dom, $rulecf->{zone}, $rulecf->{type});
@@ -801,12 +912,18 @@ sub complete_a_lookup {
 sub lookup_dnsbl_for_ip {
   my ($self, $scanner, $obj, $ip) = @_;
 
+  local($1,$2,$3,$4);
   $ip =~ /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/;
   my $revip = "$4.$3.$2.$1";
 
+  my $tflags = $scanner->{conf}->{tflags};
   my $cf = $scanner->{uridnsbl_active_rules_revipbl};
   foreach my $rulename (keys %{$cf}) {
     my $rulecf = $scanner->{conf}->{uridnsbls}->{$rulename};
+
+    # ips_only/domains_only lookups should not act on this kind of BL
+    next if ($tflags->{$rulename} =~ /\b(?:ips_only|domains_only)\b/);
+    
     $self->lookup_single_dnsbl($scanner, $obj, $rulename,
 			       $revip, $rulecf->{zone}, $rulecf->{type});
   }
@@ -844,8 +961,12 @@ sub complete_dnsbl_lookup {
   {
     next if ($rr->type ne 'A' && $rr->type ne 'TXT');
 
-    my $rdatastr = $rr->rdatastr;
     my $dom = $ent->{obj}->{dom};
+    my $rdatastr = $rr->rdatastr;
+    my $rdatanum;
+    if ($rdatastr =~ m/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/) {
+      $rdatanum = Mail::SpamAssassin::Util::my_inet_aton($rdatastr);
+    }
 
     if (!$rulecf->{is_subrule}) {
       # this zone is a simple rule, not a set of subrules
@@ -858,21 +979,25 @@ sub complete_dnsbl_lookup {
       $self->got_dnsbl_hit($scanner, $ent, $rdatastr, $dom, $rulename);
     }
     else {
-      foreach my $subtest (keys (%{$uridnsbl_subs}))
-      {
+      local($1,$2,$3);
+      foreach my $subtest (keys (%{$uridnsbl_subs})) {
+        my $match;
         if ($subtest eq $rdatastr) {
+          $match = 1;
+        } elsif ($subtest =~ m{^ (\d+) (?: ([/-]) (\d+) )? \z}x) {
+          my($n1,$delim,$n2) = ($1,$2,$3);
+          $match =
+            !defined $n2  ? $rdatanum & $n1                       # mask only
+          : $delim eq '-' ? $rdatanum >= $n1 && $rdatanum <= $n2  # range
+          : $delim eq '/' ? ($rdatanum & $n2) == ($n1 & $n2)      # value/mask
+          : 0;  
+        # dbg("uridnsbl: %s %s/%s/%s, %s, %s", $match?'Y':'N', $dom, $rulename,
+        #     join('.',@{$uridnsbl_subs->{$subtest}->{rulenames}}),
+        #     $rdatanum, !defined $n2 ? $n1 : "$n1 $delim $n2");
+        }
+        if ($match) {
           foreach my $subrulename (@{$uridnsbl_subs->{$subtest}->{rulenames}}) {
             $self->got_dnsbl_hit($scanner, $ent, $rdatastr, $dom, $subrulename);
-          }
-        }
-        # bitmask
-        elsif ($subtest =~ /^\d+$/) {
-	  if ($rdatastr =~ m/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/ &&
-	      Mail::SpamAssassin::Util::my_inet_aton($rdatastr) & $subtest)
-          {
-            foreach my $subrulename (@{$uridnsbl_subs->{$subtest}->{rulenames}}) {
-              $self->got_dnsbl_hit($scanner, $ent, $rdatastr, $dom, $subrulename);
-            }
           }
         }
       }
@@ -894,7 +1019,9 @@ sub got_dnsbl_hit {
   if ($scanner->{uridnsbl_active_rules_revipbl}->{$rulename}
     || $scanner->{uridnsbl_active_rules_nsrhsbl}->{$rulename}
     || $scanner->{uridnsbl_active_rules_fullnsrhsbl}->{$rulename}
-    || $scanner->{uridnsbl_active_rules_rhsbl}->{$rulename})
+    || $scanner->{uridnsbl_active_rules_rhsbl}->{$rulename}
+    || $scanner->{uridnsbl_active_rules_rhsbl_ipsonly}->{$rulename}
+    || $scanner->{uridnsbl_active_rules_rhsbl_domsonly}->{$rulename})
   {
     # TODO: this needs to handle multiple domain hits per rule
     $scanner->clear_test_state();
@@ -962,5 +1089,10 @@ sub log_dns_result {
 }
 
 # ---------------------------------------------------------------------------
+
+# capability checks for "if can()":
+#
+sub has_tflags_domains_only { 1 }
+sub has_subtest_for_ranges { 1 }
 
 1;

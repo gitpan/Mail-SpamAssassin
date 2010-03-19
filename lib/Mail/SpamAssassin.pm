@@ -75,6 +75,7 @@ use Mail::SpamAssassin::PerMsgStatus;
 use Mail::SpamAssassin::Message;
 use Mail::SpamAssassin::PluginHandler;
 use Mail::SpamAssassin::DnsResolver;
+use Mail::SpamAssassin::Util qw(untaint_var am_running_on_windows);
 use Mail::SpamAssassin::Util::ScopedTimer;
 
 use Errno qw(ENOENT EACCES);
@@ -93,7 +94,7 @@ use vars qw{
   @site_rules_path
 };
 
-$VERSION = "3.003000";      # update after release (same format as perl $])
+$VERSION = "3.003001";      # update after release (same format as perl $])
 # $IS_DEVEL_BUILD = 1;        # change for release versions
 
 # Used during the prerelease/release-candidate part of the official release
@@ -104,11 +105,11 @@ $VERSION = "3.003000";      # update after release (same format as perl $])
 @ISA = qw();
 
 # SUB_VERSION is now just <yyyy>-<mm>-<dd>
-$SUB_VERSION = (split(/\s+/,'$LastChangedDate: 2010-01-18 23:42:44 +0000 (Mon, 18 Jan 2010) $ updated by SVN'))[1];
+$SUB_VERSION = (split(/\s+/,'$LastChangedDate: 2010-03-16 13:15:21 +0000 (Tue, 16 Mar 2010) $ updated by SVN'))[1];
 
 if (defined $IS_DEVEL_BUILD && $IS_DEVEL_BUILD) {
   push(@EXTRA_VERSION,
-       ('r' . qw{$LastChangedRevision: 900609 $ updated by SVN}[1]));
+       ('r' . qw{$LastChangedRevision: 923725 $ updated by SVN}[1]));
 }
 
 sub Version {
@@ -228,7 +229,7 @@ override of config files.
 =item force_ipv4
 
 If set to 1, DNS tests will not attempt to use IPv6. Use if the existing tests
-for IPv6 availablity produce incorrect results or crashes.
+for IPv6 availability produce incorrect results or crashes.
 
 =item require_rules
 
@@ -422,7 +423,7 @@ sub create_locker {
   elsif ($m eq 'nfssafe') { $class = 'UnixNFSSafe'; }
   else {
     # OS-specific defaults
-    if (Mail::SpamAssassin::Util::am_running_on_windows()) {
+    if (am_running_on_windows()) {
       $class = 'Win32';
     } else {
       $class = 'UnixNFSSafe';
@@ -490,19 +491,20 @@ sub parse {
   $self->init(1);
   my $timer = $self->time_method("parse");
 
+  my $master_deadline;
+  if (ref $suppl_attrib && exists $suppl_attrib->{master_deadline}) {
+    $master_deadline = $suppl_attrib->{master_deadline};  # may be undef
+  } elsif ($self->{conf}->{time_limit}) {  # defined and nonzero
+    $master_deadline = $start_time + $self->{conf}->{time_limit};
+  }
+  if (defined $master_deadline) {
+    dbg("config: time limit %.1f s", $master_deadline - $start_time);
+  }
+
   my $msg = Mail::SpamAssassin::Message->new({
     message=>$message, parsenow=>$parsenow,
     normalize=>$self->{conf}->{normalize_charset},
-    suppl_attrib=>$suppl_attrib });
-
-  if (ref $suppl_attrib && exists $suppl_attrib->{master_deadline}) {
-    $msg->{master_deadline} = $suppl_attrib->{master_deadline};  # may be undef
-  } elsif ($self->{conf}->{time_limit}) {  # defined and nonzero
-    $msg->{master_deadline} = $start_time + $self->{conf}->{time_limit};
-  }
-  if (defined $msg->{master_deadline}) {
-    dbg("config: time limit %.1f s", $msg->{master_deadline} - $start_time);
-  }
+    master_deadline=>$master_deadline, suppl_attrib=>$suppl_attrib });
 
   # bug 5069: The goal here is to get rendering plugins to do things
   # like OCR, convert doc and pdf to text, etc, though it could be anything
@@ -1934,7 +1936,7 @@ sub create_default_prefs {
       close IN  or die "error closing $defprefs: $!";
 
       if (($< == 0) && ($> == 0) && defined($user)) { # chown it
-        my ($uid,$gid) = (getpwnam($user))[2,3];
+        my ($uid,$gid) = (getpwnam(untaint_var($user)))[2,3];
         unless (chown($uid, $gid, $fname)) {
           warn "config: couldn't chown $fname to $uid:$gid for $user: $!\n";
         }
@@ -1953,7 +1955,7 @@ sub expand_name ($) {
   my ($self, $name) = @_;
   my $home = $self->{user_dir} || $ENV{HOME} || '';
 
-  if (Mail::SpamAssassin::Util::am_running_on_windows()) {
+  if (am_running_on_windows()) {
     my $userprofile = $ENV{USERPROFILE} || '';
 
     return $userprofile if ($userprofile && $userprofile =~ m/^[a-z]\:[\/\\]/oi);

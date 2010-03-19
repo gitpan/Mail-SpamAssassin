@@ -29,7 +29,7 @@ use Mail::SpamAssassin::Conf;
 use Mail::SpamAssassin::PerMsgStatus;
 use Mail::SpamAssassin::AsyncLoop;
 use Mail::SpamAssassin::Constants qw(:ip);
-use Mail::SpamAssassin::Util qw(untaint_var);
+use Mail::SpamAssassin::Util qw(untaint_var am_running_on_windows);
 
 use File::Spec;
 use IO::Socket;
@@ -635,7 +635,7 @@ sub is_dns_available {
 
   # Check version numbers - runtime check only
   if (defined $Net::DNS::VERSION) {
-    if (Mail::SpamAssassin::Util::am_running_on_windows()) {
+    if (am_running_on_windows()) {
       if ($Net::DNS::VERSION < 0.46) {
 	warn("dns: Net::DNS version is $Net::DNS::VERSION, but need 0.46 for Win32");
 	return $IS_DNS_AVAILABLE;
@@ -751,7 +751,7 @@ sub set_server_failed_to_respond_for_domain {
 sub enter_helper_run_mode {
   my ($self) = @_;
 
-  dbg("info: entering helper-app run mode");
+  dbg("dns: entering helper-app run mode");
   $self->{old_slash} = $/;              # Razor pollutes this
   %{$self->{old_env}} = ();
   if ( defined %ENV ) {
@@ -787,7 +787,7 @@ sub enter_helper_run_mode {
 sub leave_helper_run_mode {
   my ($self) = @_;
 
-  dbg("info: leaving helper-app run mode");
+  dbg("dns: leaving helper-app run mode");
   $/ = $self->{old_slash};
   %ENV = %{$self->{old_env}};
 

@@ -24,6 +24,7 @@ Mail::SpamAssassin::Plugin::DKIM - perform DKIM verification tests
  loadplugin Mail::SpamAssassin::Plugin::DKIM [/path/to/DKIM.pm]
 
 Taking into account signatures from any signing domains:
+
  full   DKIM_SIGNED           eval:check_dkim_signed()
  full   DKIM_VALID            eval:check_dkim_valid()
  full   DKIM_VALID_AU         eval:check_dkim_valid_author_sig()
@@ -31,6 +32,7 @@ Taking into account signatures from any signing domains:
 Taking into account signatures from specified signing domains only:
 (quotes may be omitted on domain names consisting only of letters, digits,
 dots, and minus characters)
+
  full   DKIM_SIGNED_MY1       eval:check_dkim_signed('dom1','dom2',...)
  full   DKIM_VALID_MY1        eval:check_dkim_valid('dom1','dom2',...)
  full   DKIM_VALID_AU_MY1     eval:check_dkim_valid_author_sig('d1','d2',...)
@@ -38,6 +40,7 @@ dots, and minus characters)
  full   __DKIM_DEPENDABLE     eval:check_dkim_dependable()
 
 Author Domain Signing Practices (ADSP) from any author domains:
+
  header DKIM_ADSP_NXDOMAIN    eval:check_dkim_adsp('N')
  header DKIM_ADSP_ALL         eval:check_dkim_adsp('A')
  header DKIM_ADSP_DISCARD     eval:check_dkim_adsp('D')
@@ -46,6 +49,7 @@ Author Domain Signing Practices (ADSP) from any author domains:
  header DKIM_ADSP_CUSTOM_HIGH eval:check_dkim_adsp('3')
 
 Author Domain Signing Practices (ADSP) from specified author domains only:
+
  header DKIM_ADSP_MY1         eval:check_dkim_adsp('*','dom1','dom2',...)
 
  describe DKIM_SIGNED   Message has a DKIM or DK signature, not necessarily valid
@@ -61,6 +65,7 @@ Author Domain Signing Practices (ADSP) from specified author domains only:
  describe DKIM_ADSP_CUSTOM_HIGH adsp_override is CUSTOM_HIGH, no valid author domain signature
 
 For compatibility with pre-3.3.0 versions, the following are synonyms:
+
  OLD: eval:check_dkim_verified = NEW: eval:check_dkim_valid
  OLD: eval:check_dkim_signall  = NEW: eval:check_dkim_adsp('A')
  OLD: eval:check_dkim_signsome = NEW: redundant, semantically always true
@@ -418,6 +423,8 @@ Example:
 How many seconds to wait for a DKIM query to complete, before
 scanning continues without the DKIM result.
 
+=back
+
 =cut
 
   push (@cmds, {
@@ -494,10 +501,12 @@ sub check_dkim_adsp {
     # don't bother
   } else {
     $self->_check_dkim_adsp($pms)  if !$pms->{dkim_checked_adsp};
+
     # an asterisk indicates any ADSP type can match (as long as
     # there is no valid author domain signature present)
-    if ($adsp_char ne '*' &&
-        !(grep { $_ eq $adsp_char} values %{$pms->{dkim_adsp}}) ) {
+    $adsp_char = 'NAD123'  if $adsp_char eq '*';  # a shorthand for NAD123
+
+    if ( !(grep { index($adsp_char,$_) >= 0 } values %{$pms->{dkim_adsp}}) ) {
       # not the right ADSP type
     } elsif (!@domains_list) {
       $result = 1;  # no additional constraints, any author domain will do
@@ -776,8 +785,10 @@ sub _check_dkim_signature {
         }
       }
       if (would_log("dbg","dkim")) {
-        dbg("dkim: i=%s, d=%s, a=%s, c=%s, %s%s, %s",
-          $signature->identity, $d,
+        dbg("dkim: %s, i=%s, d=%s, s=%s, a=%s, c=%s, %s%s, %s",
+          map { !defined $_ ? '(undef)' : $_ }
+          $signature->isa('Mail::DKIM::DkSignature') ? 'DK' : 'DKIM',
+          $signature->identity, $d, $signature->selector,
           $signature->algorithm, scalar($signature->canonicalization),
           ($sig_result_supported ? $signature : $verifier)->result,
           !$expired ? '' : ', expired',

@@ -25,7 +25,7 @@ This module encapsulates an email message and allows access to the various MIME
 message parts and message metadata.
 
 The message structure, after initiating a parse() cycle, looks like this:
- 
+
   Message object, also top-level node in Message::Node tree
      |
      +---> Message::Node for other parts in MIME structure
@@ -114,6 +114,7 @@ sub new {
   $self->{pristine_body} =	'';
   $self->{mime_boundary_state} = {};
   $self->{line_ending} =	"\012";
+  $self->{master_deadline} = $opts->{'master_deadline'};
   $self->{suppl_attrib} = $opts->{'suppl_attrib'};
 
   bless($self,$class);

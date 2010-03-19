@@ -277,6 +277,8 @@ it from running.
     }
   });
 
+=back
+
 =head2 WHITELIST AND BLACKLIST OPTIONS
 
 =over 4
@@ -589,8 +591,8 @@ that it first verifies that the message was sent by an authorized sender for
 the address, before whitelisting.
 
 Authorization is performed using one of the installed sender-authorization
-schemes: SPF (using C<Mail::SpamAssassin::Plugins::SPF>), or DKIM (using
-C<Mail::SpamAssassin::Plugins::DKIM>).  Note that those plugins must be active,
+schemes: SPF (using C<Mail::SpamAssassin::Plugin::SPF>), or DKIM (using
+C<Mail::SpamAssassin::Plugin::DKIM>).  Note that those plugins must be active,
 and working, for this to operate.
 
 Using C<whitelist_auth> is roughly equivalent to specifying duplicate
@@ -1677,8 +1679,6 @@ maybe 50 seconds, assuming that clients are willing to wait at least a minute.
     }
   });
 
-=over 4
-
 =item lock_method type
 
 Select the file-locking method used to protect database files on-disk. By
@@ -2156,8 +2156,8 @@ messages, or other tests being skipped as a side-effect.
 =item header SYMBOLIC_TEST_NAME exists:name_of_header
 
 Define a header existence test.  C<name_of_header> is the name of a
-header to test for existence.  This is just a very simple version of
-the above header tests.
+header field to test for existence.  This is just a very simple version
+of the above header tests.
 
 =item header SYMBOLIC_TEST_NAME eval:name_of_eval_method([arguments])
 
@@ -2280,7 +2280,8 @@ name.
           $self->{parser}->add_test ($name, $fn, $TYPE_HEAD_EVALS);
         }
       }
-      elsif ($value =~ /^(\S+)\s+exists:(.*)$/) {
+      elsif ($value =~ /^(\S+)\s+exists:([!-9;-\176]+)$/) {
+        # RFC 5322 section 3.6.8, ftext printable US-ASCII ch not including ":"
         $self->{parser}->add_test ($1, "defined($2)", $TYPE_HEAD_TESTS);
         $self->{descriptions}->{$1} = "Found a $2 header";
       }
@@ -3413,6 +3414,8 @@ seen four days ago.  The second token appeared in two ham messages,
 (Unlike the C<compact> option, the long option shows declassification
 distances that are greater than 9.)
 
+=back
+
 =cut
 
   return \@cmds;
@@ -3997,8 +4000,6 @@ sub feature_originating_ip_headers { 1 }
 
 1;
 __END__
-
-=back
 
 =head1 LOCALI[SZ]ATION
 

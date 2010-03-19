@@ -39,8 +39,6 @@ The results are incorporated into SpamAssassin as the BAYES_* rules.
 
 =head1 METHODS
 
-=over 4
-
 =cut
 
 package Mail::SpamAssassin::Plugin::Bayes;
@@ -832,7 +830,7 @@ skip:
             });
 
   $permsgstatus->set_tag ('TOKENSUMMARY', sub {
-              if( defined $self->{tag_data}{BAYESTC} )
+              if ( defined $permsgstatus->{tag_data}{BAYESTC} )
                 {
                   my $tcount_neutral = $permsgstatus->{tag_data}{BAYESTCLEARNED}
                                     - $permsgstatus->{tag_data}{BAYESTCSPAMMY}
@@ -1563,7 +1561,3 @@ sub bayes_report_make_list {
 }
 
 1;
-
-=back
-
-=cut

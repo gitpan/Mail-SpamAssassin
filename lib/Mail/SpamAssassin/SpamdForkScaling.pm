@@ -25,7 +25,7 @@ use bytes;
 use re 'taint';
 use Errno qw();
 
-use Mail::SpamAssassin::Util;
+use Mail::SpamAssassin::Util qw(am_running_on_windows);
 use Mail::SpamAssassin::Logger;
 use Mail::SpamAssassin::Timeout;
 
@@ -175,6 +175,8 @@ sub child_error_kill {
   # close the socket and remove the child from our list
   $self->set_child_state ($pid, PFSTATE_KILLED);
 
+  #Bug 6304 research
+  #info("6304: prefork: child_error_kill called - %s", $pid);
   kill 'INT' => $pid
     or warn "prefork: kill of failed child $pid failed: $!\n";
 
@@ -447,12 +449,12 @@ sub read_one_message_from_child_socket {
 
   chomp $line;
   if ($line =~ s/^I//) {
-    my $pid = unpack("N1", $line);
+    my $pid = unpack("l1", $line);      # signed, as 'N' causes win32 bugs (bug 6356)
     $self->set_child_state ($pid, PFSTATE_IDLE);
     return PFSTATE_IDLE;
   }
   elsif ($line =~ s/^B//) {
-    my $pid = unpack("N1", $line);
+    my $pid = unpack("l1", $line);
     $self->set_child_state ($pid, PFSTATE_BUSY);
     return PFSTATE_BUSY;
   }
@@ -562,13 +564,13 @@ sub set_my_pid {
 sub update_child_status_idle {
   my ($self) = @_;
   # "I  b1 b2 b3 b4 \n "
-  $self->report_backchannel_socket("I".pack("N",$self->{pid})."\n");
+  $self->report_backchannel_socket("I".pack("l",$self->{pid})."\n");
 }
 
 sub update_child_status_busy {
   my ($self) = @_;
   # "B  b1 b2 b3 b4 \n "
-  $self->report_backchannel_socket("B".pack("N",$self->{pid})."\n");
+  $self->report_backchannel_socket("B".pack("l",$self->{pid})."\n");
 }
 
 sub report_backchannel_socket {
@@ -601,6 +603,9 @@ sub wait_for_orders {
     chomp $line;
     if (index ($line, "P") == 0) {  # string starts with "P" = ping
       dbg("prefork: periodic ping from spamd parent");
+      if (am_running_on_windows()) {
+        sleep 2;  # need this on win32 so that a child can get a signal
+      }
       next;
     }
     if (index ($line, "A") == 0) {  # string starts with "A" = accept
@@ -818,11 +823,15 @@ sub adapt_num_children {
 
 sub need_to_add_server {
   my ($self, $num_idle) = @_;
+  my ($pid);
   my $cur = ${$self->{cur_children_ref}};
   $cur++;
   dbg("prefork: adjust: increasing, not enough idle children ($num_idle < $self->{min_idle})");
-  main::spawn();
+  $pid = main::spawn();
   # servers will be started once main_server_poll() returns
+
+  #Added for bug 6304 to work on notifying administrators of poor parameters for spamd
+  info("prefork: adjust: %s idle children less than %s minimum idle children.  Increasing spamd children: %s started.",$num_idle, $self->{min_idle}, $pid);
 }
 
 sub need_to_del_server {
@@ -850,9 +859,24 @@ sub need_to_del_server {
   # warning: race condition if these two lines are the other way around.
   # see bug 3983, comment 37 for details
   $self->set_child_state ($pid, PFSTATE_KILLED);
-  kill 'INT' => $pid;
+  if (!am_running_on_windows()) {
+    kill 'INT' => $pid;
+  } else {
+    my $sock = $self->{backchannel}->get_socket_for_child($pid);
+    # On win32 child cannot get a signal while reading socket
+    $sock->syswrite("P....\n");
+    kill 'INT' => $pid or warn "prefork: kill of child $pid failed: $!\n";
+	
+    $self->{backchannel}->delete_socket_for_child($pid);
+    if (defined $sock && defined $sock->fileno()) {
+      $self->{backchannel}->remove_from_selector($sock);
+    }
+    $sock->close  if $sock;
+  }
 
   dbg("prefork: adjust: decreasing, too many idle children ($num_idle > $self->{max_idle}), killed $pid");
+  #Added for bug 6304 to work on notifying administrators of poor parameters for spamd
+  info("prefork: adjust: %s idle children more than %s maximum idle children. Decreasing spamd children: %s killed.",$num_idle, $self->{max_idle}, $pid);
 }
 
 sub vec_all {
