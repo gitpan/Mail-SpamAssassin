@@ -82,7 +82,6 @@ use Errno qw(ENOENT EACCES);
 use File::Basename;
 use File::Path;
 use File::Spec 0.8;
-use File::Copy;
 use Time::HiRes qw(time);
 use Cwd;
 use Config;
@@ -94,8 +93,8 @@ use vars qw{
   @site_rules_path
 };
 
-$VERSION = "3.003001";      # update after release (same format as perl $])
-# $IS_DEVEL_BUILD = 1;        # change for release versions
+$VERSION = "3.003001_01";      # update after release (same format as perl $])
+$IS_DEVEL_BUILD = 0;        # change for release versions
 
 # Used during the prerelease/release-candidate part of the official release
 # process. If you hacked up your SA, you should add a version_tag to your .cf
@@ -105,16 +104,16 @@ $VERSION = "3.003001";      # update after release (same format as perl $])
 @ISA = qw();
 
 # SUB_VERSION is now just <yyyy>-<mm>-<dd>
-$SUB_VERSION = (split(/\s+/,'$LastChangedDate: 2010-03-16 13:15:21 +0000 (Tue, 16 Mar 2010) $ updated by SVN'))[1];
+$SUB_VERSION = (split(/\s+/,'$LastChangedDate: 2010-03-31 06:12:20 -0500 (Wed, 31 Mar 2010) $ updated by SVN'))[1];
 
 if (defined $IS_DEVEL_BUILD && $IS_DEVEL_BUILD) {
   push(@EXTRA_VERSION,
-       ('r' . qw{$LastChangedRevision: 923725 $ updated by SVN}[1]));
+       ('r' . qw{$LastChangedRevision: 929478 $ updated by SVN}[1]));
 }
 
 sub Version {
-  $VERSION =~ /^(\d+)\.(\d\d\d)(\d\d\d)$/;
-  return join('-', sprintf("%d.%d.%d", $1, $2, $3), @EXTRA_VERSION);
+  $VERSION =~ /^(\d+)\.(\d\d\d)(\d\d\d)_(\d+)$/;
+  return join('-', sprintf("%d.%d.%d_%02d", $1, $2, $3, $4), @EXTRA_VERSION);
 }
 
 $HOME_URL = "http://spamassassin.apache.org/";

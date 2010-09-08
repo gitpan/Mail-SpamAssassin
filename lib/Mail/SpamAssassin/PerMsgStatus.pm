@@ -1150,20 +1150,15 @@ sub _get_tag_value_for_yesno {
 }
 
 sub _get_tag_value_for_score {
-  my ($self, $pad) = @_;
+  #$pad parameter never used.  removed.
+  my ($self) = @_;
 
   my $score  = sprintf("%2.1f", $self->{score});
   my $rscore = $self->_get_tag_value_for_required_score();
 
-  # padding
-  if (defined $pad && $pad =~ /^(0+| +)$/) {
-    my $count = length($1) + 3 - length($score);
-    $score = (substr($pad, 0, $count) . $score) if $count > 0;
-  }
-
-  # bug 2607: Do some rounding tricks to avoid the 5.0!=5.0-phenomenon,
-  return $score if $self->{is_spam} or $score < $rscore;
-  return $rscore - 0.1;
+  #Change due to bug 6419 to use Util function for consistency with spamd
+  #and PerMessageStatus
+  return Mail::SpamAssassin::Util::get_tag_value_for_score($score, $rscore, $self->{is_spam});
 }
 
 sub _get_tag_value_for_required_score {
@@ -1732,7 +1727,7 @@ my $tbirdenddelimplusat = $tbirdenddelimemail . '@';
 # regexps for finding plain text non-scheme hostnames with valid TLDs.
 
 # the list from %VALID_TLDS in Util/RegistrarBoundaries.pm, as a
-# Regexp::List optimized regexp ;)  accurate as of 20080208
+# Regexp::List optimized regexp ;)  accurate as of 2010-0415
 my $tldsRE = qr/
   (?=[a-wyz])
   (?:a(?:e(?:ro)?|r(?:pa)?|s(?:ia)?|[cdfgilmnoqtuwxz])|b(?:iz?|[abdefghjmnorstwyz])
@@ -1741,7 +1736,7 @@ my $tldsRE = qr/
     |j(?:o(?:bs)?|[emp])|k[eghimnprwyz]|l[abcikrstuvy]
     |m(?:o(?:bi)?|u(?:seum)?|[acdeghkmnpqrstvwxyz]|i?l)|n(?:a(?:me)?|et?|[cfgilopruz])
     |o(?:m|rg)|p(?:ro?|[aefghklnstwy])|r[eosuw]|s[abcdeghiklmnrtuvyz]
-    |t(?:r(?:avel)?|[cdfghjkmnoptvwz]|e?l)|u[agksyz]|v[aceginu]|w[fs]|y[eu]|z[amw]|qa
+    |t(?:r(?:avel)?|[cdfghjkmnoptvwz]|e?l)|u[agksyz]|v[aceginu]|w[fs]|ye|z[amw]|qa
   )/ix;
 
 # knownscheme regexp looks for either a https?: or ftp: scheme, or www\d*\. or ftp\. prefix, i.e., likely to start a URL
@@ -1750,9 +1745,9 @@ my $urischemeless = qr/[a-z\d][a-z\d._-]{0,251}\.${tldsRE}\.?(?::\d{1,5})?(?:\/[
 my $uriknownscheme = qr/(?:(?:(?:(?:https?)|(?:ftp)):(?:\/\/)?)|(?:(?:www\d{0,2}|ftp)\.))[^$tbirdenddelim]{1,251}/io;
 my $urimailscheme = qr/(?:mailto:)?[^$tbirdenddelimplusat]{1,251}@[^$tbirdenddelimemail]{1,251}/io;
 my $tbirdurire = qr/(?:\b|(?<=$iso2022shift)|(?<=[$tbirdstartdelim]))
-                    (?:(?:($uriknownscheme)(?=[$tbirdenddelim])) |
-                       (?:($urimailscheme)(?=[$tbirdenddelimemail])) |
-                       (?:\b($urischemeless)(?=[$tbirdenddelim])))/xo;
+                    (?:(?:($uriknownscheme)(?=(?:[$tbirdenddelim]|\z))) |
+                       (?:($urimailscheme)(?=(?:[$tbirdenddelimemail]|\z))) |
+                       (?:\b($urischemeless)(?=(?:[$tbirdenddelim]|\z))))/xo;
 
 =item $status->get_uri_list ()
 
@@ -1995,7 +1990,7 @@ sub _get_parsed_uri_list {
           }
         }
 
-        if ($uri =~ /^mailto:/) {
+        if ($uri =~ /^mailto:/i) {
           # skip a mail link that does not have a valid TLD or other than one @ after decoding any URLEncoded characters
           $uri = Mail::SpamAssassin::Util::url_encode($uri) if ($uri =~ /\%(?:2[1-9a-fA-F]|[3-6][0-9a-fA-f]|7[0-9a-eA-E])/);
           next if ($uri !~ /^[^@]+@[^@]+$/);
@@ -2005,7 +2000,7 @@ sub _get_parsed_uri_list {
           push (@uris, $uri) unless ($rawuri eq $uri);
         }
 
-        next unless ($uri =~/^(?:https?|ftp):/);  # at this point only valid if one or the other of these
+        next unless ($uri =~/^(?:https?|ftp):/i);  # at this point only valid if one or the other of these
 
         my @tmp = Mail::SpamAssassin::Util::uri_list_canonify($redirector_patterns, $uri);
         my $goodurifound = 0;
@@ -2015,7 +2010,7 @@ sub _get_parsed_uri_list {
             # bug 5780: Stop after domain to avoid FP, but do that after all deobfuscation of urlencoding and redirection
             if ($rblonly) {
               local $1;
-              $cleanuri =~ s/^(https?:\/\/[^:\/]+).*$/$1/;
+              $cleanuri =~ s/^(https?:\/\/[^:\/]+).*$/$1/i;
             }
             push (@uris, $cleanuri);
             $goodurifound = 1;

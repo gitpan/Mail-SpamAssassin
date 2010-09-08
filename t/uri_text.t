@@ -24,7 +24,7 @@ use Mail::SpamAssassin;
 use vars qw(%patterns %anti_patterns);
 
 # settings
-plan tests => 678;
+plan tests => 682;
 
 # initialize SpamAssassin
 my $sa = create_saobj({'dont_copy_prefs' => 1});
@@ -223,6 +223,12 @@ mailto:baeb1fai@quo6puyo.com	mailto:baeb1fai@quo6puyo.com
 http://www.luzoop5k.com		http://www.luzoop5k.com
 https://www.luzoop5k.com	https://www.luzoop5k.com
 ftp://www.luzoop5k.com		ftp://www.luzoop5k.com
+
+Mailto:aaeb1fai@quo6puyo.com	Mailto:aaeb1fai@quo6puyo.com
+Http://www.auzoop5k.com		Http://www.auzoop5k.com
+Https://www.auzoop5k.com	Https://www.auzoop5k.com
+Ftp://www.auzoop5k.com		Ftp://www.auzoop5k.com
+
 mailto:www.luzoop5k.com		!mailto:www.luzoop5k.com
 # no longer accept file: scheme
 file://www.luzoop5k.com		!file://www.luzoop5k.com
@@ -552,7 +558,7 @@ example.wf	^http://example.wf$
 example.ws	^http://example.ws$
 example.ye	^http://example.ye$
 example.yt	!^http://example.yt$
-example.yu	^http://example.yu$
+example.yu	!^http://example.yu$
 example.za	^http://example.za$
 example.zm	^http://example.zm$
 example.zw	^http://example.zw$
@@ -828,7 +834,7 @@ www.example.wf	^http://www.example.wf$
 www.example.ws	^http://www.example.ws$
 www.example.ye	^http://www.example.ye$
 www.example.yt	!^http://www.example.yt$
-www.example.yu	^http://www.example.yu$
+www.example.yu	!^http://www.example.yu$
 www.example.za	^http://www.example.za$
 www.example.zm	^http://www.example.zm$
 www.example.zw	^http://www.example.zw$
