@@ -1639,20 +1639,25 @@ compiled rules.
 When a message is passed to Mail::SpamAssassin::parse, a deadline time
 is established as a sum of current time and the C<time_limit> setting.
 
-This deadline may be overruled by a caller through option 'master_deadline'
-in $suppl_attrib on a call to parse(), possibly providing a more accurate
-deadline taking into account past and expected future processing of a
-message in a mail filtering setup. Note that spamd (and possibly some
-third-party callers of SpamAssassin) will overrule the C<time_limit> setting
-based on its --timeout-child option, unlike the command line C<spamassassin>,
-which has no such command line option.
+This deadline may also be specified by a caller through an option
+'master_deadline' in $suppl_attrib on a call to parse(), possibly providing
+a more accurate deadline taking into account past and expected future
+processing of a message in a mail filtering setup. If both the config
+option as well as a 'master_deadline' option in a call are provided,
+the shorter time limit of the two is used (since version 3.3.2).
+Note that spamd (and possibly third-party callers of SpamAssassin) will
+supply the 'master_deadline' option in a call based on its --timeout-child
+option (or equivalent), unlike the command line C<spamassassin>, which has
+no such command line option.
 
 When a time limit is exceeded, most of the remaining tests will be skipped,
 as well as auto-learning. Whatever tests fired so far will determine the
 final score. The behaviour is similar to short-circuiting with attribute 'on',
 as implemented by a Shortcircuit plugin. A synthetic hit on a rule named
-TIME_LIMIT_EXCEEDED with a near-zero score is generated, so that the report
-will reflect the event.
+TIME_LIMIT_EXCEEDED with a near-zero default score is generated, so that
+the report will reflect the event. A score for TIME_LIMIT_EXCEEDED may
+be provided explicitly in a configuration file, for example to achieve
+whitelisting or blacklisting effect for messages with long processing times.
 
 The C<time_limit> option is a useful protection against excessive processing
 time on certain degenerate or unusually long or complex mail messages, as well
@@ -2036,8 +2041,10 @@ Example: http://chkpt.zdnet.com/chkpt/whatever/spammer.domain/yo/dude
 =item header SYMBOLIC_TEST_NAME header op /pattern/modifiers	[if-unset: STRING]
 
 Define a test.  C<SYMBOLIC_TEST_NAME> is a symbolic test name, such as
-'FROM_ENDS_IN_NUMS'.  C<header> is the name of a mail header field, such as
-'Subject', 'To', 'From', etc.
+'FROM_ENDS_IN_NUMS'.  C<header> is the name of a mail header field,
+such as 'Subject', 'To', 'From', etc.  Header field names are matched
+case-insensitively (conforming to RFC 5322 section 1.2.2), except for
+all-capitals metaheader fields such as ALL, MESSAGEID, ALL-TRUSTED.
 
 Appending a modifier C<:raw> to a header field name will inhibit decoding of
 quoted-printable or base-64 encoded strings, and will preserve all whitespace
@@ -3279,8 +3286,11 @@ They will be replaced by the corresponding value when they are used.
 Some tags can take an argument (in parentheses). The argument is
 optional, and the default is shown below.
 
- _YESNOCAPS_       "YES"/"NO" for is/isn't spam
- _YESNO_           "Yes"/"No" for is/isn't spam
+ _YESNO_           "Yes" for spam, "No" for nonspam (=ham)
+ _YESNO(spam_str,ham_str)_  returns the first argument ("Yes" if missing)
+                   for spam, and the second argument ("No" if missing) for ham
+ _YESNOCAPS_       "YES" for spam, "NO" for nonspam (=ham)
+ _YESNOCAPS(spam_str,ham_str)_  same as _YESNO(...)_, but uppercased
  _SCORE(PAD)_      message score, if PAD is included and is either spaces or
                    zeroes, then pad scores with that many spaces or zeroes
 		   (default, none)  ie: _SCORE(0)_ makes 2.4 become 02.4,
@@ -3995,6 +4005,8 @@ sub sa_die { Mail::SpamAssassin::sa_die(@_); }
 #   if (can(Mail::SpamAssassin::Conf::feature_originating_ip_headers))
 
 sub feature_originating_ip_headers { 1 }
+sub feature_bayes_auto_learn_on_error { 1 }
+sub feature_bug6558_free { 1 }
 
 ###########################################################################
 

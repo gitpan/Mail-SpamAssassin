@@ -116,8 +116,7 @@ sub parse_received_headers {
   # Now add the single line headers like X-Originating-IP. (bug 5680)
   # we convert them into synthetic "Received" headers so we can share
   # code below.
-  for my $header ('X-Yahoo-Post-IP', 'X-Originating-IP',
-                    'X-Apparently-From', 'X-SenderIP')
+  for my $header (@{$permsgstatus->{main}->{conf}->{originating_ip_headers}})
   {
     my $str = $msg->get_header($header);
     next unless ($str && $str =~ m/($IP_ADDRESS)/);
@@ -392,6 +391,11 @@ sub parse_received_line {
   if (/ by / && / with (ESMTPA|ESMTPSA|LMTPA|LMTPSA|ASMTP|HTTPU?)(?: |$)/i) {
     $auth = $1;
   }
+  # GMail should use ESMTPSA to indicate that it is in fact authenticated,
+  # but doesn't.
+  elsif (/ by mx\.google\.com with ESMTPS id [a-z0-9]{1,4}sm[0-9]{2,9}[a-z]{3}\.[0-9]{1,3}\.[0-9]{4}\.(?:[0-6][0-9]\.){4}[0-6][0-9]/ && /\(version=([^ ]+) cipher=([^\)]+)\)/ ) {
+    $auth = 'GMail - transport=' . $1 . ' cipher=' . $2;
+  }
   # Courier v0.47 and possibly others
   elsif (/^from .*?(?:\]\)|\)\]) \(AUTH: (LOGIN|PLAIN|DIGEST-MD5|CRAM-MD5) \S+(?:, .*?)?\) by /) {
     $auth = $1;
@@ -413,7 +417,7 @@ sub parse_received_line {
     $auth = 'Communigate';
   }
   # Microsoft Exchange (complete with syntax error)
-  elsif (/ with Microsoft Exchange Server HTTP-DAV /) {
+  elsif (/ with Microsoft Exchange Server HTTP-DAV\b/) {
     $auth = 'HTTP-DAV';
   }
 

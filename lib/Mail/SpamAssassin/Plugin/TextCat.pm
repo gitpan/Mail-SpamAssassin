@@ -25,20 +25,20 @@ Mail::SpamAssassin::Plugin::TextCat - TextCat language guesser
 
 =head1 DESCRIPTION
 
-This plugin will try to guess the language used in the message text.
+This plugin will try to guess the language used in the message body text.
 
-You can then specify which languages are considered okay for incoming
-mail and if the guessed language is not okay, C<UNWANTED_LANGUAGE_BODY>
-is triggered
+You can use the "ok_languages" directive to set which languages are
+considered okay for incoming mail and if the guessed language is not okay,
+C<UNWANTED_LANGUAGE_BODY> is triggered.
 
-It will always add the results to a "X-Language" name-value pair in
-the message metadata data structure. This may be useful as Bayes
-tokens. The results can also be added to marked-up messages using
-"add_header", with the _LANGUAGES_ tag. See
+It will always add the results to a "X-Language" name-value pair in the
+message metadata data structure. This may be useful as Bayes tokens and
+can also be used in rules for scoring. The results can also be added to
+marked-up messages using "add_header", with the _LANGUAGES_ tag. See
 L<Mail::SpamAssassin::Conf> for details.
 
-Note: the language cannot always be recognized with sufficient
-confidence.  In that case, C<UNWANTED_LANGUAGE_BODY> will not trigger.
+Note: the language cannot always be recognized with sufficient confidence.
+In that case, no action is taken.
 
 =cut
 
@@ -95,12 +95,15 @@ sub set_config {
 
 This option is used to specify which languages are considered okay for
 incoming mail.  SpamAssassin will try to detect the language used in the
-message text.
+message body text.
 
 Note that the language cannot always be recognized with sufficient
-confidence.  In that case, no points will be assigned.
+confidence. In that case, no action is taken.
 
-The rule C<UNWANTED_LANGUAGE_BODY> is triggered based on how this is set.
+The rule C<UNWANTED_LANGUAGE_BODY> is triggered if none of the languages
+detected are in the "ok" list. Note that this is the only effect of the
+"ok" list. It does not act as a whitelist against any other form of spam
+scanning.
 
 In your configuration, you must use the two or three letter language
 specifier in lowercase, not the English name for the language.  You may
@@ -291,7 +294,7 @@ Rhaeto-Romance, Sanskrit, Scots, Slovenian, and Yiddish.
     type => $Mail::SpamAssassin::Conf::CONF_TYPE_STRING,
   });
 
-=item textcat_max_languages N (default: 5)
+=item textcat_max_languages N (default: 3)
 
 The maximum number of languages before the classification is considered unknown.
 
@@ -299,7 +302,7 @@ The maximum number of languages before the classification is considered unknown.
 
   push (@cmds, {
     setting => 'textcat_max_languages',
-    default => 5,
+    default => 3,
     type => $Mail::SpamAssassin::Conf::CONF_TYPE_NUMERIC,
   });
 
@@ -330,16 +333,16 @@ models (note that each of those models is used completely).
     type => $Mail::SpamAssassin::Conf::CONF_TYPE_NUMERIC,
   });
 
-=item textcat_acceptable_score N (default: 1.05)
+=item textcat_acceptable_score N (default: 1.02)
 
 Include any language that scores at least C<textcat_acceptable_score> in the
-returned list of languages
+returned list of languages.
 
 =cut
 
   push (@cmds, {
     setting => 'textcat_acceptable_score',
-    default => 1.05,
+    default => 1.02,
     type => $Mail::SpamAssassin::Conf::CONF_TYPE_NUMERIC,
   });
 
@@ -440,6 +443,11 @@ sub create_lm {
   # my $non_word_characters = qr/[0-9\s]/;
   for my $word (split(/[0-9\s]+/, ${$_[0]}))
   {
+    # Bug 6229: Current TextCat database only works well with
+    # lowercase input, lets work around it until it's properly
+    # generated and/or locale issues are resolved..
+    $word =~ tr/A-Z\xc0-\xd6\xd8-\xde/a-z\xe0-\xf6\xf8-\xfe/
+        if $word =~ /[A-Z]/ && $word =~ /[a-zA-Z\xc0-\xd6\xd8-\xde\xe0-\xf6\xf8-\xfe]{4}/;
     $word = "\000" . $word . "\000";
     my $len = length($word);
     my $flen = $len;

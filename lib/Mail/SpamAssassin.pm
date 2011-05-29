@@ -93,27 +93,28 @@ use vars qw{
   @site_rules_path
 };
 
-$VERSION = "3.003001_01";      # update after release (same format as perl $])
-$IS_DEVEL_BUILD = 0;        # change for release versions
+$VERSION = "3.003002";      # update after release (same format as perl $])
+#$IS_DEVEL_BUILD = 1;        # change for release versions
 
 # Used during the prerelease/release-candidate part of the official release
 # process. If you hacked up your SA, you should add a version_tag to your .cf
 # files; this variable should not be modified.
-@EXTRA_VERSION = qw();
+#@EXTRA_VERSION = qw();
+@EXTRA_VERSION = qw(rc1);
 
 @ISA = qw();
 
 # SUB_VERSION is now just <yyyy>-<mm>-<dd>
-$SUB_VERSION = (split(/\s+/,'$LastChangedDate: 2010-03-31 06:12:20 -0500 (Wed, 31 Mar 2010) $ updated by SVN'))[1];
+$SUB_VERSION = (split(/\s+/,'$LastChangedDate: 2011-05-14 09:41:11 +0000 (Sat, 14 May 2011) $ updated by SVN'))[1];
 
 if (defined $IS_DEVEL_BUILD && $IS_DEVEL_BUILD) {
   push(@EXTRA_VERSION,
-       ('r' . qw{$LastChangedRevision: 929478 $ updated by SVN}[1]));
+       ('r' . qw{$LastChangedRevision: 1102986 $ updated by SVN}[1]));
 }
 
 sub Version {
-  $VERSION =~ /^(\d+)\.(\d\d\d)(\d\d\d)_(\d+)$/;
-  return join('-', sprintf("%d.%d.%d_%02d", $1, $2, $3, $4), @EXTRA_VERSION);
+  $VERSION =~ /^(\d+)\.(\d\d\d)(\d\d\d)$/;
+  return join('-', sprintf("%d.%d.%d", $1, $2, $3), @EXTRA_VERSION);
 }
 
 $HOME_URL = "http://spamassassin.apache.org/";
@@ -491,10 +492,16 @@ sub parse {
   my $timer = $self->time_method("parse");
 
   my $master_deadline;
+  # passed in at a function call
   if (ref $suppl_attrib && exists $suppl_attrib->{master_deadline}) {
     $master_deadline = $suppl_attrib->{master_deadline};  # may be undef
-  } elsif ($self->{conf}->{time_limit}) {  # defined and nonzero
-    $master_deadline = $start_time + $self->{conf}->{time_limit};
+  }
+  # found in a config file - overrides passed-in number if lower
+  if ($self->{conf}->{time_limit}) {  # defined and nonzero
+    my $time_limit_deadline = $start_time + $self->{conf}->{time_limit};
+    if (!defined $master_deadline || $time_limit_deadline < $master_deadline) {
+      $master_deadline = $time_limit_deadline;
+    }
   }
   if (defined $master_deadline) {
     dbg("config: time limit %.1f s", $master_deadline - $start_time);

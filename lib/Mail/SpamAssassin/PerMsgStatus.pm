@@ -59,6 +59,7 @@ use Mail::SpamAssassin::Constants qw(:sa);
 use Mail::SpamAssassin::AsyncLoop;
 use Mail::SpamAssassin::Conf;
 use Mail::SpamAssassin::Util qw(untaint_var);
+use Mail::SpamAssassin::Util::RegistrarBoundaries;
 use Mail::SpamAssassin::Timeout;
 use Mail::SpamAssassin::Logger;
 
@@ -1144,9 +1145,11 @@ sub get_spamd_result_log_items {
 ###########################################################################
 
 sub _get_tag_value_for_yesno {
-  my $self   = shift;
-  
-  return $self->{is_spam} ? "Yes" : "No";
+  my($self, $arg) = @_;
+  my($arg_spam, $arg_ham);
+  ($arg_spam, $arg_ham) = split(/,/, $arg, 2)  if defined $arg;
+  return $self->{is_spam} ? (defined $arg_spam ? $arg_spam : 'Yes')
+                          : (defined $arg_ham  ? $arg_ham  : 'No');
 }
 
 sub _get_tag_value_for_score {
@@ -1175,9 +1178,9 @@ sub _get_tag {
 
   $tag = "" unless defined $tag; # can be "0", so use a defined test
 
-  %tags = ( YESNO     => sub {    $self->_get_tag_value_for_yesno() },
+  %tags = ( YESNO     => sub {    $self->_get_tag_value_for_yesno(@_) },
   
-            YESNOCAPS => sub { uc $self->_get_tag_value_for_yesno() },
+            YESNOCAPS => sub { uc $self->_get_tag_value_for_yesno(@_) },
 
             SCORE => sub { $self->_get_tag_value_for_score(shift) },
             HITS  => sub { $self->_get_tag_value_for_score(shift) },
@@ -1530,6 +1533,7 @@ sub _get {
       elsif ($1 eq 'name') { $getname = 1 }
     }
   }
+  my $request_lc = lc $request;
 
   # ALL: entire pristine or semi-raw headers
   if ($request eq 'ALL') {
@@ -1562,27 +1566,27 @@ sub _get {
 			$self->{last_internal_relay_index}+1, undef);
   }
   # EnvelopeFrom: the SMTP MAIL FROM: address
-  elsif ($request eq 'EnvelopeFrom') {
+  elsif ($request_lc eq "\LEnvelopeFrom") {
     $result = $self->get_envelope_from();
   }
   # untrusted relays list, as string
-  elsif ($request eq 'X-Spam-Relays-Untrusted') {
+  elsif ($request_lc eq "\LX-Spam-Relays-Untrusted") {
     $result = $self->{relays_untrusted_str};
   }
   # trusted relays list, as string
-  elsif ($request eq 'X-Spam-Relays-Trusted') {
+  elsif ($request_lc eq "\LX-Spam-Relays-Trusted") {
     $result = $self->{relays_trusted_str};
   }
   # external relays list, as string
-  elsif ($request eq 'X-Spam-Relays-External') {
+  elsif ($request_lc eq "\LX-Spam-Relays-External") {
     $result = $self->{relays_external_str};
   }
   # internal relays list, as string
-  elsif ($request eq 'X-Spam-Relays-Internal') {
+  elsif ($request_lc eq "\LX-Spam-Relays-Internal") {
     $result = $self->{relays_internal_str};
   }
   # ToCc: the combined recipients list
-  elsif ($request eq 'ToCc') {
+  elsif ($request_lc eq "\LToCc") {
     $result = join("\n", $self->{msg}->get_header('To', $getraw));
     if ($result ne '') {
       chomp $result;
@@ -1724,20 +1728,8 @@ my $nonASCII    = '\x80-\xff';
 my $tbirdenddelimemail = $tbirdenddelim . '(\'' . $nonASCII;  # tbird ignores non-ASCII mail addresses for now, until RFC changes
 my $tbirdenddelimplusat = $tbirdenddelimemail . '@';
 
-# regexps for finding plain text non-scheme hostnames with valid TLDs.
-
-# the list from %VALID_TLDS in Util/RegistrarBoundaries.pm, as a
-# Regexp::List optimized regexp ;)  accurate as of 2010-0415
-my $tldsRE = qr/
-  (?=[a-wyz])
-  (?:a(?:e(?:ro)?|r(?:pa)?|s(?:ia)?|[cdfgilmnoqtuwxz])|b(?:iz?|[abdefghjmnorstwyz])
-    |c(?:at?|o(?:m|op)?|[cdfghiklmnruvxyz])|d[ejkmoz]|e(?:[cegrst]|d?u)|f[ijkmor]
-    |g(?:[adefghilmnpqrstuwy]|ov)|h[kmnrtu]|i(?:n(?:fo|t)?|[delmoqrst])
-    |j(?:o(?:bs)?|[emp])|k[eghimnprwyz]|l[abcikrstuvy]
-    |m(?:o(?:bi)?|u(?:seum)?|[acdeghkmnpqrstvwxyz]|i?l)|n(?:a(?:me)?|et?|[cfgilopruz])
-    |o(?:m|rg)|p(?:ro?|[aefghklnstwy])|r[eosuw]|s[abcdeghiklmnrtuvyz]
-    |t(?:r(?:avel)?|[cdfghjkmnoptvwz]|e?l)|u[agksyz]|v[aceginu]|w[fs]|ye|z[amw]|qa
-  )/ix;
+# valid TLDs
+my $tldsRE = $Mail::SpamAssassin::Util::RegistrarBoundaries::VALID_TLDS_RE;
 
 # knownscheme regexp looks for either a https?: or ftp: scheme, or www\d*\. or ftp\. prefix, i.e., likely to start a URL
 # schemeless regexp looks for a valid TLD at the end of what may be a FQDN, followed by optional ., optional :portnum, optional /rest_of_uri
@@ -2224,7 +2216,13 @@ data:
 
 Optional: the score to use for the rule hit.  If unspecified,
 the value from the C<Mail::SpamAssassin::Conf> object's C<{scores}>
-hash will be used.
+hash will be used (a configured score), and in its absence the
+C<defscore> option value.
+
+=item defscore => $num
+
+Optional: the score to use for the rule hit if neither the
+option C<score> is provided, nor a configured score value is provided.
 
 =item value => $num
 
@@ -2265,10 +2263,11 @@ sub got_hit {
 
   my $dynamic_score_provided;
   my $score = $params{score};
-  if (defined $score) {
+  if (defined $score) {  # overrides any configured scores
     $dynamic_score_provided = 1;
   } else {
     $score = $conf_ref->{scores}->{$rule};
+    $score = $params{defscore}  if !defined $score;
   }
 
   # adding a hit does nothing if we don't have a score -- we probably

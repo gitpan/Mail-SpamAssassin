@@ -861,8 +861,8 @@ sub MY::constants {
 
     # Store a nicer version string for later use.
     if (line_has_macro_def($line, 'VERSION')) {
-      get_macro('VERSION') =~ /^(\d)\.(\d\d\d)_?(\d\d\d)_(\d+)/;
-      set_macro('VERSION_COOL', join(".", $1*1, $2*1, $3*1) . "_$4");
+      get_macro('VERSION') =~ /^(\d)\.(\d\d\d)_?(\d\d\d)/;
+      set_macro('VERSION_COOL', join(".", $1*1, $2*1, $3*1));
       $line .= "\n" . macro_def('VERSION_COOL');
     }
 
