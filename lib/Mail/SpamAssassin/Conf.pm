@@ -1222,7 +1222,11 @@ but they may be in the future.
       unless (defined $value && $value !~ /^$/) {
 	return $MISSING_REQUIRED_VALUE;
       }
-      push(@{$self->{originating_ip_headers}}, split(/\s+/, $value));
+      foreach my $hfname (split(/\s+/, $value)) {
+        # avoid duplicates, consider header field names case-insensitive
+        push(@{$self->{originating_ip_headers}}, $hfname)
+          if !grep(lc($_) eq lc($hfname), @{$self->{originating_ip_headers}});
+      }
     }
   });
 
@@ -2965,7 +2969,7 @@ out the wanted username. Note that the filter expression is being used in a
 sprintf statement with the username as the only parameter, thus is can hold a
 single __USERNAME__ expression. This will be replaced with the username.
 
-Example: C<ldap://localhost:389/dc=koehntopp,dc=de?spamassassinconfig?uid=__USERNAME__>
+Example: C<ldap://localhost:389/dc=koehntopp,dc=de?saconfig?uid=__USERNAME__>
 
 =cut
 

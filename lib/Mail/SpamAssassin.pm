@@ -99,17 +99,16 @@ $VERSION = "3.003002";      # update after release (same format as perl $])
 # Used during the prerelease/release-candidate part of the official release
 # process. If you hacked up your SA, you should add a version_tag to your .cf
 # files; this variable should not be modified.
-#@EXTRA_VERSION = qw();
-@EXTRA_VERSION = qw(rc1);
+@EXTRA_VERSION = qw();
 
 @ISA = qw();
 
 # SUB_VERSION is now just <yyyy>-<mm>-<dd>
-$SUB_VERSION = (split(/\s+/,'$LastChangedDate: 2011-05-14 09:41:11 +0000 (Sat, 14 May 2011) $ updated by SVN'))[1];
+$SUB_VERSION = (split(/\s+/,'$LastChangedDate: 2011-06-06 23:57:17 +0000 (Mon, 06 Jun 2011) $ updated by SVN'))[1];
 
 if (defined $IS_DEVEL_BUILD && $IS_DEVEL_BUILD) {
   push(@EXTRA_VERSION,
-       ('r' . qw{$LastChangedRevision: 1102986 $ updated by SVN}[1]));
+       ('r' . qw{$LastChangedRevision: 1132835 $ updated by SVN}[1]));
 }
 
 sub Version {
