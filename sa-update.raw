@@ -17,8 +17,17 @@
 # limitations under the License.
 # </@LICENSE>
 
-my $VERSION = 'svn' . (split(/\s+/,
-	'$Id: sa-update.raw 917659 2010-03-01 19:24:41Z mmartinec $'))[2];
+use strict;
+use warnings;
+use re 'taint';
+
+my $VERSION = 'svnunknown';
+if ('$Id: sa-update.raw 1475932 2013-04-25 19:56:34Z mmartinec $' =~ ':') {
+  # Subversion keyword "$Id: sa-update.raw 1475932 2013-04-25 19:56:34Z mmartinec $" has been successfully expanded.
+  # Doesn't happen with automated launchpad builds:
+  # https://bugs.launchpad.net/launchpad/+bug/780916
+  $VERSION = 'svn' . (split(/\s+/, '$Id: sa-update.raw 1475932 2013-04-25 19:56:34Z mmartinec $'))[2];
+}
 
 my $PREFIX          = '@@PREFIX@@';             # substituted at 'make' time
 my $DEF_RULES_DIR   = '@@DEF_RULES_DIR@@';      # substituted at 'make' time
@@ -40,14 +49,12 @@ my %MACRO_VALUES = (
 
 # Standard perl modules
 use Errno qw(ENOENT EACCES);
+use IO::File qw(O_RDONLY O_WRONLY O_RDWR O_CREAT O_EXCL);
 use File::Spec;
 use File::Path;
 use Getopt::Long;
 use Pod::Usage;
 use Config;
-use strict;
-use warnings;
-use re 'taint';
 
 BEGIN {                          # see comments in "spamassassin.raw" for doco
   my @bin = File::Spec->splitpath($0);
@@ -76,22 +83,62 @@ BEGIN {                          # see comments in "spamassassin.raw" for doco
 
 # These are the non-standard required modules
 use Net::DNS;
-use LWP::UserAgent;
 use HTTP::Date qw(time2str);
 use Archive::Tar 1.23;
 use IO::Zlib 1.04;
 
+use vars qw($have_lwp $io_socket_module_name $have_inet4 $have_inet6);
+
 BEGIN {
+  # Deal with optional modules
+
   eval { require Digest::SHA; import Digest::SHA qw(sha1_hex); 1 }
-  or do { require Digest::SHA1; import Digest::SHA1 qw(sha1_hex) }
+  or do { require Digest::SHA1; import Digest::SHA1 qw(sha1_hex) };
+
+  $have_lwp = eval {
+    require LWP::UserAgent;
+  };
+
+  if (eval { require IO::Socket::IP }) {  # handles IPv6 and IPv4
+    $io_socket_module_name = 'IO::Socket::IP';
+ 
+  } elsif (eval { require IO::Socket::INET6 }) {  # handles IPv6 and IPv4
+    $io_socket_module_name = 'IO::Socket::INET6';
+
+  } elsif (eval { require IO::Socket::INET }) {  # IPv4 only
+    $io_socket_module_name = 'IO::Socket::INET';
+  }
+
+  $have_inet4 =  # can we create a PF_INET socket?
+    defined $io_socket_module_name && eval {  
+      my $sock =
+        $io_socket_module_name->new(LocalAddr => '0.0.0.0', Proto => 'tcp');
+      $sock->close or die "error closing socket: $!"  if $sock;
+      $sock ? 1 : undef;
+    };
+
+  $have_inet6 =  # can we create a PF_INET6 socket?
+    defined $io_socket_module_name &&
+    $io_socket_module_name ne 'IO::Socket::INET' &&
+    eval {
+      my $sock =
+        $io_socket_module_name->new(LocalAddr => '::', Proto => 'tcp');
+      $sock->close or die "error closing socket: $!"  if $sock;
+      $sock ? 1 : undef;
+    };
 }
 
 # These should already be available
 use Mail::SpamAssassin;
+use Mail::SpamAssassin::Util qw(untaint_var untaint_file_path
+                           proc_status_ok exit_status_str am_running_on_windows
+                           secure_tmpfile secure_tmpdir);
 
 # Make the main dbg() accessible in our package w/o an extra function
 *dbg=\&Mail::SpamAssassin::dbg;
 sub dbg;
+
+$| = 1;  # autoflushing STDOUT makes verbose output consistent with warnings
 
 # Clean up PATH appropriately
 Mail::SpamAssassin::Util::clean_path_in_taint_mode();
@@ -99,11 +146,6 @@ Mail::SpamAssassin::Util::clean_path_in_taint_mode();
 ##############################################################################
 
 # Default list of GPG keys allowed to sign update releases
-#
-# pub   1024D/265FA05B 2003-06-09
-#       Key fingerprint = 26C9 00A4 6DD4 0CD5 AD24  F6D7 DEE0 1987 265F A05B
-# uid                  SpamAssassin Signing Key <release@spamassassin.org>
-# sub   1024D/FC51569B 2003-08-21
 #
 # pub   4096R/5244EC45 2005-12-20
 #       Key fingerprint = 5E54 1DC9 59CB 8BAC 7C78  DFDC 4056 A61A 5244 EC45
@@ -114,7 +156,6 @@ Mail::SpamAssassin::Util::clean_path_in_taint_mode();
 # use the last 8 hex digits as a shorter keyid string.
 #
 my %valid_GPG = ( 
-  '26C900A46DD40CD5AD24F6D7DEE01987265FA05B' => 1,
   '0C2B1D7175B852C64B3CDC716C55397824F434CE' => 1,
   '5E541DC959CB8BAC7C78DFDC4056A61A5244EC45' => 1,
 );
@@ -127,9 +168,7 @@ my $IGNORE_MIRBY_OLDER_THAN = (24 * 60 * 60 * 7);       # 1 week
 
 ##############################################################################
 
-use constant MIRBY_DOWNLOADED => -1;
-
-my %opt = ();
+my %opt;
 @{$opt{'gpgkey'}} = ();
 @{$opt{'channel'}} = ();
 my $GPG_ENABLED = 1;
@@ -142,7 +181,7 @@ GetOptions(
   'debug|D:s'                           => \$opt{'debug'},
   'version|V'                           => \$opt{'version'},
   'help|h|?'                            => \$opt{'help'},
-  'verbose|v'                           => \$opt{'verbose'},
+  'verbose|v+'                          => \$opt{'verbose'},
   'checkonly'                           => \$opt{'checkonly'},
   'allowplugins'                        => \$opt{'allowplugins'},
   'refreshmirrors'                      => \$opt{'refreshmirrors'},
@@ -159,8 +198,12 @@ GetOptions(
   'updatedir=s'				=> \$opt{'updatedir'},
   'gpg!'				=> \$GPG_ENABLED,
 
+  '4'                                   => sub { $opt{'force_pf'} = 'inet' },
+  '6'                                   => sub { $opt{'force_pf'} = 'inet6' },
+
   # backward compatibility
   'usegpg'				=> \$GPG_ENABLED,
+
 ) or print_usage_and_exit();
 
 if ( defined $opt{'help'} ) {               
@@ -171,6 +214,14 @@ if ( defined $opt{'version'} ) {
   exit(0);
 }
 
+if ( $opt{'force_pf'} && $opt{'force_pf'} eq 'inet' && !$have_inet4 ) {
+  warn "Option -4 specified but support for the ".
+       "INET protocol family is not available.\n";
+}
+if ( $opt{'force_pf'} && $opt{'force_pf'} eq 'inet6' && !$have_inet6 ) {
+  warn "Option -6 specified but support for the ".
+       "INET6 protocol family is not available.\n";
+}
 
 # Figure out what version of SpamAssassin we're using, and also figure out the
 # reverse of it for the DNS query.  Handle x.yyyzzz as well as x.yz.
@@ -198,7 +249,7 @@ else {
 
 
 # Find the default site rule directory, also setup debugging and other M::SA bits
-my $SA = new Mail::SpamAssassin({
+my $SA = Mail::SpamAssassin->new({
   debug => $opt{'debug'},
   local_tests_only => 1,
   dont_copy_prefs => 1,
@@ -210,11 +261,20 @@ my $SA = new Mail::SpamAssassin({
 });
 
 if (defined $opt{'updatedir'}) {
-  $opt{'updatedir'} = Mail::SpamAssassin::Util::untaint_file_path($opt{'updatedir'});
+  $opt{'updatedir'} = untaint_file_path($opt{'updatedir'});
 }
 else {
   $opt{'updatedir'} = $SA->sed_path('__local_state_dir__/__version__');
 }
+
+
+# check only disabled gpg
+# https://issues.apache.org/SpamAssassin/show_bug.cgi?id=5854
+if ( defined $opt{'checkonly'}) {
+  $GPG_ENABLED=0;
+  dbg("gpg: Disabling gpg requirement due to checkonly flag.");
+}
+
 
 dbg("generic: sa-update version $VERSION");
 dbg("generic: using update directory: $opt{'updatedir'}");
@@ -230,7 +290,7 @@ $SA->finish();
 # we're not a setuid script, we trust them
 foreach my $optkey (keys %opt) {
   next if ref $opt{$optkey};
-  Mail::SpamAssassin::Util::untaint_var(\$opt{$optkey});
+  untaint_var(\$opt{$optkey});
 }
 
 ##############################################################################
@@ -252,9 +312,8 @@ if (@{$opt{'gpgkey'}}) {
 
 if (defined $opt{'gpgkeyfile'}) {
   $GPG_ENABLED = 1;
-  unless (open(GPG, $opt{'gpgkeyfile'})) {
-    die "Can't open ".$opt{'gpgkeyfile'}." for reading: $!\n";
-  }
+  open(GPG, $opt{'gpgkeyfile'})
+    or die "cannot open $opt{'gpgkeyfile'} for reading: $!\n";
 
   dbg("gpg: reading in gpgfile ".$opt{'gpgkeyfile'});
   while(my $key = <GPG>) {
@@ -263,7 +322,7 @@ if (defined $opt{'gpgkeyfile'}) {
     $key =~ s/#.*$//;   # remove comments
     $key =~ s/^\s+//;   # remove leading whitespace
     $key =~ s/\s+$//;   # remove tailing whitespace
-    next unless ($key); # skip empty lines
+    next if $key eq ''; # skip empty lines
 
     unless (is_valid_gpg_key_id($key)) {
       dbg("gpg: invalid key id $key");
@@ -273,7 +332,7 @@ if (defined $opt{'gpgkeyfile'}) {
     dbg("gpg: adding key id $key");
     $valid_GPG{$key} = 1;
   }
-  close(GPG);
+  close(GPG) or die "cannot close $opt{'gpgkeyfile'}: $!";
 }
 
 # At this point, we need to know where GPG is ...
@@ -295,7 +354,7 @@ if ($GPG_ENABLED || $opt{'import'}) {
     }
   }
   else {
-    die "error: gpg required but not found!\n";
+    die "error: gpg required but not found!  It is not recommended, but you can use \"sa-update\" with the --no-gpg to skip the verification. \n";
   }
 
   # GPG was found, and we've been asked to import a key only
@@ -327,9 +386,8 @@ if (defined $opt{'channel'} && scalar @{$opt{'channel'}} > 0) {
   @channels = @{$opt{'channel'}};
 }
 if (defined $opt{'channelfile'}) {
-  unless (open(CHAN, $opt{'channelfile'})) {
-    die "Can't open ".$opt{'channelfile'}." for reading: $!\n";
-  }
+  open(CHAN, $opt{'channelfile'})
+    or die "cannot open $opt{'channelfile'} for reading: $!\n";
 
   dbg("channel: reading in channelfile ".$opt{'channelfile'});
   @channels = ();
@@ -339,20 +397,20 @@ if (defined $opt{'channelfile'}) {
     $chan =~ s/#.*$//;   # remove comments
     $chan =~ s/^\s+//;   # remove leading whitespace
     $chan =~ s/\s+$//;   # remove tailing whitespace
-    next unless ($chan); # skip empty lines
+    next if $chan eq ''; # skip empty lines
 
     $chan = lc $chan;
     dbg("channel: adding $chan");
     push(@channels, $chan);
   }
-  close(CHAN);
+  close(CHAN) or die "cannot close $opt{'channelfile'}: $!";
 }
 
 # untaint the channel listing
 for(my $ind = 0; $ind < @channels; $ind++) {
   local($1); # bug 5061: prevent random taint flagging of $1
   if ($channels[$ind] =~ /^([a-zA-Z0-9._-]+)$/) {
-    Mail::SpamAssassin::Util::untaint_var(\$channels[$ind]);
+    untaint_var(\$channels[$ind]);
   }
   else {
     dbg("channel: skipping invalid channel: $channels[$ind]");
@@ -370,22 +428,21 @@ if ($opt{'install'}) {
 
 } else {
   $res = Net::DNS::Resolver->new();
-
-  $ua = LWP::UserAgent->new();
-  $ua->agent("sa-update/$VERSION/$SAVersion");
-  $ua->timeout(60);      # a good long timeout; 10 is too short for Coral!
-  $ua->env_proxy;
+  $res->force_v4(1)  if $have_inet4 &&
+                        $opt{'force_pf'} && $opt{'force_pf'} eq 'inet';
 }
 
 # Generate a temporary file to put channel content in for later use ...
-my ($content_file, $tfh) = Mail::SpamAssassin::Util::secure_tmpfile();
-if ( !defined $content_file ) {
-  die "fatal: could not create temporary channel content file: $!\n";
-}
-close($tfh);
+my ($content_file, $tfh) = secure_tmpfile();
+$tfh
+  or die "fatal: could not create temporary channel content file: $!\n";
+close $tfh
+  or die "cannot close temporary channel content file $content_file: $!";
+undef $tfh;
 
-# by default, exit code is 1, to indicate no updates occurred
-my $exit = 1;
+my $lint_failures = 0;
+my $channel_failures = 0;
+my $channel_successes = 0;
 
 # Use a temporary directory for all update channels
 my $UPDTmp;
@@ -396,6 +453,7 @@ my $site_pre_linted = 0;
 # Go ahead and loop through all of the channels
 foreach my $channel (@channels) {
   dbg("channel: attempting channel $channel");
+  my %preserve_files;
 
   # Convert the channel to a nice-for-filesystem version
   my $nicechannel = $channel;
@@ -405,7 +463,14 @@ foreach my $channel (@channels) {
   my $CFFile = "$UPDDir.cf";
   my $PREFile = "$UPDDir.pre";
 
-  dbg("channel: update directory $UPDDir");
+  if (-d $UPDDir) {
+    dbg("channel: using existing directory $UPDDir");
+  } else {
+    # create the dir, if it doesn't exist
+    dbg("channel: creating directory $UPDDir");
+    mkpath([$UPDDir], 0, 0777)
+      or die "channel: cannot create channel directory $UPDDir: $!\n";
+  }
   dbg("channel: channel cf file $CFFile");
   dbg("channel: channel pre file $PREFile");
 
@@ -415,33 +480,52 @@ foreach my $channel (@channels) {
     dbg("channel: installing from file $instfile");
   }
 
-  my($mirby, $mirby_time);
+  my($mirby, $mirby_force_reload, $mirby_file_is_ok);
   my $mirby_path = File::Spec->catfile($UPDDir, "MIRRORED.BY");
 
   # try to read metadata from channel.cf file
   my $currentV = -1;
-  if (open(CF, $CFFile)) {
+  if (!open(CF, $CFFile)) {
+    dbg("channel: error opening file %s: %s",
+        $CFFile, $!)  unless $! == ENOENT;
+  } else {
     while(<CF>) {
       local($1,$2);
       last unless /^# UPDATE\s+([A-Za-z]+)\s+(\S+)/;
       my($type, $value) = (lc $1,$2);
 
-      dbg("channel: metadata $type = $value");
+      dbg("channel: metadata $type = $value, from file $CFFile");
 
       if ($type eq 'version') {
         $value =~ /^(\d+)/;
         $currentV = $1;
       }
     }
-    close(CF);
+    close(CF) or die "cannot close $CFFile: $!";
   }
 
+  # obtain a version number which should be installed
   my $newV;
-  if (!$instfile) {
+  if ($instfile) {
+    # the /.*/ ensures we use the 3-digit string nearest to the end of string,
+    # otherwise we might pick up something from the middle of the directory path
+    local($1);
+    if ($instfile !~ /(?:.*\D|^)(\d{3,})/) {        
+      # this is a requirement
+      die "channel: $channel: --install file $instfile does not contain a 3-digit version number!\n";
+    }
+    $newV = $1;
+
+    if ( defined $opt{'checkonly'} ) {            
+      dbg("channel: $channel: --install and --checkonly, claiming update available");
+      next;
+    }
+
+  } else {  # not an install file, get the latest version number from network
     # Setup the channel version DNS query
     my $DNSQ = "$RevSAVersion.$channel";
 
-    my $dnsV = join(' ', do_txt_query($DNSQ));
+    my $dnsV = join(' ', do_dns_query($DNSQ));
     local($1);
     if (defined $dnsV && $dnsV =~ /^(\d+)/) {
       $newV = $1 if (!defined $newV || $1 > $newV);
@@ -451,7 +535,7 @@ foreach my $channel (@channels) {
     # Not getting a response isn't a failure, there may just not be any updates
     # for this SA version yet.
     if (!defined $newV) {
-      my @mirs = do_txt_query("mirrors.$channel");
+      my @mirs = do_dns_query("mirrors.$channel");
       if (defined shift @mirs) {
         dbg("channel: no updates available, skipping channel");
       } else {
@@ -463,47 +547,34 @@ foreach my $channel (@channels) {
     # If this channel hasn't been installed before, or it's out of date,
     # keep going.  Otherwise, skip it.
     if ($currentV >= $newV) {
-      dbg("channel: current version is $currentV, new version is $newV, skipping channel");
+      dbg("channel: current version is $currentV, new version is $newV, ".
+          "skipping channel");
       next;
     }
 
-    print "Update available for channel $channel\n"  if $opt{'verbose'};
+    print "Update available for channel $channel: $currentV -> $newV\n"  if $opt{'verbose'};
 
     # If we are only checking for update availability, exit now
     if ( defined $opt{'checkonly'} ) {            
-      dbg("channel: $channel: update available, not downloading in checkonly mode");
-      $exit = 0;
+      dbg("channel: $channel: update available, not downloading ".
+          "in checkonly mode");
       next;
     }
 
-  } else {  # $instfile
-    # the /.*/ ensures we use the 3-digit string nearest to the end of string, otherwise
-    # we might pick up something from the middle of the directory path
-    local($1);
-    if ($instfile !~ /(?:.*\D|^)(\d{3,})/) {        
-      # this is a requirement
-      die "channel: $channel: --install file $instfile does not contain a 3-digit version number!\n";
-    }
-    $newV = $1;
-
-#   print "Update available for channel $channel\n"  if $opt{'verbose'};
-
-    if ( defined $opt{'checkonly'} ) {            
-      dbg("channel: $channel: --install and --checkonly, claiming update available");
-      $exit = 0;
-      next;
-    }
   }
 
-  # we need a directory we control that we can use to aviod loading any rules
+  # we need a directory we control that we can use to avoid loading any rules
   # when we lint the site pre files, we might as well use the channel temp dir
   dbg("channel: preparing temp directory for new channel");
   if (!$UPDTmp) {
-    $UPDTmp = Mail::SpamAssassin::Util::secure_tmpdir();
-    dbg("generic: update tmp directory $UPDTmp");
+    $UPDTmp = secure_tmpdir();
+    dbg("channel: created tmp directory $UPDTmp");
   }
-  elsif (!clean_update_dir($UPDTmp)) {
-    die "channel: attempt to clean update dir failed, aborting";
+  else {
+    dbg("channel: using existing tmp directory $UPDTmp");
+    if (!clean_update_dir($UPDTmp)) {
+      die "channel: attempt to clean update temp dir failed, aborting";
+    }
   }
 
   # lint the site pre files (that will be used when lint checking the channel)
@@ -513,7 +584,7 @@ foreach my $channel (@channels) {
     unless (lint_check_dir(File::Spec->catfile($UPDTmp, "doesnotexist"))) {
       dbg("generic: lint of site pre files failed, cannot continue"); 
       print "Lint of site pre files failed, cannot continue\n"  if $opt{'verbose'};
-      $exit = 2;
+      $lint_failures++;
       last;
     }
     dbg("generic: lint check of site pre files succeeded, continuing with channel updates");
@@ -523,55 +594,105 @@ foreach my $channel (@channels) {
   my $content;
   my $SHA1;
   my $GPG;
-  if (!$instfile) {
-    # Read in the MIRRORED.BY file if it exists
-    if (open(MIRBY, $mirby_path)) {
-      $mirby_time = (stat $mirby_path)[9];
 
-      if ($opt{'refreshmirrors'}) {
-        dbg("channel: --refreshmirrors used, forcing refresh");
-        $mirby = $mirby_time = undef;
-      } elsif (time - $mirby_time > $IGNORE_MIRBY_OLDER_THAN) {
-        dbg("channel: MIRRORED.BY file is too old, forcing refresh");
-        $mirby = $mirby_time = undef;
+  if ($instfile) {
+    dbg("channel: using --install files $instfile\{,.sha1,.asc\}");
+    $content = read_install_file($instfile);
+    $SHA1 = read_install_file($instfile.".sha1");
+    $GPG = read_install_file($instfile.".asc") if $GPG_ENABLED;
+
+  } else {  # not an install file, obtain fresh rules from network
+    dbg("channel: protocol family available: %s%s",
+        join(',', $have_inet4 ? 'inet'  : (),
+                  $have_inet6 ? 'inet6' : ()),
+        $opt{'force_pf'} ? '; force '.$opt{'force_pf'} : '' );
+
+    # test if the MIRRORED.BY file for this channel exists,
+    # is nonempty, and is reasonably fresh
+
+    my(@mirr_stat_list) = stat($mirby_path);
+    if (!@mirr_stat_list) {
+      if ($! == ENOENT) {
+        dbg("channel: no mirror file %s, will fetch it", $mirby_path);
+      } else {
+        # protection error, misconfiguration, file system error, ...
+        warn "error: error accessing mirrors file $mirby_path: $!\n";
+        channel_failed("channel: error accessing mirrors file $mirby_path: $!");
+        next;
       }
-      else {
-        local $/ = undef;
-        $mirby = <MIRBY>;
-      }
-      close(MIRBY);
+    } elsif (-z _) {
+      dbg("channel: file %s is empty, refreshing mirrors file", $mirby_path);
+      $mirby_force_reload = 1;
+    } elsif ($opt{'refreshmirrors'}) {
+      dbg("channel: --refreshmirrors used, forcing mirrors file refresh ".
+          "on channel $channel");
+      $mirby_force_reload = 1;
+    } elsif (time - $mirr_stat_list[9] > $IGNORE_MIRBY_OLDER_THAN) {
+      dbg("channel: file %s is too old, refreshing mirrors file", $mirby_path);
+      $mirby_file_is_ok = 1;  # mirrors file seems fine, but is old
+      $mirby_force_reload = 1;
+    } else {
+      # mirror file $mirby_path exists, is nonempty, and is reasonably fresh
+      $mirby_file_is_ok = 1;
     }
 
-    if (!defined $mirby) {
-      # We don't currently have the list of mirrors, so go grab it.
-      dbg("channel: no MIRRORED.BY file available");
-      my @mirrors = do_txt_query("mirrors.$channel");
+    if (!$mirby_file_is_ok || $mirby_force_reload) {
+      # fetch a fresh list of mirrors
+      dbg("channel: DNS lookup on mirrors.$channel");
+      my @mirrors = do_dns_query("mirrors.$channel");
       unless (@mirrors) {
         warn "error: no mirror data available for channel $channel\n";
-        channel_failed("channel: MIRRORED.BY file location was not in DNS");
+        channel_failed("channel: MIRRORED.BY file URL was not in DNS");
         next;
       }
       foreach my $mirror (@mirrors) {
-        $mirby = http_get($mirror);
-        unless ($mirby) {
-          dbg("channel: no mirror data available for channel $channel from $mirror");
-          next;
-        }
-        last;
-      }
-      unless ($mirby) {
-        warn "error: no mirror data available for channel $channel\n";
-        channel_failed("channel: MIRRORED.BY contents were missing");
-        next;
-      }
-      $mirby_time = MIRBY_DOWNLOADED;
+        my $result_fname;
+        ($mirby, $result_fname) =
+          http_get($mirror, $UPDDir, $mirby_path, $mirby_force_reload);
 
-      dbg("channel: MIRRORED.BY file retrieved");
+        if ($mirby) {
+          dbg("channel: MIRRORED.BY file for channel %s retrieved", $channel);
+          $mirby_file_is_ok = 1;
+          $mirby_force_reload = 0;
+          $preserve_files{$mirby_path} = 1;
+
+          # set file creation time to now, otherwise we'll keep refreshing
+          # (N.B.: curl preserves time of a downloaded file)
+          my $now = time;
+          utime($now, $now, $mirby_path)
+            or warn "error: error setting creation time of $mirby_path: $!\n";
+
+          last;
+        }
+        dbg("channel: no mirror data available for channel %s from %s",
+            $channel, $mirror);
+      }
+      if ($mirby_force_reload) {  # not refreshed?
+        warn "error: unable to refresh mirrors file for channel $channel, ".
+             "using old file\n";
+      }
     }
 
-    # Read in the list of mirrors
-    dbg("channel: reading MIRRORED.BY file");
-    my %mirrors = ();
+    if (!$mirby_file_is_ok) {
+      warn "error: no mirror data available for channel $channel\n";
+      channel_failed("channel: MIRRORED.BY file contents were missing");
+      next;
+    } elsif ($mirby) {
+      # file contents already in memory, no need to read it from a file
+    } elsif (!open(MIRBY, $mirby_path)) {
+      warn "error: error opening mirrors file $mirby_path: $!\n";
+      channel_failed("channel: error opening mirrors file $mirby_path: $!");
+      next;
+    } else {
+      dbg("channel: reading MIRRORED.BY file %s", $mirby_path);
+      { local $/ = undef; $mirby = <MIRBY> }
+      close(MIRBY) or die "cannot close $mirby_path: $!";
+      $preserve_files{$mirby_path} = 1;
+    }
+
+    # Parse the list of mirrors
+    dbg("channel: parsing MIRRORED.BY file for channel %s", $channel);
+    my %mirrors;
     my @mirrors = split(/^/, $mirby);
     while(my $mirror = shift @mirrors) {
       chomp $mirror;
@@ -579,20 +700,19 @@ foreach my $channel (@channels) {
       $mirror =~ s/#.*$//;   # remove comments
       $mirror =~ s/^\s+//;   # remove leading whitespace
       $mirror =~ s/\s+$//;   # remove tailing whitespace
-      next unless ($mirror); # skip empty lines
+      next if $mirror eq ''; # skip empty lines
 
-      # We only support HTTP right now
-      if ($mirror !~ m@^http://@i) {
+      # We only support HTTP (and HTTPS) right now
+      if ($mirror !~ m{^https?://}i) {
         dbg("channel: skipping non-HTTP mirror: $mirror");
         next;
       }
 
-      my @data;
-
       dbg("channel: found mirror $mirror");
 
+      my @data;
       ($mirror,@data) = split(/\s+/, $mirror);
-      $mirror =~ s@/+$@@; # http://example.com/updates/ -> .../updates
+      $mirror =~ s{/+\z}{};  # http://example.com/updates/ -> .../updates
       $mirrors{$mirror}->{weight} = 1;
       foreach (@data) {
         my($k,$v) = split(/=/, $_, 2);
@@ -600,7 +720,7 @@ foreach my $channel (@channels) {
       }
     }
 
-    unless (keys %mirrors) {
+    unless (%mirrors) {
       warn "error: no mirrors available for channel $channel\n";
       channel_failed("channel: no mirrors available");
       next;
@@ -613,6 +733,7 @@ foreach my $channel (@channels) {
     # if the archive get fails, choose another mirror,
     # if the get for the sha1 or gpg signature files, the channel fails
     while (my $mirror = choose_mirror(\%mirrors)) {
+      my $result_fname;
       # Grab the data hash for this mirror, then remove it from the list
       my $mirror_info = $mirrors{$mirror};
       delete $mirrors{$mirror};
@@ -620,37 +741,28 @@ foreach my $channel (@channels) {
       dbg("channel: selected mirror $mirror");
 
       # Actual archive file
-      $content = http_get("$mirror/$newV.tar.gz");
+      ($content, $result_fname) =
+        http_get("$mirror/$newV.tar.gz", $UPDDir);
       next unless $content;
+      $preserve_files{$result_fname} = 1;
 
       # SHA1 of the archive file
-      $SHA1 = http_get("$mirror/$newV.tar.gz.sha1");
+      ($SHA1, $result_fname) =
+        http_get("$mirror/$newV.tar.gz.sha1", $UPDDir);
       last unless $SHA1;
+      $preserve_files{$result_fname} = 1;
 
       # if GPG is enabled, the GPG detached signature of the archive file
       if ($GPG_ENABLED) {
-        $GPG = http_get("$mirror/$newV.tar.gz.asc");
+        ($GPG, $result_fname) =
+          http_get("$mirror/$newV.tar.gz.asc", $UPDDir);
         last unless $GPG;
-      }
-
-      # try to update our list of mirrors.
-      # a failure here doesn't cause channel failure.
-      if ($mirby_time != MIRBY_DOWNLOADED) {
-        my $mirby_tmp = http_get("$mirror/MIRRORED.BY", $mirby_time);
-        if ($mirby_tmp) {
-          $mirby = $mirby_tmp;
-          $mirby_time = MIRBY_DOWNLOADED;
-        }
+        $preserve_files{$result_fname} = 1;
       }
 
       last;
     }
 
-  } else {      # $instfile
-    dbg("channel: using --install files $instfile\{,.sha1,.asc\}");
-    $content = read_install_file($instfile);
-    $SHA1 = read_install_file($instfile.".sha1");
-    $GPG = read_install_file($instfile.".asc") if $GPG_ENABLED;
   }
 
   unless ($content && $SHA1 && (!$GPG_ENABLED || $GPG)) {
@@ -674,11 +786,15 @@ foreach my $channel (@channels) {
   }
 
   # Write the content out to a temp file for GPG/Archive::Tar interaction
-  dbg("channel: populating temp content file");
-  open(TMP, ">$content_file") || die "fatal: can't write to content temp file $content_file: $!\n";
-  binmode TMP;
-  print TMP $content;
-  close(TMP);
+  dbg("channel: populating temp content file %s", $content_file);
+  open(TMP, ">$content_file")
+    or die "fatal: cannot create content temp file $content_file: $!\n";
+  binmode TMP
+    or die "fatal: cannot set binmode on content temp file $content_file: $!\n";
+  print TMP $content
+    or die "fatal: cannot write to content temp file $content_file: $!\n";
+  close TMP
+    or die "fatal: cannot close content temp file $content_file: $!\n";
 
   # to sign  : gpg -bas file
   # to verify: gpg --verify --batch --no-tty --status-fd=1 -q --logger-fd=1 file.asc file
@@ -688,13 +804,16 @@ foreach my $channel (@channels) {
   if ($GPG) {
     dbg("gpg: populating temp signature file");
     my $sig_file;
-    ($sig_file, $tfh) = Mail::SpamAssassin::Util::secure_tmpfile();
-    if ( !defined $sig_file ) {
-      die "fatal: couldn't create temp file for GPG signature: $!\n";
-    }
-    binmode $tfh;
-    print $tfh $GPG;
-    close($tfh);
+    ($sig_file, $tfh) = secure_tmpfile();
+    $tfh
+      or die "fatal: couldn't create temp file for GPG signature: $!\n";
+    binmode $tfh
+      or die "fatal: cannot set binmode on temp file for GPG signature: $!\n";
+    print $tfh $GPG
+      or die "fatal: cannot write temp file for GPG signature: $!\n";
+    close $tfh
+      or die "fatal: cannot close temp file for GPG signature: $!\n";
+    undef $tfh;
 
     dbg("gpg: calling gpg");
 
@@ -706,7 +825,7 @@ foreach my $channel (@channels) {
         "--no-tty --status-fd=1 -q --logger-fd=1";
 
     unless (open(CMD, "$CMD $sig_file $content_file|")) {
-      unlink $sig_file || warn "error: can't unlink $sig_file: $!\n";
+      unlink $sig_file or warn "error: cannot unlink $sig_file: $!\n";
       die "fatal: couldn't execute $GPGPath: $!\n";
     }
 
@@ -738,8 +857,12 @@ foreach my $channel (@channels) {
       $signer = $key if (length $key > length $signer);
     }
 
-    close(CMD);
-    unlink $sig_file || warn "Can't unlink $sig_file: $!\n";
+    my $errno = 0;  close CMD or $errno = $!;
+    proc_status_ok($?,$errno)
+      or warn("gpg: process '$GPGPath' finished: ".
+              exit_status_str($?,$errno)."\n");
+
+    unlink $sig_file or warn "cannot unlink $sig_file: $!\n";
 
     if ($signer) {
       my $keyid = substr $signer, -8;
@@ -817,22 +940,20 @@ ENDOFVALIDATIONERR
 
           # clean out the previous channel files, if they exist
           if (-f $PREFile && ! unlink $PREFile ) {
-            warn("channel: attempt to rm channel pre file failed, attempting to continue anyway");
+            warn("channel: attempt to rm channel pre file failed, attempting to continue anyway: $!");
           }
           if (-f $CFFile && ! unlink $CFFile ) {
-            warn("channel: attempt to rm channel cf file failed, attempting to continue anyway");
+            warn("channel: attempt to rm channel cf file failed, attempting to continue anyway: $!");
           }
-          if (!clean_update_dir($UPDDir)) {
+          if (!clean_update_dir($UPDDir, \%preserve_files)) {
             warn("channel: attempt to rm channel directory failed, attempting to continue anyway");
           }
         }
         else {
           # create the dir, if it doesn't exist
           dbg("channel: creating $UPDDir");
-          if (!mkpath([$UPDDir], 0, 0777)) {
-            warn "channel: can't create channel directory $UPDDir: $!\n";
-	    return 0;
-          }
+          mkpath([$UPDDir], 0, 0777)
+            or die "channel: cannot create channel directory $UPDDir: $!\n";
 
           # ok, that test worked.  it's now likely that the .cf's will
           # similarly be ok to rename, too.   Too late to stop from here on
@@ -847,8 +968,10 @@ ENDOFVALIDATIONERR
 
         # bug 4941: try to get rid of the empty directories to avoid leaving SA
         # with no rules.
-        rmdir $UPDDir;
-        rmdir $opt{'updatedir'};
+        rmdir $UPDDir
+          or dbg("channel: error removing dir %s: %s", $UPDDir, $!);
+        rmdir $opt{'updatedir'}
+          or dbg("channel: error removing dir %s: %s", $opt{'updatedir'}, $!);
       },
     },
 
@@ -868,7 +991,7 @@ ENDOFVALIDATIONERR
 
         # bug 4941: try to get rid of the empty directories to avoid leaving SA
         # with no rules.
-        if (!clean_update_dir($UPDDir)) {
+        if (!clean_update_dir($UPDDir, \%preserve_files)) {
           warn "channel: attempt to clean up failed extraction also failed!\n";
         }
       },
@@ -881,15 +1004,15 @@ ENDOFVALIDATIONERR
           return 1;
         }
 
-        # Write out the mirby file, not fatal if it doesn't work
-        dbg("channel: creating MIRRORED.BY file");
-        if (open(MBY, ">$mirby_path")) {
-          print MBY $mirby;
-          close(MBY);
-        }
-        else {
-          warn "error: can't write new MIRRORED.BY file: $!\n";
-        }
+      # The $mirby_path file should have already been created by http_get
+      # and preserved past clean_update_dir()
+      #
+      # # Write out the mirby file, not fatal if it doesn't work
+      # dbg("channel: creating MIRRORED.BY file");
+      # open(MBY, ">$mirby_path")
+      #   or die "cannot create a new MIRRORED.BY file: $!\n";
+      # print MBY $mirby or die "error writing to $mirby_path: $!";
+      # close(MBY) or die "cannot close $mirby_path: $!";
 
 	return 1;
       },
@@ -902,8 +1025,8 @@ ENDOFVALIDATIONERR
       'try' => sub {
         # the last step is to create the .cf and .pre files to include the
         # channel files
-        my @CF = ();
-        my @PRE = ();
+        my @CF;
+        my @PRE;
 
         dbg("channel: creating update cf/pre files");
 
@@ -912,14 +1035,13 @@ ENDOFVALIDATIONERR
 
 
         # Find all of the cf and pre files
-        unless (opendir(DIR, $UPDDir)) {
-          die "fatal: can't access $UPDDir: $!\n";
-        }
+        opendir(DIR, $UPDDir)
+          or die "fatal: cannot access $UPDDir: $!\n";
 
-        my @files = ();
+        my @files;
         while(my $file = readdir(DIR)) {
 	  next if $file eq '.' || $file eq '..';
-          Mail::SpamAssassin::Util::untaint_var(\$file);
+          untaint_var(\$file);
           my $path = File::Spec->catfile($UPDDir, $file);
           next unless (-f $path);   # shouldn't ever happen
           push(@files, $file);
@@ -939,7 +1061,7 @@ ENDOFVALIDATIONERR
 
           dbg("channel: adding $file");
         }
-        closedir(DIR);
+        closedir(DIR) or die "cannot close directory $UPDDir: $!";
 
         # Finally, write out the files to include the update files
         if (!write_channel_file($PREFile, \@PRE)) {
@@ -951,7 +1073,10 @@ ENDOFVALIDATIONERR
           return 0;
         }
 
-        $exit = 0;            # "exit 0" means an update occurred
+        # if all went fine, remove the .tar.gz, .sha1 and .asc files
+        delete_files( grep(!m{/\QMIRRORED.BY\E\z}, keys %preserve_files) );
+
+        $channel_successes++;
         dbg("channel: update complete");
 
 	return 1;
@@ -964,14 +1089,22 @@ ENDOFVALIDATIONERR
   );
 
   my $error;
+  my $eval_stat;
   for(my $elem = 0; $elem <= $#totry; $elem++) {
-    if (!&{$totry[$elem]->{'try'}}()) {
+    my $success;
+    eval {
+      $success = &{$totry[$elem]->{'try'}}();  1;
+    } or do {
+      $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
+    };
+    if (!$success) {
       $error = $elem;
+      $eval_stat = "step $elem unsuccessful"  if !defined $eval_stat;
       last;
     }
   }
   if (defined $error) {
-    dbg("channel: channel failed, attempting rollback");
+    dbg("channel: channel failed, attempting rollback: %s", $eval_stat);
     for(my $elem = $error; $elem >= 0; $elem--) {
       &{$totry[$elem]->{'rollback'}}();
     }
@@ -995,17 +1128,33 @@ foreach ( $content_file, $UPDTmp ) {
   next if $stat_errn == ENOENT;
 
   if ($stat_errn != 0) {
-    warn "error: can't access $_: $!\n";
+    warn "error: cannot access $_: $!\n";
   }
   elsif (-d _) {
-    rmdir $_ || warn "error: can't remove directory $_: $!\n";
+    rmdir $_ or warn "error: cannot remove directory $_: $!\n";
   }
   elsif (-f _) {
-    unlink $_ || warn "error: can't remove file $_: $!\n";
+    unlink $_ or warn "error: cannot remove file $_: $!\n";
   }
   else {
     warn "error: '$_' isn't a file nor a directory, skipping\n";
   }
+}
+
+my $exit;
+if ($lint_failures) {
+  # 2: lint of site pre files failed, cannot continue
+  $exit = 2;
+}
+elsif (!$channel_failures) {
+  # 0: updates found and successfully applied
+  # 1: no updates were needed (success with nothing to do)
+  $exit = $channel_successes ? 0 : 1;
+}
+else {  # at least some failures
+  # 3: some failures, but at least one channel suceeded
+  # 4 or higher means all channels failed
+  $exit = $channel_successes ? 3 : 4;
 }
 
 dbg("diag: updates complete, exiting with code $exit");
@@ -1019,6 +1168,8 @@ if ($opt{'verbose'}) {
     }
   } elsif ($exit == 1) {
     print "Update finished, no fresh updates were available\n";
+  } elsif ($exit == 3) {
+    print "Update of at least one channel finished, other updates failed\n";
   } else {
     print "Update failed, exiting with code $exit\n";
   }
@@ -1031,8 +1182,9 @@ exit $exit;
 sub read_install_file {
   my ($file) = @_;
   open (IN, "<$file") or die "cannot open $file\n";
-  my $all = join('', <IN>);
-  close IN;
+  my $all;
+  { local $/ = undef; $all = <IN> }
+  close IN or die "cannot close $file: $!";
   return $all;
 }
 
@@ -1044,7 +1196,7 @@ sub write_channel_file {
   return 1 unless @{$contents};
 
   if (open(FILE, ">$filename")) {
-    print FILE @{$contents};
+    print FILE @{$contents} or die "cannot write to $filename: $!";
     close FILE or return 0;
     return 1;
   }
@@ -1057,11 +1209,7 @@ sub write_channel_file {
 sub channel_failed {
   my $reason = shift;
   warn("$reason, channel failed\n");
-  if ($exit > 4) {
-    $exit++;
-  } else {
-    $exit = 4;      # 4 or higher means channel failed
-  }
+  $channel_failures++;
 }
 
 ##############################################################################
@@ -1071,10 +1219,10 @@ sub taint_safe_archive_extract {
   my $input = shift;
 
   my $tfh = IO::Zlib->new($input, "rb");
-  die "fatal: couldn't read content tmpfile $content_file: $!\n" unless $tfh;
+  $tfh or die "fatal: couldn't read content tmpfile $content_file: $!\n";
 
   my $tar = Archive::Tar->new($tfh);
-  die "fatal: couldn't create Archive::Tar object!\n" unless $tar;
+  $tar or die "fatal: couldn't open tar archive!\n";
 
   # stupid Archive::Tar is not natively taint-safe! duh.
   # return $tar->extract();
@@ -1091,7 +1239,10 @@ sub taint_safe_archive_extract {
     $outfname = File::Spec->catfile($todir, $outfname);
 
     dbg "extracting: $outfname";
-    if (open OUT, ">".$outfname) {
+    if (!open OUT, ">".$outfname) {
+      warn "error: failed to create $outfname: $!";
+      goto failed;
+    } else {
       my $content = $tar->get_content($file);
 
       if ($outfname =~ /\.(?:pre|cf)$/) {
@@ -1107,14 +1258,10 @@ sub taint_safe_archive_extract {
         }
       }
 
-      print OUT $content;
-      if (!close OUT) {
-        warn "error: write failed to $outfname: $!";
-        goto failed;
-      }
-    } else {
-      warn "error: failed to open $outfname for write: $!";
-      goto failed;
+      print OUT $content
+        or do { warn "error writing to $outfname: $!"; goto failed };
+      close OUT
+        or do { warn "error: write failed to $outfname: $!"; goto failed }
     }
   }
 
@@ -1126,23 +1273,48 @@ failed:
 
 ##############################################################################
 
-# Do a generic TXT query
-sub do_txt_query {
-  my($query) = shift;
+# Do a generic DNS query
+sub do_dns_query {
+  my($query, $rr_type) = @_;
+  $rr_type = 'TXT'  if !defined $rr_type;
 
-  my $RR = $res->query($query, 'TXT');
+  my $RR = $res->query($query, $rr_type);
   my @result;
 
+  # NOTE:  $rr->rdatastr returns the result encoded in a DNS zone file
+  # format, i.e. enclosed in double quotes if a result contains whitespace
+  # (or other funny characters), and may use \DDD encoding or \X quoting as
+  # per RFC 1035.  Using $rr->txtdata instead avoids this unnecessary encoding
+  # step and a need for decoding by a caller, returning an unmodified string.
+  # Caveat: in case of multiple RDATA <character-string> fields contained
+  # in a resource record (TXT, SPF, HINFO), starting with Net::DNS 0.69
+  # the $rr->txtdata in a list context returns these strings as a list.
+  # The $rr->txtdata in a scalar context always returns a single string
+  # with <character-string> fields joined by a single space character as
+  # a separator.  The $rr->txtdata in Net::DNS 0.68 and older returned
+  # such joined space-separated string even in a list context.
+  #
+  # From Net::DNS maintainers (Willem Toorop, NLnet Labs):
+  #   I encourage you to use txtdata for getting the values of
+  # <version>.updates.spamassassin.org and mirros.updates.spamassassin.org.
+  # As those records have only a single rdata field, txtdata would return
+  # the same value since Net::DNS 0.34.
+  #
   if ($RR) {
     foreach my $rr ($RR->answer) {
-      my $text = $rr->rdatastr;
-      local($1);
-      $text =~ /^"(.*)"$/;
-      push @result, $1;
+      next if !$rr;  # no answer records, only rcode
+      next if $rr->type ne $rr_type;
+      # scalar context!
+      my $text = $rr->UNIVERSAL::can('txtdata') ? $rr->txtdata : $rr->rdatastr;
+      push(@result,$text)  if defined $text && $text ne '';
     }
+    printf("DNS %s query: %s -> %s\n", $rr_type, $query, join(", ",@result))
+      if $opt{'verbose'} && $opt{'verbose'} > 1;
   }
   else {
     dbg("dns: query failed: $query => " . $res->errorstring);
+    printf("DNS %s query %s failed: %s\n", $rr_type, $query, $res->errorstring)
+      if $opt{'verbose'} && $opt{'verbose'} > 1;
   }
 
   return @result;
@@ -1150,10 +1322,56 @@ sub do_txt_query {
 
 ##############################################################################
 
+sub init_lwp {
+  if ($have_inet6 &&
+      (!$opt{'force_pf'} || $opt{'force_pf'} eq 'inet6') &&
+      ($io_socket_module_name eq 'IO::Socket::IP' ||
+       $io_socket_module_name eq 'IO::Socket::INET6') )
+  {
+    # LWP module has no support for IPv6.  Use hotpatching,
+    # copying IO::Socket::IP or IO::Socket::INET6 to IO::Socket::INET.
+    # 'Borrowed' from Net::INET6Glue::INET_is_INET6 :
+
+    printf("http: (lwp) hotpatching IO::Socket::INET by module %s\n",
+           $io_socket_module_name) if $opt{'verbose'};
+    my $io_socket_module_hash_name = $io_socket_module_name . '::';
+    my $io_socket_module_path = $io_socket_module_name . '.pm';
+    $io_socket_module_path =~ s{::}{/}g;
+    $INC{'IO/Socket/INET.pm'} = $INC{$io_socket_module_path};
+    no strict 'refs';
+    no warnings 'redefine';
+    for ( keys %{$io_socket_module_hash_name} ) {
+      ref(my $v = $io_socket_module_hash_name->{$_}) and next;
+      *{ 'IO::Socket::INET::'.$_ } =
+        \&{ $io_socket_module_hash_name . $_ } if *{$v}{CODE};
+    }
+  }
+  my $ua = LWP::UserAgent->new();
+  $ua->agent("sa-update/$VERSION/$SAVersion");
+  $ua->timeout(60);      # a good long timeout; 10 is too short for Coral!
+  $ua->env_proxy;
+
+# if ($opt{'force_pf'}) {
+#   # No longer needed and can be harmful as we don't know which address family
+#   # will be picked by the IO::Socket::* module in case of multihomed servers.
+#   # The IO::Socket::IP should choose the right protocol family automatically.
+#   if ($have_inet4 && $opt{'force_pf'} eq 'inet') {
+#     $ua->local_address('0.0.0.0');
+#   } elsif ($have_inet6 && $opt{'force_pf'} eq 'inet6') {
+#     $ua->local_address('::');
+#   }
+# }
+
+  return $ua;
+}
+
 # Do a GET request via HTTP for a certain URL
 # Use the optional time_t value to do an IMS GET
-sub http_get {
-  my($url, $ims) = @_;
+sub http_get_lwp {
+  my($url, $ims, $dir) = @_;
+
+  $have_lwp  or die "http_get_lwp: module LWP not available";
+  $ua = init_lwp()  if !$ua;
 
   my $response;
   my $text;
@@ -1174,6 +1392,11 @@ sub http_get {
 
     $response = $ua->request($request);
 
+    printf("http: (lwp) %sGET %s, %s\n",
+           defined $ims ? 'IMS ' : '',  $url,
+           !$response ? '(no response)' : $response->status_line )
+           if $opt{'verbose'};
+
     if ($response->is_success) {
       return $response->content;
     }
@@ -1182,6 +1405,10 @@ sub http_get {
     # TODO: should use a special return type for "not modified" here
     # instead of overloading the failure return type
     if ($ims && $response->status_line =~ /^3/) {
+      return;
+    }
+    if ($response->status_line =~ /^[45]/) {
+      # client error or server error, makes no sense retrying
       return;
     }
 
@@ -1200,6 +1427,127 @@ sub http_get {
   warn "http: GET $url request failed: " .
                     $response->status_line.": ".$text."\n";
   return;
+}
+
+# Do a GET request via HTTP for a given URL using an external program,
+# or fall back to LWP if no external downloading program is available.
+# Use the optional time_t value to do an IMS GET
+sub http_get {
+  my($url, $dir, $suggested_out_fname, $force_reload) = @_;
+  my $content;
+
+  my $out_fname;
+  if (defined $suggested_out_fname) {
+    $out_fname = $suggested_out_fname;
+  } else {
+    local $1;
+    $url =~ m{([^/]*)\z}s;
+    my $url_fname = $1;
+    $out_fname = File::Spec->catfile($dir, $url_fname);
+  }
+  $out_fname = untaint_var($out_fname);
+
+  # construct a short filename, relative to a current working directory $dir
+  my $out_fname_short = $out_fname;
+  $out_fname_short =~ s{^\Q$dir\E/*}{};
+
+  printf("fetching %s\n", $url)  if $opt{'verbose'} && $opt{'verbose'} > 1;
+  dbg("http: url: %s", $url);
+
+  my $out_fname_exists = -e $out_fname;
+  dbg("http: downloading to: %s, %s", $out_fname,
+      !$out_fname_exists ? 'new' : $force_reload ? 'replace' : 'update');
+
+  my($ext_prog, $cmd, @args);
+  foreach my $try_prog ('curl', 'wget', 'fetch') {
+    $cmd = Mail::SpamAssassin::Util::find_executable_in_env_path($try_prog);
+    if (defined $cmd && $cmd ne '') { $ext_prog = $try_prog; last }
+  }
+
+  if (defined $ext_prog && $ext_prog eq 'curl') {
+    push(@args, qw(-s -L -O --remote-time -g --max-redirs 2
+                   --connect-timeout 30 --max-time 300
+                   --fail -o), $out_fname_short);
+    push(@args, '-z', $out_fname_short)  if $out_fname_exists && !$force_reload;
+  } elsif (defined $ext_prog && $ext_prog eq 'wget') {
+    push(@args, qw(-q -N --max-redirect=2 --tries=3
+                   --dns-timeout=20 --connect-timeout=30 --read-timeout=300
+                   -o), $out_fname_short);
+    #*** ???  if $out_fname_exists && !$force_reload;
+  } elsif (defined $ext_prog && $ext_prog eq 'fetch') {
+    push(@args, qw(-q -n -a -w 20 -m -o), $out_fname_short);
+    push(@args, '-m')  if $out_fname_exists && !$force_reload;
+  } elsif ($have_lwp) {
+    dbg("http: no external tool for download, fallback to using LWP");
+    my $ims;
+    if ($out_fname_exists && !$force_reload) {
+      my @out_fname_stat = stat($out_fname);
+      my $size = $out_fname_stat[7];
+      $ims = $out_fname_stat[9]  if $size;  # only if nonempty
+    }
+    my $out_fh = IO::File->new;
+    $out_fh->open($out_fname,'>',0640)
+      or die "Cannot create a file $out_fname: $!";
+    binmode($out_fh) or die "Can't set binmode on $out_fname: $!";
+    $content = http_get_lwp($url, $ims, $dir);
+    if (!defined $content) {
+      dbg("http: (lwp) no content downloaded from %s", $url);
+    } else {
+      $out_fh->print($content) or die "Error writing to $out_fname: $!";
+    }
+    $out_fh->close or die "Error closing file $out_fname: $!";
+    return ($content, $out_fname);
+  } else {
+    die "http: no downloading tool available";
+  }
+
+  # only reached if invoking an external program is needed (not lwp)
+  if ($opt{'force_pf'}) {
+    if    ($opt{'force_pf'} eq 'inet')  { push(@args, '-4') }
+    elsif ($opt{'force_pf'} eq 'inet6') { push(@args, '-6') }
+  }
+  push(@args, '--', untaint_var($url));
+  dbg("http: %s", join(' ',$cmd,@args));
+
+  # avoid a system() call, use fork/exec to make sure we avoid invoking a shell
+  my $pid;
+  eval {
+    # use eval, the fork() sometimes signals an error
+    # instead of returning a failure status
+    $pid = fork(); 1;
+  } or do { $@ = "errno=$!" if $@ eq ''; chomp $@; die "http fork: $@" };
+  defined $pid or die "spawning $cmd failed: $!";
+  if (!$pid) {  # child
+    chdir($dir) or die "Can't chdir to $dir: $!";
+    $cmd = untaint_file_path($cmd);
+    exec {$cmd} ($cmd,@args);
+    die "failed to exec $cmd: $!";
+  }
+
+  # parent
+  waitpid($pid,0);
+  my $child_stat = $?;
+  dbg("http: process [%s], exit status: %s", $pid, $child_stat);
+
+  if (!$opt{'verbose'}) {
+    # silent
+  } elsif ($child_stat == 0) {
+    printf("http: (%s) GET %s, success\n", $ext_prog, $url);
+  } else {
+    printf("http: (%s) GET %s, FAILED, status: %s\n",
+           $ext_prog, $url, $child_stat);
+  }
+
+  if ($child_stat == 0) {
+    my $inp = IO::File->new;
+    $inp->open($out_fname,'<') or die "Cannot open file $out_fname: $!";
+    my($nbytes,$buff); $content = '';
+    while (($nbytes=$inp->read($buff,16384)) > 0) { $content .= $buff }
+    defined $nbytes or die "Error reading from file $out_fname: $!";
+    $inp->close or die "Error closing $out_fname: $!";
+  }
+
+  return ($content, $out_fname);
 }
 
 ##############################################################################
@@ -1279,7 +1627,7 @@ sub interpolate_gpghomedir {
   my $gpghome = '';
   if ($opt{'gpghomedir'}) {
     $gpghome = $opt{'gpghomedir'};
-    if (Mail::SpamAssassin::Util::am_running_on_windows()) {
+    if (am_running_on_windows()) {
       # windows is single-quote-phobic; bug 4958 cmt 7
       $gpghome =~ s/\"/\\\"/gs;
       $gpghome = "--homedir=\"$gpghome\"";
@@ -1319,7 +1667,10 @@ sub import_gpg_key {
     }
   }
 
-  close(CMD);
+  my $errno = 0;  close CMD or $errno = $!;
+  proc_status_ok($?,$errno)
+    or warn("gpg: process '$CMD' finished: ".exit_status_str($?,$errno)."\n");
+
   return ($? >> 8);
 }
 
@@ -1335,7 +1686,8 @@ sub import_default_keyring {
   dbg("gpg: importing default keyring to ".$opt{gpghomedir});
   unless (-d $opt{gpghomedir}) {
     # use 0700 to avoid "unsafe permissions" warning
-    mkpath([$opt{'gpghomedir'}], 0, 0700) or die "cannot mkpath $opt{gpghomedir}: $!";
+    mkpath([$opt{'gpghomedir'}], 0, 0700)
+      or die "cannot mkpath $opt{gpghomedir}: $!";
   } 
   import_gpg_key($defkey);
 }
@@ -1350,28 +1702,42 @@ sub is_valid_gpg_key_id {
 ##############################################################################
 
 sub clean_update_dir {
-  my $dir = shift;
+  my($dir, $preserve_files_ref) = @_;
 
+  dbg("generic: cleaning directory %s", $dir);
   unless (opendir(DIR, $dir)) {
-    warn "error: can't opendir $dir: $!\n";
+    warn "error: cannot opendir $dir: $!\n";
     dbg("generic: attempt to opendir ($dir) failed");
     return;
   }
   while(my $file = readdir(DIR)) {
     next if $file eq '.' || $file eq '..';
-    Mail::SpamAssassin::Util::untaint_var(\$file);
 
     my $path = File::Spec->catfile($dir, $file);
-    next unless (-f $path);
+    if ($preserve_files_ref && $preserve_files_ref->{$path}) {
+      dbg("generic: preserving $file");
+      next;
+    }
+    untaint_var(\$path);
+    next unless -f $path;
 
     dbg("generic: unlinking $file");
     if (!unlink $path) {
-      warn "error: can't remove file $path: $!\n";
-      closedir(DIR);
+      warn "error: cannot remove file $path: $!\n";
+      closedir(DIR) or die "cannot close directory $dir: $!";
       return;
     }
   }
-  closedir(DIR);
+  closedir(DIR) or die "cannot close directory $dir: $!";
+  return 1;
+}
+
+sub delete_files {
+  my(@filenames) = @_;
+  foreach my $path (@filenames) {
+    dbg("generic: unlinking $path");
+    unlink $path  or warn "error: cannot unlink file $path: $!\n";
+  }
   return 1;
 }
 
@@ -1441,9 +1807,12 @@ Options:
                           (default: @@LOCAL_STATE_DIR@@/@@VERSION@@)
   --refreshmirrors        Force the MIRRORED.BY file to be updated
   -D, --debug [area=n,...]  Print debugging messages
-  -v, --verbose           Be more verbose, like print updated channel names
+  -v, --verbose           Be verbose, like print updated channel names;
+                          For more verbosity specify multiple times
   -V, --version           Print version
   -h, --help              Print usage message
+  -4                      Force using the inet protocol (IPv4), not inet6
+  -6                      Force using the inet6 protocol (IPv6), not inet
 
 =head1 DESCRIPTION
 
@@ -1462,6 +1831,14 @@ C<sa-update> is typically used in something like the following manner:
 
 This works because C<sa-update> only returns an exit status of C<0> if
 it has successfully downloaded and installed an updated ruleset.
+
+The program sa-update uses the underlying operating system umask for the
+updated rule files it installs.  You may wish to run sa-update from a script
+that sets the umask prior to calling sa-update.  For example:
+
+	#!/bin/sh
+	umask 022
+	sa-update
 
 =head1 OPTIONS
 
@@ -1534,10 +1911,11 @@ be from one of these "release trusted" keys or else verification fails.  This
 prevents third parties from manipulating the files on a mirror, for instance,
 and signing with their own key.
 
-By default, sa-update trusts key id C<265FA05B>, which is the standard
-SpamAssassin release key.  Use this option to trust additional keys.  See the
-B<--import> option for how to add keys to sa-update's keyring.  For sa-update
-to use a key it must be in sa-update's keyring and trusted.
+By default, sa-update trusts key ids C<24F434CE> and C<5244EC45>, which are
+the standard SpamAssassin release key and its sub-key.  Use this option to
+trust additional keys.  See the B<--import> option for how to add keys to
+sa-update's keyring.  For sa-update to use a key it must be in sa-update's
+keyring and trusted.
 
 For multiple keys, use the option multiple times.  i.e.:
 
@@ -1625,8 +2003,11 @@ An exit code of C<2> means that at least one update is available but that a
 lint check of the site pre files failed.  The site pre files must pass a lint
 check before any updates are attempted.
 
+An exit code of C<3> means that at least one update succeeded while 
+other channels failed.  If using sa-compile, you should proceed with it.
+
 An exit code of C<4> or higher, indicates that errors occurred while
-attempting to download and extract updates.
+attempting to download and extract updates, and no channels were updated.
 
 =head1 SEE ALSO
 

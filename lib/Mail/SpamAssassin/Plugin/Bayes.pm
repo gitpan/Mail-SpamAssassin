@@ -249,6 +249,8 @@ sub finish {
   %{$self} = ();
 }
 
+###########################################################################
+
 # Plugin hook.
 # Return this implementation object, for callers that need to know
 # it.  TODO: callers shouldn't *need* to know it! 
@@ -258,6 +260,31 @@ sub learner_get_implementation { return shift; }
 
 ###########################################################################
 
+# Plugin hook.
+# Called in the parent process shortly before forking off child processes.
+sub prefork_init {
+  my ($self) = @_;
+
+  if ($self->{store} && $self->{store}->UNIVERSAL::can('prefork_init')) {
+    $self->{store}->prefork_init;
+  }
+}
+
+###########################################################################
+
+# Plugin hook.
+# Called in a child process shortly after being spawned.
+sub spamd_child_init {
+  my ($self) = @_;
+
+  if ($self->{store} && $self->{store}->UNIVERSAL::can('spamd_child_init')) {
+    $self->{store}->spamd_child_init;
+  }
+}
+
+###########################################################################
+
+# Plugin hook.
 sub check_bayes {
   my ($self, $pms, $fulltext, $min, $max) = @_;
 
@@ -349,6 +376,7 @@ sub learn_message {
 
   eval {
     local $SIG{'__DIE__'};	# do not run user die() traps in here
+    my $timer = $self->{main}->time_method("b_learn");
 
     my $ok;
     if ($self->{main}->{learn_to_journal}) {
@@ -386,25 +414,25 @@ sub _learn_trapped {
     @msgid = $self->get_msgid($msg);
   }
 
-  foreach $msgid ( @msgid ) {
-    my $seen = $self->{store}->seen_get ($msgid);
+  foreach my $msgid_t ( @msgid ) {
+    my $seen = $self->{store}->seen_get ($msgid_t);
 
     if (defined ($seen)) {
       if (($seen eq 's' && $isspam) || ($seen eq 'h' && !$isspam)) {
-        dbg("bayes: $msgid already learnt correctly, not learning twice");
+        dbg("bayes: $msgid_t already learnt correctly, not learning twice");
         return 0;
       } elsif ($seen !~ /^[hs]$/) {
-        warn("bayes: db_seen corrupt: value='$seen' for $msgid, ignored");
+        warn("bayes: db_seen corrupt: value='$seen' for $msgid_t, ignored");
       } else {
         # bug 3704: If the message was already learned, don't try learning it again.
         # this prevents, for instance, manually learning as spam, then autolearning
         # as ham, or visa versa.
         if ($self->{main}->{learn_no_relearn}) {
-	  dbg("bayes: $msgid already learnt as opposite, not re-learning");
+	  dbg("bayes: $msgid_t already learnt as opposite, not re-learning");
 	  return 0;
 	}
 
-        dbg("bayes: $msgid already learnt as opposite, forgetting first");
+        dbg("bayes: $msgid_t already learnt as opposite, forgetting first");
 
         # kluge so that forget() won't untie the db on us ...
         my $orig = $self->{main}->{learn_caller_will_untie};
@@ -431,12 +459,6 @@ sub _learn_trapped {
   # Now that we're sure we haven't seen this message before ...
   $msgid = $msgid[0];
 
-  if ($isspam) {
-    $self->{store}->nspam_nham_change (1, 0);
-  } else {
-    $self->{store}->nspam_nham_change (0, 1);
-  }
-
   my $msgatime = $msg->receive_date();
 
   # If the message atime comes back as being more than 1 day in the
@@ -447,10 +469,14 @@ sub _learn_trapped {
 
   my $tokens = $self->tokenize($msg, $msgdata);
 
-  if ($isspam) {
-    $self->{store}->multi_tok_count_change(1, 0, $tokens, $msgatime);
-  } else {
-    $self->{store}->multi_tok_count_change(0, 1, $tokens, $msgatime);
+  { my $timer = $self->{main}->time_method('b_count_change');
+    if ($isspam) {
+      $self->{store}->nspam_nham_change(1, 0);
+      $self->{store}->multi_tok_count_change(1, 0, $tokens, $msgatime);
+    } else {
+      $self->{store}->nspam_nham_change(0, 1);
+      $self->{store}->multi_tok_count_change(0, 1, $tokens, $msgatime);
+    }
   }
 
   $self->{store}->seen_put ($msgid, ($isspam ? 's' : 'h'));
@@ -484,6 +510,7 @@ sub forget_message {
   # synchronously
   eval {
     local $SIG{'__DIE__'};	# do not run user die() traps in here
+    my $timer = $self->{main}->time_method("b_learn");
 
     my $ok;
     if ($self->{main}->{learn_to_journal}) {
@@ -666,19 +693,27 @@ sub scan {
 
   dbg("bayes: corpus size: nspam = $ns, nham = $nn");
 
-  my $msgdata = $self->_get_msgdata_from_permsgstatus ($permsgstatus);
+  my $msgtokens;
+  { my $timer = $self->{main}->time_method('b_tokenize');
+    my $msgdata = $self->_get_msgdata_from_permsgstatus ($permsgstatus);
+    $msgtokens = $self->tokenize($msg, $msgdata);
+  }
 
-  my $msgtokens = $self->tokenize($msg, $msgdata);
+  my $tokensdata;
+  { my $timer = $self->{main}->time_method('b_tok_get_all');
+    $tokensdata = $self->{store}->tok_get_all(keys %{$msgtokens});
+  }
 
-  my $tokensdata = $self->{store}->tok_get_all(keys %{$msgtokens});
+  my $timer_compute_prob = $self->{main}->time_method('b_comp_prob');
+
+  my $probabilities_ref =
+    $self->_compute_prob_for_all_tokens($tokensdata, $ns, $nn);
 
   my %pw;
-
   foreach my $tokendata (@{$tokensdata}) {
-    my ($token, $tok_spam, $tok_ham, $atime) = @{$tokendata};
-    my $prob = $self->_compute_prob_for_token($token, $ns, $nn, $tok_spam, $tok_ham);
+    my $prob = shift(@$probabilities_ref);
     next unless defined $prob;
-
+    my ($token, $tok_spam, $tok_ham, $atime) = @{$tokendata};
     $pw{$token} = {
       prob => $prob,
       spam_count => $tok_spam,
@@ -687,15 +722,17 @@ sub scan {
     };
   }
 
+  my @pw_keys = keys %pw;
+
   # If none of the tokens were found in the DB, we're going to skip
   # this message...
-  if (!keys %pw) {
+  if (!@pw_keys) {
     dbg("bayes: cannot use bayes on this message; none of the tokens were found in the database");
     goto skip;
   }
 
   my $tcount_total = keys %{$msgtokens};
-  my $tcount_learned = keys %pw;
+  my $tcount_learned = scalar @pw_keys;
 
   # Figure out the message receive time (used as atime below)
   # If the message atime comes back as being in the future, something's
@@ -705,50 +742,47 @@ sub scan {
   my $now = time;
   $msgatime = $now if ( $msgatime > $now );
 
-  # now take the $count most significant tokens and calculate probs using
-  # Robinson's formula.
-  my $count = N_SIGNIFICANT_TOKENS;
-  my @sorted;
-
   my @touch_tokens;
   my $tinfo_spammy = $permsgstatus->{bayes_token_info_spammy} = [];
   my $tinfo_hammy = $permsgstatus->{bayes_token_info_hammy} = [];
 
-  my %tok_strength = map { $_ => (abs($pw{$_}->{prob} - 0.5)) } keys %pw;
+  my %tok_strength = map( ($_, abs($pw{$_}->{prob} - 0.5)), @pw_keys);
   my $log_each_token = (would_log('dbg', 'bayes') > 1);
 
-  foreach my $tok (sort {
-              $tok_strength{$b} <=> $tok_strength{$a}
-            } keys %pw)
-  {
-    if ($count-- < 0) { last; }
-    next if ($tok_strength{$tok} <
-                $Mail::SpamAssassin::Bayes::Combine::MIN_PROB_STRENGTH);
+  # now take the most significant tokens and calculate probs using
+  # Robinson's formula.
 
-    my $pw = $pw{$tok}->{prob};
+  @pw_keys = sort { $tok_strength{$b} <=> $tok_strength{$a} } @pw_keys;
+
+  if (@pw_keys > N_SIGNIFICANT_TOKENS) { $#pw_keys = N_SIGNIFICANT_TOKENS - 1 }
+
+  my @sorted;
+  foreach my $tok (@pw_keys) {
+    next if $tok_strength{$tok} <
+                $Mail::SpamAssassin::Bayes::Combine::MIN_PROB_STRENGTH;
+
+    my $pw_tok = $pw{$tok};
+    my $pw_prob = $pw_tok->{prob};
 
     # What's more expensive, scanning headers for HAMMYTOKENS and
     # SPAMMYTOKENS tags that aren't there or collecting data that
     # won't be used?  Just collecting the data is certainly simpler.
     #
     my $raw_token = $msgtokens->{$tok} || "(unknown)";
-    my $s = $pw{$tok}->{spam_count};
-    my $n = $pw{$tok}->{ham_count};
-    my $a = $pw{$tok}->{atime};
+    my $s = $pw_tok->{spam_count};
+    my $n = $pw_tok->{ham_count};
+    my $a = $pw_tok->{atime};
 
-    if ($pw < 0.5) {
-      push @$tinfo_hammy,  [$raw_token,$pw,$s,$n,$a];
-    } else {
-      push @$tinfo_spammy, [$raw_token,$pw,$s,$n,$a];
-    }
+    push( @{ $pw_prob < 0.5 ? $tinfo_hammy : $tinfo_spammy },
+          [$raw_token, $pw_prob, $s, $n, $a] );
 
-    push (@sorted, $pw);
+    push(@sorted, $pw_prob);
 
     # update the atime on this token, it proved useful
     push(@touch_tokens, $tok);
 
     if ($log_each_token) {
-      dbg("bayes: token '$raw_token' => $pw");
+      dbg("bayes: token '$raw_token' => $pw_prob");
     }
   }
 
@@ -760,6 +794,7 @@ sub scan {
   }
 
   $score = Mail::SpamAssassin::Bayes::Combine::combine($ns, $nn, \@sorted);
+  undef $timer_compute_prob;  # end a timing section
 
   # Couldn't come up with a probability?
   goto skip unless defined $score;
@@ -769,7 +804,12 @@ sub scan {
   # no need to call tok_touch_all unless there were significant
   # tokens and a score was returned
   # we don't really care about the return value here
-  $self->{store}->tok_touch_all(\@touch_tokens, $msgatime);
+
+  { my $timer = $self->{main}->time_method('b_tok_touch_all');
+    $self->{store}->tok_touch_all(\@touch_tokens, $msgatime);
+  }
+
+  my $timer_finish = $self->{main}->time_method('b_finish');
 
   $permsgstatus->{bayes_nspam} = $ns;
   $permsgstatus->{bayes_nham} = $nn;
@@ -788,6 +828,11 @@ sub scan {
 skip:
   if (!defined $score) {
     dbg("bayes: not scoring message, returning undef");
+  }
+
+  undef $timer_compute_prob;  # end a timing section if still running
+  if (!defined $timer_finish) {
+    $timer_finish = $self->{main}->time_method('b_finish');
   }
 
   # Take any opportunistic actions we can take
@@ -820,27 +865,30 @@ skip:
   $permsgstatus->set_tag ('BAYESTC', $tcount_total);
 
   $permsgstatus->set_tag ('HAMMYTOKENS', sub {
+              my $pms = shift;
               $self->bayes_report_make_list
-                ($permsgstatus, $permsgstatus->{bayes_token_info_hammy}, shift);
+                ($pms, $pms->{bayes_token_info_hammy}, shift);
             });
 
   $permsgstatus->set_tag ('SPAMMYTOKENS', sub {
+              my $pms = shift;
               $self->bayes_report_make_list
-                ($permsgstatus, $permsgstatus->{bayes_token_info_spammy}, shift);
+                ($pms, $pms->{bayes_token_info_spammy}, shift);
             });
 
   $permsgstatus->set_tag ('TOKENSUMMARY', sub {
-              if ( defined $permsgstatus->{tag_data}{BAYESTC} )
+              my $pms = shift;
+              if ( defined $pms->{tag_data}{BAYESTC} )
                 {
-                  my $tcount_neutral = $permsgstatus->{tag_data}{BAYESTCLEARNED}
-                                    - $permsgstatus->{tag_data}{BAYESTCSPAMMY}
-                                    - $permsgstatus->{tag_data}{BAYESTCHAMMY};
-                  my $tcount_new = $permsgstatus->{tag_data}{BAYESTC}
-                                    - $permsgstatus->{tag_data}{BAYESTCLEARNED};
+                  my $tcount_neutral = $pms->{tag_data}{BAYESTCLEARNED}
+                                     - $pms->{tag_data}{BAYESTCSPAMMY}
+                                     - $pms->{tag_data}{BAYESTCHAMMY};
+                  my $tcount_new = $pms->{tag_data}{BAYESTC}
+                                 - $pms->{tag_data}{BAYESTCLEARNED};
                   "Tokens: new, $tcount_new; "
-                    ."hammy, $permsgstatus->{tag_data}{BAYESTCHAMMY}; "
+                    ."hammy, $pms->{tag_data}{BAYESTCHAMMY}; "
                     ."neutral, $tcount_neutral; "
-                    ."spammy, $permsgstatus->{tag_data}{BAYESTCSPAMMY}."
+                    ."spammy, $pms->{tag_data}{BAYESTCSPAMMY}."
                 } else {
                   "Bayes not run.";
                 }
@@ -930,24 +978,32 @@ sub get_msgid {
     push(@msgid, $msgid);
   }
 
-  # Use sha1_hex(Date:, last received: and top N bytes of body)
+  # Modified 2012-01-17  per bug 5185 to remove last received from msg_id calculation
+
+  # Use sha1_hex(Date: and top N bytes of body)
   # where N is MIN(1024 bytes, 1/2 of body length)
   #
   my $date = $msg->get_header("Date");
   $date = "None" if (!defined $date || $date eq ''); # No Date?
 
-  my @rcvd = $msg->get_header("Received");
-  my $rcvd = $rcvd[$#rcvd];
-  $rcvd = "None" if (!defined $rcvd || $rcvd eq ''); # No Received?
+  #Removed per bug 5185
+  #my @rcvd = $msg->get_header("Received");
+  #my $rcvd = $rcvd[$#rcvd];
+  #$rcvd = "None" if (!defined $rcvd || $rcvd eq ''); # No Received?
 
   # Make a copy since pristine_body is a reference ...
   my $body = join('', $msg->get_pristine_body());
+
   if (length($body) > 64) { # Small Body?
     my $keep = ( length $body > 2048 ? 1024 : int(length($body) / 2) );
     substr($body, $keep) = '';
   }
 
-  unshift(@msgid, sha1_hex($date."\000".$rcvd."\000".$body).'@sa_generated');
+  #Stripping all CR and LF so that testing midstream from MTA and post delivery don't 
+  #generate different id's simply because of LF<->CR<->CRLF changes.
+  $body =~ s/[\r\n]//g;
+
+  unshift(@msgid, sha1_hex($date."\000".$body).'@sa_generated');
 
   return wantarray ? @msgid : $msgid[0];
 }
@@ -1352,6 +1408,63 @@ sub _tokenize_mail_addrs {
 
 ###########################################################################
 
+# compute the probability that a token is spammish for each token
+sub _compute_prob_for_all_tokens {
+  my ($self, $tokensdata, $ns, $nn) = @_;
+  my @probabilities;
+
+  return if !$ns || !$nn;
+
+  my $threshold = 1;  # ignore low-freq tokens below this s+n threshold
+  if (!USE_ROBINSON_FX_EQUATION_FOR_LOW_FREQS) {
+    $threshold = 10;
+  }
+  if (!$self->{use_hapaxes}) {
+    $threshold = 2;
+  }
+
+  foreach my $tokendata (@{$tokensdata}) {
+    my $s = $tokendata->[1];  # spam count
+    my $n = $tokendata->[2];  # ham count
+    my $prob;
+
+    no warnings 'uninitialized';  # treat undef as zero in addition
+    if ($s + $n >= $threshold) {
+      # ignoring low-freq tokens, also covers the (!$s && !$n) case
+
+      # my $ratios = $s / $ns;
+      # my $ration = $n / $nn;
+      # $prob = $ratios / ($ration + $ratios);
+      #
+      $prob = ($s * $nn) / ($n * $ns + $s * $nn);  # same thing, faster
+
+      if (USE_ROBINSON_FX_EQUATION_FOR_LOW_FREQS) {
+        # use Robinson's f(x) equation for low-n tokens, instead of just
+        # ignoring them
+        my $robn = $s + $n;
+        $prob =
+          ($Mail::SpamAssassin::Bayes::Combine::FW_S_DOT_X + ($robn * $prob))
+                               /
+          ($Mail::SpamAssassin::Bayes::Combine::FW_S_CONSTANT + $robn);
+      }
+    }
+
+    # 'log_raw_counts' is used to log the raw data for the Bayes equations
+    # during a mass-check, allowing the S and X constants to be optimized
+    # quickly without requiring re-tokenization of the messages for each
+    # attempt. There's really no need for this code to be uncommented in
+    # normal use, however.   It has never been publicly documented, so
+    # commenting it out is fine. ;)
+    #
+    ## if ($self->{log_raw_counts}) {
+    ## $self->{raw_counts} .= " s=$s,n=$n ";
+    ## }
+
+    push(@probabilities, $prob);
+  }
+  return \@probabilities;
+}
+
 # compute the probability that a token is spammish
 sub _compute_prob_for_token {
   my ($self, $token, $ns, $nn, $s, $n) = @_;
@@ -1359,53 +1472,14 @@ sub _compute_prob_for_token {
   # we allow the caller to give us the token information, just
   # to save a potentially expensive lookup
   if (!defined($s) || !defined($n)) {
-    ($s, $n, undef) = $self->{store}->tok_get ($token);
+    ($s, $n, undef) = $self->{store}->tok_get($token);
   }
+  return if !$s && !$n;
 
-  return if ($s == 0 && $n == 0);
+  my $probabilities_ref =
+    $self->_compute_prob_for_all_tokens([ [$token, $s, $n, 0] ], $ns, $nn);
 
-  if (!USE_ROBINSON_FX_EQUATION_FOR_LOW_FREQS) {
-    return if ($s + $n < 10);      # ignore low-freq tokens
-  }
-
-  if (!$self->{use_hapaxes}) {
-    return if ($s + $n < 2);
-  }
-
-  return if ( $ns == 0 || $nn == 0 );
-
-  my $ratios = ($s / $ns);
-  my $ration = ($n / $nn);
-
-  my $prob;
-
-  if ($ratios == 0 && $ration == 0) {
-    warn "bayes: oops? ratios == ration == 0";
-    return;
-  } else {
-    $prob = ($ratios) / ($ration + $ratios);
-  }
-
-  if (USE_ROBINSON_FX_EQUATION_FOR_LOW_FREQS) {
-    # use Robinson's f(x) equation for low-n tokens, instead of just
-    # ignoring them
-    my $robn = $s+$n;
-    $prob = ($Mail::SpamAssassin::Bayes::Combine::FW_S_DOT_X + ($robn * $prob))
-                             /
-            ($Mail::SpamAssassin::Bayes::Combine::FW_S_CONSTANT + $robn);
-  }
-
-  # 'log_raw_counts' is used to log the raw data for the Bayes equations during
-  # a mass-check, allowing the S and X constants to be optimized quickly
-  # without requiring re-tokenization of the messages for each attempt. There's
-  # really no need for this code to be uncommented in normal use, however.   It
-  # has never been publicly documented, so commenting it out is fine. ;)
-
-  ## if ($self->{log_raw_counts}) {
-  ## $self->{raw_counts} .= " s=$s,n=$n ";
-  ## }
-
-  return $prob;
+  return $probabilities_ref->[0];
 }
 
 ###########################################################################

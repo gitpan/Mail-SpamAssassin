@@ -76,7 +76,7 @@ sub new {
 
   if (!$self->{bayes}->{conf}->{bayes_sql_dsn}) {
     dbg("bayes: invalid config, must set bayes_sql_dsn config variable\n");
-    return undef;
+    return;
   }
 
   $self->{_dsn} = $self->{bayes}->{conf}->{bayes_sql_dsn};
@@ -129,6 +129,7 @@ sub tie_db_readonly {
   }
 
   my $main = $self->{bayes}->{main};
+  my $timer_tie_ro = $main->time_method('b_tie_ro');
 
   $self->read_db_configs();
 
@@ -176,6 +177,7 @@ sub tie_db_writable {
   }
 
   my $main = $self->{bayes}->{main};
+  my $timer_tie_rw = $main->time_method('b_tie_rw');
 
   $self->read_db_configs();
 
@@ -260,7 +262,7 @@ sub calculate_expire_delta {
 
     unless ($rc) {
       dbg("bayes: calculate_expire_delta: SQL error: ".$self->{_dbh}->errstr());
-      return undef;
+      return;
     }
 
     my ($count) = $sth->fetchrow_array();
@@ -437,7 +439,7 @@ found.
 sub seen_get {
   my ($self, $msgid) = @_;
 
-  return undef unless (defined($self->{_dbh}));
+  return unless defined($self->{_dbh});
  
   my $sql = "SELECT flag FROM bayes_seen
               WHERE id = ?
@@ -447,14 +449,14 @@ sub seen_get {
 
   unless (defined($sth)) {
     dbg("bayes: seen_get: SQL Error: ".$self->{_dbh}->errstr());
-    return undef;
+    return;
   }
 
   my $rc = $sth->execute($self->{_userid}, $msgid);
   
   unless ($rc) {
     dbg("bayes: seen_get: SQL error: ".$self->{_dbh}->errstr());
-    return undef;
+    return;
   }
 
   my ($flag) = $sth->fetchrow_array();
@@ -763,7 +765,7 @@ sub set_running_expire_tok {
 			       $self->{_userid}, $time);
   unless (defined($rows)) {
     dbg("bayes: set_running_expire_tok: SQL error: ".$self->{_dbh}->errstr());
-    return undef;
+    return;
   }
 
   return $time;

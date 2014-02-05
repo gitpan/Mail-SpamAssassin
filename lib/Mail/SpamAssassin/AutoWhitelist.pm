@@ -46,7 +46,7 @@ use warnings;
 use bytes;
 use re 'taint';
 
-use NetAddr::IP 4.000;   # qw(:upper);
+use NetAddr::IP 4.000;
 
 use Mail::SpamAssassin;
 use Mail::SpamAssassin::Logger;
@@ -123,7 +123,7 @@ sub check_address {
   my ($self, $addr, $origip, $signedby) = @_;
 
   if (!defined $self->{checker}) {
-    return undef;		# no factory defined; we can't check
+    return;		# no factory defined; we can't check
   }
 
   $self->{entry} = undef;
@@ -192,11 +192,11 @@ sub add_score {
   my ($self,$score) = @_;
 
   if (!defined $self->{checker}) {
-    return undef;		# no factory defined; we can't check
+    return;		# no factory defined; we can't check
   }
   if ($score != $score) {
     warn "auto-whitelist: attempt to add a $score to AWL entry ignored\n";
-    return undef;		# don't try to add a NaN
+    return;		# don't try to add a NaN
   }
 
   $self->{entry}->{count} ||= 0;
@@ -248,7 +248,7 @@ sub modify_address {
   my ($self, $addr, $score, $signedby) = @_;
 
   if (!defined $self->{checker}) {
-    return undef;		# no factory defined; we can't check
+    return;		# no factory defined; we can't check
   }
 
   my $fulladdr = $self->pack_addr ($addr, undef);
@@ -275,7 +275,7 @@ sub modify_address {
 sub finish {
   my $self = shift;
 
-  if (!defined $self->{checker}) { return undef; }
+  return  if !defined $self->{checker};
   $self->{checker}->finish();
 }
 
@@ -314,7 +314,7 @@ sub ip_to_awl_key {
     my $origip_obj = NetAddr::IP->new6($origip . '/' . $mask_len);
     if (!defined $origip_obj) {  # invalid IPv6 address
       dbg("auto-whitelist: bad IPv6 address $origip");
-    } else {
+    } elsif (NetAddr::IP->can('full6')) {  # since NetAddr::IP 4.010
       $result = $origip_obj->network->full6;  # string in a canonical form
       $result =~ s/(:0000){1,7}\z/::/;        # compress zero tail
     }

@@ -25,7 +25,6 @@
 
 #include "config.h"
 #include "libspamc.h"
-#include "utils.h"
 
 #include <stdarg.h>
 #include <stdlib.h>
@@ -68,6 +67,9 @@
 #ifdef HAVE_ZLIB_H
 #include <zlib.h>
 #endif
+
+/* must load *after* errno.h, Bug 6697 */
+#include "utils.h"
 
 /* RedHat 5.2 doesn't define Shutdown 2nd Parameter Constants */
 /* KAM 12-4-01 */
@@ -198,10 +200,11 @@ static int _translate_connect_errno(int err)
 /*
  * opensocket()
  *
- *	Given a socket type (PF_INET or PF_UNIX), try to create this socket
- *	and store the FD in the pointed-to place. If it's successful, do any
- *	other setup required to make the socket ready to use, such as setting
- *	TCP_NODELAY mode, and in any case we return EX_OK if all is well.
+ *	Given a socket family (PF_INET or PF_INET6 or PF_UNIX), try to
+ *	create this socket and store the FD in the pointed-to place.
+ *	If it's successful, do any other setup required to make the socket
+ *	ready to use, such as setting TCP_NODELAY mode, and in any case
+ *      we return EX_OK if all is well.
  *
  *	Upon failure we return one of the other EX_??? error codes.
  */
@@ -330,8 +333,11 @@ static int _opensocket(int flags, int type, int *psock)
     {
 	int one = 1;
 
-	if (type == PF_INET
-	    && setsockopt(*psock, 0, TCP_NODELAY, &one, sizeof one) != 0) {
+	if ( (   type == PF_INET
+#ifdef PF_INET6
+              || type == PF_INET6
+#endif
+             ) && setsockopt(*psock, 0, TCP_NODELAY, &one, sizeof one) != 0) {
 	    origerr = spamc_get_errno();
 	    switch (origerr) {
 	    case EBADF:
@@ -419,7 +425,7 @@ static int _try_to_connect_unix(struct transport *tp, int *sockptr)
 	return EX_OK;
     }
 
-    libspamc_log(tp->flags, LOG_ERR, "connect(AF_UNIX) to spamd %s failed: %s",
+    libspamc_log(tp->flags, LOG_ERR, "connect(AF_UNIX) to spamd using --socket='%s' failed: %s",
 	   addrbuf.sun_path, strerror(origerr));
     closesocket(mysock);
 
@@ -470,6 +476,7 @@ static int _try_to_connect_tcp(const struct transport *tp, int *sockptr)
     for (numloops = 0; numloops < connect_retries; numloops++) {
         const int hostix = numloops % tp->nhosts;
         int status, mysock;
+        int innocent = 0;
 
                 /*--------------------------------------------------------
                 * We always start by creating the socket, as we get only
@@ -519,6 +526,7 @@ static int _try_to_connect_tcp(const struct transport *tp, int *sockptr)
             }
             else {
               status = timeout_connect(mysock, res->ai_addr, res->ai_addrlen);
+              if (status != 0) origerr = spamc_get_errno();
             }
 
 #else
@@ -556,23 +564,24 @@ static int _try_to_connect_tcp(const struct transport *tp, int *sockptr)
             else {
               status = timeout_connect(mysock, (struct sockaddr *) &addrbuf,
                         sizeof(addrbuf));
+              if (status != 0) origerr = spamc_get_errno();
             }
 
 #endif
 
             if (status != 0) {
-                  origerr = spamc_get_errno();
                   closesocket(mysock);
 
-#ifndef _WIN32
-                  libspamc_log(tp->flags, LOG_ERR,
+                  innocent = origerr == ECONNREFUSED && numloops+1 < tp->nhosts;
+                  libspamc_log(tp->flags, innocent ? LOG_DEBUG : LOG_ERR,
                       "connect to spamd on %s failed, retrying (#%d of %d): %s",
-                      host, numloops+1, connect_retries, strerror(origerr));
+                      host, numloops+1, connect_retries,
+#ifdef _WIN32
+                      origerr
 #else
-                  libspamc_log(tp->flags, LOG_ERR,
-                      "connect to spamd on %s failed, retrying (#%d of %d): %d",
-                      host, numloops+1, connect_retries, origerr);
+                      strerror(origerr)
 #endif
+                  );
 
             } else {
 #ifdef DO_CONNECT_DEBUG_SYSLOGS
@@ -587,7 +596,7 @@ static int _try_to_connect_tcp(const struct transport *tp, int *sockptr)
             res = res->ai_next;
         }
 #endif
-        sleep(retry_sleep);
+        if (numloops+1 < connect_retries && !innocent) sleep(retry_sleep);
     } /* for(numloops...) */
 
     libspamc_log(tp->flags, LOG_ERR,
@@ -848,21 +857,23 @@ long message_write(int fd, struct message *m)
     }
 }
 
-void message_dump(int in_fd, int out_fd, struct message *m)
+void message_dump(int in_fd, int out_fd, struct message *m, int flags)
 {
     char buf[8196];
     int bytes;
 
     if (m == NULL) {
-      return; /* Bug 6562 reported by Frederik Deweerdt <frederik.deweerdt@xprog.eu> */
+	libspamc_log(flags, LOG_ERR, "oops! message_dump called with NULL message");
+	return;
     }
 
-    if (m != NULL && m->type != MESSAGE_NONE) {
+    if (m->type != MESSAGE_NONE) {
 	message_write(out_fd, m);
     }
+
     while ((bytes = full_read(in_fd, 1, buf, 8192, 8192)) > 0) {
 	if (bytes != full_write(out_fd, 1, buf, bytes)) {
-	    libspamc_log(m->priv->flags, LOG_ERR, "oops! message_dump of %d returned different",
+	    libspamc_log(flags, LOG_ERR, "oops! message_dump of %d returned different",
 		   bytes);
 	}
     }
@@ -1202,14 +1213,10 @@ int message_filter(struct transport *tp, const char *username,
     if (flags & SPAMC_USE_SSL) {
 #ifdef SPAMC_SSL
 	SSLeay_add_ssl_algorithms();
-	if ((flags & SPAMC_SSLV2) && (flags & SPAMC_SSLV3)) {
-	  meth = TLSv1_client_method(); /* both flag bits on means use TLSv1 */
-	} else if (flags & SPAMC_SSLV2) {
-	  meth = SSLv2_client_method();
-	} else if (flags & SPAMC_SSLV3) {
-	  meth = SSLv3_client_method();
+	if (flags & SPAMC_TLSV1) {
+	    meth = TLSv1_client_method();
 	} else {
-	  meth = SSLv23_client_method(); /* no flag bits, default SSLv23 */
+	    meth = SSLv3_client_method(); /* default */
 	}
 	SSL_load_error_strings();
 	ctx = SSL_CTX_new(meth);
@@ -1568,7 +1575,7 @@ int message_process(struct transport *trans, char *username, int max_size,
         return EX_NOTSPAM;
     }
     else {
-        message_dump(in_fd, out_fd, &m);
+        message_dump(in_fd, out_fd, &m, flags);
         message_cleanup(&m);
         return ret;
     }
@@ -1597,7 +1604,7 @@ int message_tell(struct transport *tp, const char *username, int flags,
     if (flags & SPAMC_USE_SSL) {
 #ifdef SPAMC_SSL
 	SSLeay_add_ssl_algorithms();
-	meth = SSLv2_client_method();
+	meth = SSLv3_client_method();
 	SSL_load_error_strings();
 	ctx = SSL_CTX_new(meth);
 #else
@@ -1933,8 +1940,17 @@ int transport_setup(struct transport *tp, int flags)
 
     memset(&hints, 0, sizeof(hints));
     hints.ai_flags = 0;
-    hints.ai_family = PF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
+
+    if (       (flags & SPAMC_USE_INET4) && !(flags & SPAMC_USE_INET6)) {
+      hints.ai_family = PF_INET;
+#ifdef PF_INET6
+    } else if ((flags & SPAMC_USE_INET6) && !(flags & SPAMC_USE_INET4)) {
+      hints.ai_family = PF_INET6;
+#endif
+    } else {
+      hints.ai_family = PF_UNSPEC;
+    }
 #endif
 
     switch (tp->type) {
@@ -1946,12 +1962,12 @@ int transport_setup(struct transport *tp, int flags)
     case TRANSPORT_LOCALHOST:
 #ifdef SPAMC_HAS_ADDRINFO
         /* getaddrinfo(NULL) will look up the loopback address.
-         * bug 5057: unfortunately, it's the IPv6 loopback address on
-         * linux!  Be explicit, and force IPv4 using "127.0.0.1".
+         * See also bug 5057,  ::1 will be tried before 127.0.0.1
+         * unless overridden (through hints) by a command line option -4
          */
-        if ((origerr = getaddrinfo("127.0.0.1", port, &hints, &res)) != 0) {
+        if ((origerr = getaddrinfo(NULL, port, &hints, &res)) != 0) {
             libspamc_log(flags, LOG_ERR, 
-                  "getaddrinfo(127.0.0.1) failed: %s",
+                  "getaddrinfo for a loopback address failed: %s",
                   gai_strerror(origerr));
             return EX_OSERR;
         }
@@ -2073,12 +2089,20 @@ int transport_setup(struct transport *tp, int flags)
                      TRANSPORT_MAX_HOSTS);
                break;
             }
-            for (addrp = res; addrp != NULL; ) {
-                tp->hosts[tp->nhosts] = addrp;
-                addrp = addrp->ai_next;     /* before NULLing ai_next */
-                tp->hosts[tp->nhosts]->ai_next = NULL;
-                tp->nhosts++;
-            }
+
+            /* treat all A or AAAA records of each host as one entry */
+            tp->hosts[tp->nhosts++] = res;
+
+            /* alternatively, treat multiple A or AAAA records
+               of one host as individual entries */
+/*          for (addrp = res; addrp != NULL; ) {
+ *              tp->hosts[tp->nhosts] = addrp;
+ *              addrp = addrp->ai_next;     /-* before NULLing ai_next *-/
+ *              tp->hosts[tp->nhosts]->ai_next = NULL;
+ *              tp->nhosts++;
+ *          }
+ */
+
 #else
             for (addrp = hp->h_addr_list; *addrp; addrp++) {
                 if (tp->nhosts == TRANSPORT_MAX_HOSTS) {

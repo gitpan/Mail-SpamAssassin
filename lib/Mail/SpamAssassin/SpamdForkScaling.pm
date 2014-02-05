@@ -274,7 +274,7 @@ sub main_server_poll {
     # right before select() syscall, but after alarm(), eval scope, etc.
     $self->{child_just_exited} = 0;     
     ($nfound, $timeleft) = select($rout=$rin, undef, $eout=$rin, $tout);
-    $selerr = $!;
+    $selerr = $!  if !defined $nfound || $nfound < 0;
 
   });
 
@@ -515,7 +515,7 @@ sub order_idle_child_to_accept {
   }
   else {
     dbg("prefork: no spare children to accept, waiting for one to complete");
-    return undef;
+    return;
   }
 }
 
@@ -529,7 +529,7 @@ sub wait_for_child_to_accept {
       return 1;     # 1 == success
     }
     if ($state == PFSTATE_ERROR) {
-      return undef;
+      return;
     }
     else {
       warn "prefork: ordered child $kid to accept, but they reported state '$state', killing rogue";
@@ -537,7 +537,7 @@ sub wait_for_child_to_accept {
       $self->adapt_num_children();
       sleep 1;
 
-      return undef;
+      return;
     }
   }
 }
@@ -635,7 +635,7 @@ retry_read:
         || (exists &Errno::EWOULDBLOCK && $! == &Errno::EWOULDBLOCK))
     {
       # an error that wasn't non-blocking I/O-related.  that's serious
-      return undef;
+      return;
     }
 
     # ok, we didn't get it first time.  we'll have to start using
@@ -651,18 +651,22 @@ retry_read:
     }
     elsif ($now > $deadline) {
       # timed out!  report failure
-      warn "prefork: sysread(".$sock->fileno.") failed after $timeout secs";
-      return undef;
+      dbg("prefork: sysread(%d) failed after %.1f secs",
+          $sock->fileno, $timeout);
+      return;
     }
     else {
       $tout = $deadline - $now;     # the remaining timeout
       $tout = 1 if ($tout <= 0);    # ensure it's > 0
     }
 
-    dbg("prefork: sysread(".$sock->fileno.") not ready, wait max $tout secs");
+    dbg("prefork: sysread(%d) not ready, wait max %.1f secs",
+        $sock->fileno, $tout);
     my $rin = '';
     vec($rin, $sock->fileno, 1) = 1;
-    select($rin, undef, undef, $tout);
+    my $nfound = select($rin, undef, undef, $tout);
+    defined $nfound && $nfound >= 0
+      or info("prefork: sysread_with_timeout select error: %s", $!);
     goto retry_read;
 
   }
@@ -703,13 +707,15 @@ retry_write:
     warn "prefork: syswrite(".$sock->fileno.") to $targetname failed on try $try";
     if ($try > $numretries) {
       warn "prefork: giving up";
-      return undef;
+      return;
     }
     else {
       # give it 1 second to recover
       my $rout = '';
       vec($rout, $sock->fileno, 1) = 1;
-      select(undef, $rout, undef, 1);
+      my $nfound = select(undef, $rout, undef, 1);
+      defined $nfound && $nfound >= 0
+        or info("prefork: syswrite_with_retry select error: %s", $!);
     }
   }
 
@@ -729,7 +735,7 @@ retry_write:
         || (exists &Errno::EWOULDBLOCK && $! == &Errno::EWOULDBLOCK))
     {
       # an error that wasn't non-blocking I/O-related.  that's serious
-      return undef;
+      return;
     }
 
     warn "prefork: retrying syswrite(): $!";

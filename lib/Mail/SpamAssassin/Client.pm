@@ -21,13 +21,13 @@ Mail::SpamAssassin::Client - Client for spamd Protocol
 
 =head1 SYNOPSIS
 
-  my $client = new Mail::SpamAssassin::Client({
+  my $client = Mail::SpamAssassin::Client->new({
                                 port => 783,
                                 host => 'localhost',
                                 username => 'someuser'});
   or
 
-  my $client = new Mail::SpamAssassin::Client({
+  my $client = Mail::SpamAssassin::Client->new({
                                 socketpath => '/path/to/socket',
                                 username => 'someuser'});
 
@@ -59,6 +59,17 @@ use re 'taint';
 
 use IO::Socket;
 use Errno qw(EBADF);
+
+our($io_socket_module_name);
+BEGIN {
+  if (eval { require IO::Socket::IP }) {
+    $io_socket_module_name = 'IO::Socket::IP';
+  } elsif (eval { require IO::Socket::INET6 }) {
+    $io_socket_module_name = 'IO::Socket::INET6';
+  } elsif (eval { require IO::Socket::INET }) {
+    $io_socket_module_name = 'IO::Socket::INET';
+  }
+}
 
 my $EOL = "\015\012";
 my $BLANK = $EOL x 2;
@@ -195,7 +206,7 @@ sub learn {
 
   my $remote = $self->_create_connection();
 
-  return undef unless ($remote);
+  return unless $remote;
 
   my $msgsize = length($msg.$EOL);
 
@@ -217,7 +228,7 @@ sub learn {
   else { # bad learntype
     $self->{resp_code} = 00;
     $self->{resp_msg} = 'do not know';
-    return undef;
+    return;
   }
 
   print $remote "$EOL";
@@ -229,14 +240,14 @@ sub learn {
   defined $line || $!==0  or
     $!==EBADF ? dbg("error reading from spamd (1): $!")
               : die "error reading from spamd (1): $!";
-  return undef unless (defined $line);
+  return unless defined $line;
 
   my ($version, $resp_code, $resp_msg) = $self->_parse_response_line($line);
 
   $self->{resp_code} = $resp_code;
   $self->{resp_msg} = $resp_msg;
 
-  return undef unless ($resp_code == 0);
+  return unless $resp_code == 0;
 
   my $did_set = '';
   my $did_remove = '';
@@ -282,7 +293,7 @@ sub report {
 
   my $remote = $self->_create_connection();
 
-  return undef unless ($remote);
+  return unless $remote;
 
   my $msgsize = length($msg.$EOL);
 
@@ -299,14 +310,14 @@ sub report {
   defined $line || $!==0  or
     $!==EBADF ? dbg("error reading from spamd (3): $!")
               : die "error reading from spamd (3): $!";
-  return undef unless (defined $line);
+  return unless defined $line;
 
   my ($version, $resp_code, $resp_msg) = $self->_parse_response_line($line);
 
   $self->{resp_code} = $resp_code;
   $self->{resp_msg} = $resp_msg;
 
-  return undef unless ($resp_code == 0);
+  return unless $resp_code == 0;
 
   my $reported_p = 0;
 
@@ -343,7 +354,7 @@ sub revoke {
 
   my $remote = $self->_create_connection();
 
-  return undef unless ($remote);
+  return unless $remote;
 
   my $msgsize = length($msg.$EOL);
 
@@ -361,14 +372,14 @@ sub revoke {
   defined $line || $!==0  or
     $!==EBADF ? dbg("error reading from spamd (5): $!")
               : die "error reading from spamd (5): $!";
-  return undef unless (defined $line);
+  return unless defined $line;
 
   my ($version, $resp_code, $resp_msg) = $self->_parse_response_line($line);
 
   $self->{resp_code} = $resp_code;
   $self->{resp_msg} = $resp_msg;
 
-  return undef unless ($resp_code == 0);
+  return unless $resp_code == 0;
 
   my $revoked_p = 0;
 
@@ -415,7 +426,7 @@ sub ping {
     $!==EBADF ? dbg("error reading from spamd (7): $!")
               : die "error reading from spamd (7): $!";
   close $remote  or die "error closing socket: $!";
-  return undef unless (defined $line);
+  return unless defined $line;
 
   my ($version, $resp_code, $resp_msg) = $self->_parse_response_line($line);
   return 0 unless ($resp_msg eq 'PONG');
@@ -449,16 +460,17 @@ sub _create_connection {
 				   );
   }
   else {
-    $remote = IO::Socket::INET->new( Proto     => "tcp",
-				     PeerAddr  => $self->{host},
-				     PeerPort  => $self->{port},
-				     Timeout   => $self->{timeout},
-				   );
+    my %params = ( Proto    => "tcp",
+		   PeerAddr => $self->{host},
+		   PeerPort => $self->{port},
+		   Timeout  => $self->{timeout},
+		 );
+    $remote = $io_socket_module_name->new(%params);
   }
 
   unless ($remote) {
     print "Failed to create connection to spamd daemon: $!\n";
-    return undef;
+    return;
   }
 
   $remote;
@@ -548,14 +560,14 @@ sub _filter {
   defined $line || $!==0  or
     $!==EBADF ? dbg("error reading from spamd (8): $!")
               : die "error reading from spamd (8): $!";
-  return undef unless (defined $line);
+  return unless defined $line;
 
   my ($version, $resp_code, $resp_msg) = $self->_parse_response_line($line);
   
   $self->{resp_code} = $resp_code;
   $self->{resp_msg} = $resp_msg;
 
-  return undef unless ($resp_code == 0);
+  return unless $resp_code == 0;
 
   for ($!=0; defined($line=<$remote>); $!=0) {
     local($1,$2,$3);

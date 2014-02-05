@@ -20,6 +20,8 @@ exit unless (DO_RUN);
 %patterns = (
 
    q{ X_URIBL_IPSONLY [URIs: 144.137.3.98] } => 'X_URIBL_IPSONLY',
+
+   # can be either uribl-example-b.com or uribl-example-c.com
    q{ X_URIBL_DOMSONLY [URIs: uribl-example} => 'X_URIBL_DOMSONLY',
 
 );
@@ -30,10 +32,12 @@ tstlocalrules(q{
 
   urirhssub  X_URIBL_IPSONLY  dnsbltest.spamassassin.org.    A 2
   body       X_URIBL_IPSONLY  eval:check_uridnsbl('X_URIBL_IPSONLY')
+  describe   X_URIBL_IPSONLY  X_URIBL_IPSONLY
   tflags     X_URIBL_IPSONLY  net ips_only
 
   urirhssub  X_URIBL_DOMSONLY  dnsbltest.spamassassin.org.    A 4
   body       X_URIBL_DOMSONLY  eval:check_uridnsbl('X_URIBL_DOMSONLY')
+  describe   X_URIBL_DOMSONLY  X_URIBL_DOMSONLY
   tflags     X_URIBL_DOMSONLY  net domains_only
 
   add_header all RBL _RBL_

@@ -35,7 +35,7 @@ use bytes;
 use re 'taint';
 
 use vars qw (
-  @MODULES @OPTIONAL_MODULES $EXIT_STATUS $WARNINGS
+  @MODULES @OPTIONAL_MODULES $EXIT_STATUS $WARNINGS @OPTIONAL_BINARIES @BINARIES
 );
 
 my $have_sha  = eval { require Digest::SHA  };
@@ -73,10 +73,14 @@ $have_sha1 ? {
 },
 {
   'module' => 'NetAddr::IP',
-  'version' => '4.000',
+  'version' => '4.010',
   'desc' => "Used in determining which DNS tests are to be done for each of
-  the header's received fields, and used by AWL plugin for extracting network
-  address from an IPv6 addresses (and from IPv4 address on nondefault mask).",
+  the header's received fields, used by AWL plugin for extracting network
+  address from an IPv6 addresses (and from IPv4 address on nondefault mask),
+  and used by DNSxL rules for assembling DNS queries out of IPv6 addresses.
+  4.010 fixes an issue where NetAddr::IP::full6() causes a full6.al include
+  error.
+  Avoid versions 4.034 to 4.035 and 4.045 to 4.054",
 },
 {
   module => 'Time::HiRes',
@@ -134,8 +138,7 @@ $have_sha ? {
   address forgery and make it easier to identify spams.',
 },
 {
-  module => 'IP::Country::Fast',
-  alt_name => 'IP::Country',
+  module => 'Geo::IP',
   version => 0,
   desc => 'Used by the RelayCountry plugin (not enabled by default) to determine
   the domain country codes of each relay in the path of an email.',
@@ -152,18 +155,32 @@ $have_sha ? {
   More info on installing and using Razor can be found
   at http://wiki.apache.org/spamassassin/InstallingRazor .',
 },
+#{
+# module => 'Net::Ident',
+# version => 0,
+# desc => 'If you plan to use the --auth-ident option to spamd, you will need
+# to install this module.',
+#},
 {
-  module => 'Net::Ident',
-  version => 0,
-  desc => 'If you plan to use the --auth-ident option to spamd, you will need
-  to install this module.',
+  module => 'IO::Socket::IP',
+  version => 0.09,
+  desc => 'Installing this module is recommended if spamd is to listen
+  on IPv6 sockets or if DNS queries should go to an IPv6 name server.
+  If IO::Socket::IP is not available, using an older module
+  IO::Socket::INET6 will be attempted, and in its absence the support
+  for IPv6 will not be available. Some plugins and underlying
+  modules may also prefer IO::Socket::IP over IO::Socket::INET6.',
 },
 {
   module => 'IO::Socket::INET6',
   version => 0,
-  desc => 'This is required if the first nameserver listed in your IP
-  configuration or /etc/resolv.conf file is available only via an
-  IPv6 address. Also used by a DCC plugin to access dccifd over network.',
+  desc => 'This module is an older alternative to IO::Socket::IP.
+  Spamd, as well some underlying modules, will fall back to using
+  IO::Socket::INET6 if IO::Socket::IP is unavailable. One or the other
+  module is required to support IPv6 (e.g. in spamd/spamc protocol,
+  for DNS lookups or in plugins like DCC). Some plugins or underlying
+  modules may still require IO::Socket::INET6 for IPv6 support even
+  if IO::Socket::IP is available.',
 },
 {
   module => 'IO::Socket::SSL',
@@ -224,6 +241,65 @@ $have_sha ? {
   charsets and convert them into Unicode, you will need to install
   this module.',
 },
+{
+  module => 'Net::Patricia',
+  version => 1.16,
+  desc => 'If this module is available, it will be used for IP address lookups
+  in tables internal_networks, trusted_networks, and msa_networks. Recommended
+  when a number of entries in these tables is large, i.e. in hundreds
+  or thousands. However, in case of overlapping (or conflicting) networks
+  in these tables, lookup results may differ as Net::Patricia finds a
+  tightest-matching entry, while a sequential NetAddr::IP search finds
+  a first-matching entry. So when overlapping network ranges are given,
+  specifying more specific subnets (longest netmask) first, followed by
+  wider subnets ensures predictable results.',
+},
+);
+
+my @BINARIES = ();
+
+my $lwp_note = "   Sa-update will use curl, wget or fetch to download updates.  
+   Because perl module LWP does not support IPv6, sa-update as of
+   3.4.0 will use these standard programs to download rule updates
+   leaving LWP as a fallback if none of the programs are found.
+
+   *IMPORTANT NOTE*: You only need one of these programs.";
+
+my @OPTIONAL_BINARIES = (
+{
+  binary => 'gpg',
+  version => '0',
+  recommended_min_version => '1.0.6',
+  version_check_params => '--version',
+  version_check_regex => 'gpg \(GnuPG\) ([\d\.]*)',
+  desc => 'The "sa-update" program requires this executable to verify  
+  encryption signatures.  It is not recommended, but you can use 
+  "sa-update" with the --no-gpg to skip the verification. ',
+},
+{
+  binary => 'wget',
+  version => '0',
+  recommended_min_version => '1.8.2',
+  version_check_params => '--version',
+  version_check_regex => 'Gnu Wget ([\d\.]*)',
+  desc => $lwp_note,
+},
+{
+  binary => 'curl',
+  version => '0',
+  recommended_min_version => '7.2.14',
+  version_check_params => '--version',
+  version_check_regex => 'curl ([\d\.]*)',
+  desc => $lwp_note,
+},
+#Fetch is a FreeBSD Product. We do not believe it has any way to check the version from
+#the command line.  It has been tested with FreeBSD version 8 through 9.1.
+{
+  binary => 'fetch',
+  version => '0',
+  
+  desc => $lwp_note,
+}
 );
 
 ###########################################################################
@@ -244,13 +320,13 @@ problems.
 sub debug_diagnostics {
   my $out = "diag: perl platform: $] $^O\n";
 
-  # this avoids an unsightly warning due to a shortcoming of Net::Ident;
-  # "Net::Ident::_export_hooks() called too early to check prototype at
-  # /usr/share/perl5/Net/Ident.pm line 29."   It only needs to be
-  # called here.
-  eval '
-    sub Net::Ident::_export_hooks;
-  ';
+# # this avoids an unsightly warning due to a shortcoming of Net::Ident;
+# # "Net::Ident::_export_hooks() called too early to check prototype at
+# # /usr/share/perl5/Net/Ident.pm line 29."   It only needs to be
+# # called here.
+# eval '
+#   sub Net::Ident::_export_hooks;
+# ';
 
   foreach my $moddef (@MODULES, @OPTIONAL_MODULES) {
     my $module = $moddef->{module};
@@ -280,12 +356,229 @@ sub long_diagnostics {
     try_module(0, $moddef, \$summary);
   }
 
+  print "checking binary dependencies and their versions...\n";
+
+  foreach my $bindef (@BINARIES) {
+    try_binary(0, $bindef, \$summary);
+  }
+
+  foreach my $bindef (@OPTIONAL_BINARIES) {
+    try_binary(0, $bindef, \$summary);
+  } 
+
+  print "dependency check complete...\n\n";
+
   print $summary;
   if ($EXIT_STATUS || $WARNINGS) {
     print "\nwarning: some functionality may not be available,\n".
             "please read the above report before continuing!\n\n";
   }
   return $EXIT_STATUS;
+}
+
+
+sub try_binary {
+  my ($required, $bindef, $summref) = @_;
+
+  my $binary_version;
+  my $installed = 0;
+  my $version_meets_required = 1;
+  my $version_meets_recommended = 1;
+  my $required_version = $bindef->{version};
+  my $recommended_version = $bindef->{recommended_min_version};
+  my $errtype;
+  my ($command, $output);
+
+
+  # only viable on unix based systems, so exclude windows, etc. here
+  if ($^O =~ /^(mswin|dos|os2)/i) {
+    $$summref .= "Warning: Unable to test on this platform for the optional \"$bindef->{'binary'}\" binary\n";
+    $errtype = 'is unknown for this platform';
+  } else {
+    $command = "which $bindef->{'binary'} 2>&1";
+    #print "DEBUG: running $command\n";
+    $output = `$command`;
+
+    if (!defined $output || $output eq '') {
+      $installed = 0;
+    } elsif ($output =~ /which: no \Q$bindef->{'binary'}\E in/i) {
+      $installed = 0;
+    } else {
+      #COMMAND APPEARS TO EXIST
+      $command = $output;
+      chomp ($command);
+
+      $installed = 1;
+    }
+    #print "DEBUG: $command completed and output parsed\n";
+  }
+
+
+  if ($installed) {
+    #SANITIZE THE RETURNED COMMAND JUST IN CASE
+    $command =~ s/[^a-z0-9\/]//ig;
+
+    #GET THE VERSION
+    $command .= " ";
+    if (defined $bindef->{'version_check_params'}) {
+      $command .= $bindef->{'version_check_params'};
+    }
+    $command .= " 2>&1";
+
+    #print "DEBUG: running $command to check the version\n";
+    $output = `$command`;
+
+    if (!defined $output) {
+      $installed = 0;
+
+    } else {
+      if (defined $bindef->{'version_check_regex'}) {
+        $output =~ m/$bindef->{'version_check_regex'}/;
+        $binary_version = $1;
+      }
+
+      #TEST IF VERSION IS GREATER THAN REQUIRED
+      if (defined $required_version) {
+        $version_meets_required = test_version($binary_version, $required_version);
+      }
+      if (defined $recommended_version) {
+        $version_meets_recommended = test_version($binary_version, $recommended_version);
+      }
+    }
+    #print "DEBUG: $command completd and output parsed\n";
+  }
+
+  unless (defined $errtype) {
+    if (!$installed) {
+      $errtype = "is not installed";
+      if ($required_version || $recommended_version) {
+        $errtype .= ",\n";
+        if ($required_version) {
+          $errtype .= "minimum required version is $required_version";
+        }
+        if ($recommended_version) {
+          $errtype .= ", "  if $required_version;
+          $errtype .= "recommended version is $recommended_version or higher";
+        }
+      }
+      $errtype .= ".";
+    } elsif (!$version_meets_required) {
+      $errtype = "is installed ($binary_version),\nbut is below the ".
+                 "minimum required version $required_version,\n".
+                 "some functionality will not be available.";
+      $errtype .= "\nRecommended version is $recommended_version or higher."
+        if $recommended_version;
+    } elsif (!$version_meets_recommended) {
+      $errtype = "is installed ($binary_version),\nbut is below the ".
+                 "recommended version $recommended_version,\n".
+                 "some functionality may not be available,\n".
+                 "and some of the tests in the SpamAssassin test suite may fail.";
+    }
+  }
+
+  if (defined $errtype) {
+    my $pretty_name = $bindef->{alt_name} || $bindef->{binary};
+    my $desc = $bindef->{desc}; $desc =~ s/^(\S)/  $1/gm;
+    my $pretty_min_version =
+      !$required_version ? '' : "(version $required_version) ";
+
+    print "\n", ("*" x 75), "\n";
+
+    if ($errtype =~ /unknown/i) {
+      $WARNINGS++;
+      print "NOTE: the optional $pretty_name binary $errtype\n";
+      $$summref .= "optional binary status could not be determined: $pretty_name\n";
+    } 
+    elsif ($required) {
+      $EXIT_STATUS++;
+      warn "\aERROR: the required $pretty_name binary $errtype\n";
+      if (!$installed) {
+        $$summref .= "REQUIRED binary missing or nonfunctional: $pretty_name\n";
+      } elsif (!$version_meets_required) {
+        $$summref .= "REQUIRED binary out of date: $pretty_name\n";
+      } else {
+        $$summref .= "REQUIRED binary older than recommended: $pretty_name\n";
+      }
+    }
+    else {
+      $WARNINGS++;
+      print "NOTE: the optional $pretty_name binary $errtype\n";
+      if (!$installed) {
+        $$summref .= "optional binary missing or nonfunctional: $pretty_name\n";
+      } elsif (!$version_meets_required) {
+        $$summref .= "optional binary out of date: $pretty_name\n";
+      } else {
+        $$summref .= "optional binary older than recommended: $pretty_name\n";
+      }
+    }
+
+    print "\n".$desc."\n\n";
+  }
+}
+
+sub test_version {
+  #returns 1 if version1 is equal or greater than $version2
+  #returns -1 for an unknown test;
+  my ($version1, $version2) = @_;
+
+  my (@version1, @version2);
+  my ($count1, $count2, $i, $fail);
+
+  #CAN'T TEST NON NUMERIC VERSIONS
+  if (!defined($version1) or !defined($version2) or
+      $version1 !~ /^[0-9][0-9.]*\z/ or $version2 !~ /^[0-9][0-9.]*\z/) {
+    return -1;
+  }
+
+  $fail = 0;
+
+  #check if the numbers have the same number of sub versions
+  $_ = $version1;
+  $count1 = (s/\.//g);
+
+  #check if the numbers have the same number of sub versions
+  $_ = $version2;
+  $count2 = (s/\.//g);
+
+  if ($count1 != $count2) {
+    #NEED TO ADD .0's to balance the two
+    if ($count1 > $count2) {
+      for ($i = 0; $i < ($count1-$count2); $i++) {
+        $version2 .= '.0';
+      }
+    } else {
+      for ($i = 0; $i < ($count2-$count1); $i++) {
+        $version1 .= '.0';
+      }
+    }
+  }
+
+  #print "DEBUG: $version1 vs $version2\n";
+
+  #This would fail comparing 1.4.3 to 1.0.6 because three was less than 6.
+  #Need to compare and if greater, on more major versions, skip the less minor versions
+  @version1 = split(/\./,$version1);
+  @version2 = split(/\./,$version2);
+
+  for ($i = 0; $i < scalar(@version1); $i++) {
+    #print "DEBUG: $version1[$i] vs $version2[$i]\n";
+
+    #LESS - NO NEED TO TEST MORE
+    if ($version1[$i] < $version2[$i]) {
+      $fail++;
+      $i = scalar(@version1); 
+    #EQUAL - KEEP TESTING
+    } elsif ($version1[$i] == $version2[$i]) {
+      # Do Nothing
+    #GREATER - NO NEED TO TEST MORE
+    } else {
+      $i = scalar(@version1);
+    }
+  }
+
+  #print "DEBUG: ".($fail==0)."\n\n";
+
+  return ($fail == 0);
 }
 
 sub try_module {
@@ -316,6 +609,7 @@ sub try_module {
         ($module_version && $module_version >= $recommended_version)) {
       $version_meets_recommended = 1;
     }
+    $module_version = '' if !defined $module_version;
   }
 
   my $errtype;

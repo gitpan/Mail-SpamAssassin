@@ -90,9 +90,12 @@
 #define SPAMC_RAW_MODE       0
 #define SPAMC_BSMTP_MODE     1
 
-#define SPAMC_USE_SSL	      (1<<27)
-#define SPAMC_SAFE_FALLBACK   (1<<28)
+#define SPAMC_USE_INET6       (1<<31)
+#define SPAMC_USE_INET4       (1<<30)
+
 #define SPAMC_CHECK_ONLY      (1<<29)
+#define SPAMC_SAFE_FALLBACK   (1<<28)
+#define SPAMC_USE_SSL         (1<<27)
 
 /* Jan 30, 2003 ym: added reporting options */
 #define SPAMC_REPORT          (1<<26)
@@ -119,7 +122,7 @@
 /* Jan 1, 2007 sidney: added SSL protocol versions */
 /* no flags means use default of SSL_v23 */
 /* Set both flags to specify TSL_v1 */
-#define SPAMC_SSLV2 (1<<18)
+#define SPAMC_TLSV1 (1<<18)
 #define SPAMC_SSLV3 (1<<17)
 
 /* Nov 30, 2006 jm: add -z, zlib support */
@@ -130,6 +133,11 @@
 
 /* December 5, 2007 duncf: send log messages to callback */
 #define SPAMC_LOG_TO_CALLBACK (1<<14)
+
+/* December 6, 2011 Sebastian Wiesinger <sebastian@karotte.org>:
+ * Turn EX_UNAVAILABLE into EX_TEMPFAIL - bug 6717
+ * */
+#define SPAMC_UNAVAIL_TEMPFAIL (1<<13)
 
 #define SPAMC_MESSAGE_CLASS_SPAM 1
 #define SPAMC_MESSAGE_CLASS_HAM  2
@@ -284,7 +292,7 @@ int message_tell(struct transport *tp, const char *username, int flags,
  * will be MESSAGE_ERROR) it will be message_writed. Then, fd_in will be piped
  * to fd_out intol EOF. This is particularly useful if you get back an
  * EX_TOOBIG. */
-void message_dump(int in_fd, int out_fd, struct message *m);
+void message_dump(int in_fd, int out_fd, struct message *m, int flags);
 
 /* Do a message_read->message_filter->message_write sequence, handling errors
  * appropriately with dump_message or appropriate CHECK_ONLY output. Returns

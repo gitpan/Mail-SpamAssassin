@@ -89,6 +89,10 @@ http://wiki.apache.org/spamassassin/SingleUserUnixInstall
    See the "Installing Rules" section below if you do not wish to download
    the rules directly from the internet.
 
+   NOTE: Because LWP does not support IPv6, sa-update as of 3.4.0 will use
+   the binaries curl, wget or fetch to download rule updates with LWP used 
+   as a fallback if none of the binaries exist.
+
 5. If you already use procmail, skip to step 7.  If not, ensure procmail
    is installed using "which procmail" or install it from www.procmail.org.
 
@@ -363,10 +367,13 @@ version is too low for them to be used.
     perl interpreter.  NetAddr::IP version 4.007 or later fixes this.
 
 
-  - IP::Country::Fast (from CPAN)
+  - Geo::IP (from CPAN)
 
     Used by the RelayCountry plugin (not enabled by default) to determine
     the domain country codes of each relay in the path of an email.
+
+    IP::Country::Fast is used as alternative if Geo::IP is not installed.
+    This is not recommended as it's obsolete.
 
 
   - Net::Ident (from CPAN)

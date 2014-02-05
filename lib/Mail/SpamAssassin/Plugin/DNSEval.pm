@@ -15,11 +15,19 @@
 # limitations under the License.
 # </@LICENSE>
 
+=head1 NAME
+
+DNSEVAL - look up URLs against DNS blocklists
+
+=cut
+
+
 package Mail::SpamAssassin::Plugin::DNSEval;
 
 use Mail::SpamAssassin::Plugin;
 use Mail::SpamAssassin::Logger;
 use Mail::SpamAssassin::Constants qw(:ip);
+use Mail::SpamAssassin::Util qw(reverse_ip_address);
 
 use strict;
 use warnings;
@@ -48,6 +56,7 @@ sub new {
     'check_rbl_sub',
     'check_rbl_results_for',
     'check_rbl_from_host',
+    'check_rbl_from_domain',
     'check_rbl_envfrom',
     'check_dns_sender',
   ];
@@ -266,9 +275,9 @@ sub check_rbl_backend {
 
   eval {
     foreach my $ip (@ips) {
-      next unless ($ip =~ /(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/);
-      $pms->do_rbl_lookup($rule, $set, $type, $rbl_server,
-			   "$4.$3.$2.$1.$rbl_server", $subtest);
+      my $revip = reverse_ip_address($ip);
+      $pms->do_rbl_lookup($rule, $set, $type,
+                          $revip.'.'.$rbl_server, $subtest) if defined $revip;
     }
   };
 
@@ -309,6 +318,24 @@ sub check_rbl_from_host {
   _check_rbl_addresses(@_, $_[1]->all_from_addrs());
 }
 
+=over 4
+
+=item check_rbl_from_domain
+
+This checks all the from addrs domain names as an alternate to check_rbl_from_host
+
+=cut
+sub check_rbl_from_domain {
+  _check_rbl_addresses(@_, $_[1]->all_from_addrs_domains());
+}
+
+=item has_check_rbl_from_domain
+
+Adds capability check for "if can()" for check_rbl_from_domain
+
+=cut
+sub has_check_rbl_from_domain { 1 }
+
 # this only checks the address host name and not the domain name because
 # using the domain name had much worse results for dsn.rfc-ignorant.org
 sub check_rbl_envfrom {
@@ -322,10 +349,14 @@ sub _check_rbl_addresses {
   return 0 unless $pms->is_dns_available();
 
   my %hosts;
-  for my $address (@addresses) {
-    if (defined $address && $address =~ m/ \@ ( [^\@\s]+ \. [^\@\s]+ )/x) {
-      $hosts{lc($1)} = 1;
-    }
+  for (@addresses) {
+    next if !defined($_) || !/ \@ ( [^\@\s]+ )/x;
+    my $address = $1;
+    # strip leading & trailing dots (as seen in some e-mail addresses)
+    $address =~ s/^\.+//; $address =~ s/\.+\z//;
+    # squash duplicate dots to avoid an invalid DNS query with a null label
+    $address =~ tr/.//s;
+    $hosts{lc($address)} = 1  if $address =~ /\./;  # must by a FQDN
   }
   return unless scalar keys %hosts;
 
@@ -339,7 +370,8 @@ sub _check_rbl_addresses {
   dbg("dns: _check_rbl_addresses RBL $rbl_server, set $set");
 
   for my $host (keys %hosts) {
-    $pms->do_rbl_lookup($rule, $set, 'A', $rbl_server, "$host.$rbl_server");
+    dbg("dns: checking [$host] / $rule / $set / $rbl_server");
+    $pms->do_rbl_lookup($rule, $set, 'A', "$host.$rbl_server");
   }
 }
 

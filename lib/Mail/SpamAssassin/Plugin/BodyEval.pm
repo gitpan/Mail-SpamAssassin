@@ -45,6 +45,7 @@ sub new {
   $self->register_eval_rule("check_blank_line_ratio");
   $self->register_eval_rule("tvd_vertical_words");
   $self->register_eval_rule("check_stock_info");
+  $self->register_eval_rule("check_body_length");
 
   return $self;
 }
@@ -282,5 +283,19 @@ sub _check_stock_info {
   return;
 }
 
+sub check_body_length {
+  my ($self, $pms, undef, $min) = @_;
+
+  my $body_length = $pms->{msg}->{pristine_body_length};
+  dbg("eval: body_length - %s - check for min of %s", $body_length, $min);
+
+  return (defined $body_length && $body_length <= $min) ? 1 : 0;
+}
+
+# ---------------------------------------------------------------------------
+
+# capability checks for "if can()":
+#
+sub has_check_body_length { 1 }
 
 1;

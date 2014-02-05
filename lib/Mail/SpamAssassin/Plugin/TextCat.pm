@@ -296,7 +296,8 @@ Rhaeto-Romance, Sanskrit, Scots, Slovenian, and Yiddish.
 
 =item textcat_max_languages N (default: 3)
 
-The maximum number of languages before the classification is considered unknown.
+The maximum number of languages any one message can simultaneously match
+before its classification is considered unknown.
 
 =cut
 
@@ -336,7 +337,7 @@ models (note that each of those models is used completely).
 =item textcat_acceptable_score N (default: 1.02)
 
 Include any language that scores at least C<textcat_acceptable_score> in the
-returned list of languages.
+returned list of languages. 
 
 =cut
 

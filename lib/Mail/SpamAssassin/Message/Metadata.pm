@@ -55,6 +55,7 @@ use re 'taint';
 
 use Mail::SpamAssassin;
 use Mail::SpamAssassin::Constants qw(:sa);
+use Mail::SpamAssassin::Util qw(reverse_ip_address);
 use Mail::SpamAssassin::Message::Metadata::Received;
 use Mail::SpamAssassin::Logger;
 
@@ -83,8 +84,26 @@ sub extract {
   # pre-chew Received headers
   $self->parse_received_headers ($permsgstatus, $msg);
 
-  $permsgstatus->{main}->call_plugins("extract_metadata", { msg => $msg,
-					    conf => $permsgstatus->{main}->{conf} });
+  foreach my $tuple (
+      [$self->{relays_trusted},   'RELAYSTRUSTEDREVIP'  ],
+      [$self->{relays_untrusted}, 'RELAYSUNTRUSTEDREVIP'],
+      [$self->{relays_internal},  'RELAYSINTERNALREVIP' ],
+      [$self->{relays_external},  'RELAYSEXTERNALREVIP' ])
+  { my($rly, $tag) = @$tuple;
+    my @revips;
+    @revips = map {
+      my($ip,$revip);
+      $ip = $_->{ip}  if ref $_ && !$_->{ip_private};
+      $revip = reverse_ip_address($ip)  if defined $ip && $ip ne '';
+      defined $revip && $revip ne '' ? $revip : ();
+    } @$rly  if $rly;
+    $permsgstatus->set_tag($tag,
+                           @revips == 1 ? $revips[0] : \@revips) if @revips;
+  }
+
+  $permsgstatus->{main}->call_plugins("extract_metadata",
+                       { msg => $msg, permsgstatus => $permsgstatus,
+                         conf => $permsgstatus->{main}->{conf} });
 }
 
 sub finish {

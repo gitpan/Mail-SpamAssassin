@@ -227,7 +227,7 @@ sub _check_attachments {
   $pms->{mime_checked_attachments} = 1;
 
   # results
-  $pms->{mime_base64_blanks} = 0;
+# $pms->{mime_base64_blanks} = 0;  # expensive to determine, no longer avail
   $pms->{mime_base64_count} = 0;
   $pms->{mime_base64_encoded_text} = 0;
   # $pms->{mime_base64_illegal} = 0;
@@ -275,17 +275,19 @@ sub _check_attachments {
     $part_type[$part] = $ctype;
     $part_bytes[$part] = 0 if $cd !~ /attachment/;
 
+    my $cte_is_base64 = $cte =~ /base64/i;
     my $previous = '';
     foreach (@{$p->raw()}) {
-      if ($cte =~ /base64/i) {
-        if ($previous =~ /^\s*$/ && /^\s*$/) {
-	  $pms->{mime_base64_blanks} = 1;
-        }
-        # MIME_BASE64_ILLEGAL: now a zero-hitter
-        # if (m@[^A-Za-z0-9+/=\n]@ || /=[^=\s]/) {
-        # $pms->{mime_base64_illegal} = 1;
-        # }
-      }
+
+    # if ($cte_is_base64) {
+    #   if ($previous =~ /^\s*$/ && /^\s*$/) {  # expensive, avoid!
+    #     $pms->{mime_base64_blanks} = 1;  # never used, don't bother
+    #   }
+    #   # MIME_BASE64_ILLEGAL: now a zero-hitter
+    #   # if (m@[^A-Za-z0-9+/=\n]@ || /=[^=\s]/) {
+    #   # $pms->{mime_base64_illegal} = 1;
+    #   # }
+    # }
 
       # if ($pms->{mime_html_no_charset} && $ctype eq 'text/html' && defined $charset) {
       # $pms->{mime_html_no_charset} = 0;
@@ -297,7 +299,7 @@ sub _check_attachments {
 
       if ($where != 1 && $cte eq "quoted-printable" && ! /^SPAM: /) {
         # RFC 5322: Each line SHOULD be no more than 78 characters,
-        #           excluding the CRLF
+        #           excluding the CRLF.
         # RFC 2045: The Quoted-Printable encoding REQUIRES that
         #           encoded lines be no more than 76 characters long.
         # Bug 5491: 6% of email classified as HAM by SA triggered the
@@ -454,11 +456,11 @@ sub body_charset_is_likely_to_fp {
 
 sub get_charset_from_ct_line {
   my $type = shift;
-  if (!defined $type) { return undef; }
+  if (!defined $type) { return; }
   if ($type =~ /charset="([^"]+)"/i) { return $1; }
   if ($type =~ /charset='([^']+)'/i) { return $1; }
   if ($type =~ /charset=(\S+)/i) { return $1; }
-  return undef;
+  return;
 }
 
 # came up on the users@ list, look for multipart/alternative parts which
@@ -510,8 +512,7 @@ sub _check_base64_length {
     my $cte = lc($p->get_header('content-transfer-encoding') || '');
     next if ($cte !~ /^base64$/);
     foreach my $l ( @{$p->raw()} ) {
-      my $len = length $l;
-      $result = $len if ($len > $result);
+      $result = length $l  if length $l > $result;
     }
   }
   

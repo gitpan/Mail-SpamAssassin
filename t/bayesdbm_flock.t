@@ -69,7 +69,7 @@ my($msgid,$msgid_hdr) = getimpl->get_msgid($mail);
 
 # $msgid is the generated hash messageid
 # $msgid_hdr is the Message-Id header
-ok($msgid eq 'ce33e4a8bc5798c65428d6018380bae346c7c126@sa_generated');
+ok($msgid eq '4cf5cc4d53b22e94d3e55932a606b18641a54041@sa_generated');
 ok($msgid_hdr eq '9PS291LhupY');
 
 ok(getimpl->{store}->tie_db_writable());
@@ -77,6 +77,7 @@ ok(getimpl->{store}->tie_db_writable());
 ok(!getimpl->{store}->seen_get($msgid));
 
 getimpl->{store}->untie_db();
+alarm(0);
 
 ok($sa->{bayes_scanner}->learn(1, $mail));
 
@@ -87,6 +88,7 @@ ok(getimpl->{store}->tie_db_writable());
 ok(getimpl->{store}->seen_get($msgid) eq 's');
 
 getimpl->{store}->untie_db();
+alarm(0);
 
 ok(getimpl->{store}->tie_db_writable());
 
@@ -113,6 +115,7 @@ foreach my $tok (@{$tokens}) {
 ok(!$tokerror);
 
 getimpl->{store}->untie_db();
+alarm(0);
 
 ok($sa->{bayes_scanner}->learn(0, $mail));
 
@@ -121,6 +124,7 @@ ok(getimpl->{store}->tie_db_writable());
 ok(getimpl->{store}->seen_get($msgid) eq 'h');
 
 getimpl->{store}->untie_db();
+alarm(0);
 
 ok(getimpl->{store}->tie_db_writable());
 
@@ -134,6 +138,7 @@ foreach my $tok (keys %{$toks}) {
 ok(!$tokerror);
 
 getimpl->{store}->untie_db();
+alarm(0);
 
 ok($sa->{bayes_scanner}->forget($mail));
 
@@ -142,6 +147,7 @@ ok(getimpl->{store}->tie_db_writable());
 ok(!getimpl->{store}->seen_get($msgid));
 
 getimpl->{store}->untie_db();
+alarm(0);
 
 undef $sa;
 
@@ -173,6 +179,8 @@ ok(-e 'log/user_state/bayes_toks');
 undef $sa;
 
 sa_t_init('bayes'); # this wipes out what is there and begins anew
+
+alarm(0);  # cancel timer - make sure that alarm is off
 
 # make sure we learn to a journal
 tstlocalrules ("

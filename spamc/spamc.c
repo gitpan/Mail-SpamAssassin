@@ -197,6 +197,12 @@ print_usage(void)
 
     usg("  -x, --no-safe-fallback\n"
         "                      Don't fallback safely.\n");
+    usg("  -X, --unavailable-tempfail\n"
+        "                      When using -x, turn 'unavailable' error into\n"
+        "                      'tempfail'. This may be useful for an MTAs\n"
+        "                      to defer emails with a temporary SMTP error\n"
+	"                      instead of bouncing with a permanent SMTP\n"
+        "                      error.\n");
     usg("  -l, --log-to-stderr Log errors and warnings to stderr.\n");
 #ifndef _WIN32
     usg("  -e, --pipe-to command [args]\n"
@@ -210,6 +216,8 @@ print_usage(void)
     usg("  -z                  Compress mail message sent to spamd.\n");
 #endif
     usg("  -f                  (Now default, ignored.)\n");
+    usg("  -4                  Use IPv4 only for connecting to server.\n");
+    usg("  -6                  Use IPv6 only for connecting to server.\n");
 
     usg("\n");
 }
@@ -227,9 +235,9 @@ read_args(int argc, char **argv,
           struct transport *ptrn)
 {
 #ifndef _WIN32
-    const char *opts = "-BcrRd:e:fyp:n:t:s:u:L:C:xzSHU:ElhVKF:0:1:2";
+    const char *opts = "-BcrR46d:e:fyp:n:t:s:u:L:C:xXzSHU:ElhVKF:0:1:2";
 #else
-    const char *opts = "-BcrRd:fyp:n:t:s:u:L:C:xzSHElhVKF:0:1:2";
+    const char *opts = "-BcrR46d:fyp:n:t:s:u:L:C:xXzSHElhVKF:0:1:2";
 #endif
     int opt;
     int ret = EX_OK;
@@ -260,6 +268,7 @@ read_args(int argc, char **argv,
        { "headers", no_argument, 0, 2 },
        { "exitcode", no_argument, 0, 'E' },
        { "no-safe-fallback", no_argument, 0, 'x' },
+       { "unavailable-tempfail", no_argument, 0, 'X' },
        { "log-to-stderr", no_argument, 0, 'l' },
        { "pipe-to", required_argument, 0, 'e' },
        { "help", no_argument, 0, 'h' },
@@ -312,7 +321,7 @@ read_args(int argc, char **argv,
 #endif
             case 'f':
             {
-                /* obsolete, backwards compat */
+                /* obsolete, backward compat */
                 break;
             }
             case 'K':
@@ -359,17 +368,11 @@ read_args(int argc, char **argv,
             case 'S':
             {
                 flags |= SPAMC_USE_SSL;
-		if (!spamc_optarg || (strcmp(spamc_optarg,"sslv23") == 0)) {
-		  /* this is the default */
-		}
-	        else if (strcmp(spamc_optarg,"sslv2") == 0) {
-		  flags |= SPAMC_SSLV2;
-		}
-		else if (strcmp(spamc_optarg,"sslv3") == 0) {
-		  flags |= SPAMC_SSLV3;
+		if (!spamc_optarg || (strcmp(spamc_optarg,"sslv3") == 0)) {
+		    flags |= SPAMC_SSLV3;
 		}
 		else if (strcmp(spamc_optarg,"tlsv1") == 0) {
-		  flags |= (SPAMC_SSLV2 | SPAMC_SSLV3);
+		    flags |= SPAMC_TLSV1;
 		}
 		else {
 		    libspamc_log(flags, LOG_ERR, "Please specify a legal ssl version (%s)", spamc_optarg);
@@ -442,6 +445,16 @@ read_args(int argc, char **argv,
                 flags &= (~SPAMC_SAFE_FALLBACK);
                 break;
             }
+            case 'X':
+            {
+		/* Only activates if -x is also used */
+	        if (!(flags & SPAMC_SAFE_FALLBACK)) {
+                	flags |= SPAMC_UNAVAIL_TEMPFAIL;
+		} else {
+			libspamc_log(flags, LOG_ERR, "This option is only valid if -x is set first");
+		}
+		break;
+            }
             case 'y':
             {
                 flags |= SPAMC_SYMBOLS;
@@ -477,6 +490,18 @@ read_args(int argc, char **argv,
 #endif
                 break;
             }
+            case '4':
+            {
+                flags |=  SPAMC_USE_INET4;
+                flags &= ~SPAMC_USE_INET6;
+                break;
+            }
+            case '6':
+            {
+                flags |=  SPAMC_USE_INET6;
+                flags &= ~SPAMC_USE_INET4;
+                break;
+            }
             case 0:
             {
                 ptrn->connect_retries = atoi(spamc_optarg);
@@ -509,6 +534,12 @@ read_args(int argc, char **argv,
         libspamc_log(flags, LOG_ERR, "-s parameter is beyond max of %d",
                         SPAMC_MAX_MESSAGE_LEN);
         ret = EX_USAGE;
+    }
+
+    if ( !(flags & (SPAMC_USE_INET4 | SPAMC_USE_INET6)) ) {
+      /* allow any protocol family (INET or INET6) by default */
+      flags |= SPAMC_USE_INET4;
+      flags |= SPAMC_USE_INET6;
     }
 
     /* learning action has to block some parameters */
@@ -1010,7 +1041,7 @@ main(int argc, char *argv[])
             /* bug 5412: spamc -x should not output the message on error */
             if ((flags & SPAMC_SAFE_FALLBACK) || result == EX_TOOBIG) {
                 get_output_fd(&out_fd);
-                message_dump(STDIN_FILENO, out_fd, &m);
+                message_dump(STDIN_FILENO, out_fd, &m, flags);
             }
             /* else, do NOT get_output_fd() (bug 5478) */
         }
@@ -1024,6 +1055,11 @@ main(int argc, char *argv[])
         }
         else if (use_exit_code) {
             ret = result;
+	}
+	
+        /* If -x and -X are used, change from EX_UNAVAILABLE TO EX_TEMPFAIL - bug 6717 */
+	if ((!(flags & SPAMC_SAFE_FALLBACK)) && (flags & SPAMC_UNAVAIL_TEMPFAIL) && (ret == EX_UNAVAILABLE)) {
+	    ret = EX_TEMPFAIL;
 	}
     }
     

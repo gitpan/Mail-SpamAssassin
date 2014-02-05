@@ -290,7 +290,7 @@ donotignorethiswww.delimtest14.com	donotignorethiswww.delimtest14.com
 
 # first confirm that it will not match on not a TLD
 example.foo	!^http://example.foo$
-example.xxx	!^http://example.xxx$
+example.zzf	!^http://example.zzf$
 
 example.ac	^http://example.ac$
 example.ad	^http://example.ad$
@@ -487,7 +487,7 @@ example.pg	^http://example.pg$
 example.ph	^http://example.ph$
 example.pk	^http://example.pk$
 example.pl	^http://example.pl$
-example.pm	!^http://example.pm$
+example.pm	^http://example.pm$
 example.pn	^http://example.pn$
 example.pr	^http://example.pr$
 example.pro	^http://example.pro$
@@ -514,7 +514,7 @@ example.sk	^http://example.sk$
 example.sl	^http://example.sl$
 example.sm	^http://example.sm$
 example.sn	^http://example.sn$
-example.so	!^http://example.so$
+example.so	^http://example.so$
 example.sr	^http://example.sr$
 example.st	^http://example.st$
 example.su	^http://example.su$
@@ -557,7 +557,7 @@ example.vu	^http://example.vu$
 example.wf	^http://example.wf$
 example.ws	^http://example.ws$
 example.ye	^http://example.ye$
-example.yt	!^http://example.yt$
+example.yt	^http://example.yt$
 example.yu	!^http://example.yu$
 example.za	^http://example.za$
 example.zm	^http://example.zm$
@@ -566,7 +566,7 @@ example.zw	^http://example.zw$
 # with www. prefix tests a different table of TLDs
 
 www.example.foo	!^http://www.example.foo$
-www.example.xxx	!^http://www.example.xxx$
+www.example.zzf	!^http://www.example.zzf$
 
 www.example.ac	^http://www.example.ac$
 www.example.ad	^http://www.example.ad$
@@ -763,7 +763,7 @@ www.example.pg	^http://www.example.pg$
 www.example.ph	^http://www.example.ph$
 www.example.pk	^http://www.example.pk$
 www.example.pl	^http://www.example.pl$
-www.example.pm	!^http://www.example.pm$
+www.example.pm	^http://www.example.pm$
 www.example.pn	^http://www.example.pn$
 www.example.pr	^http://www.example.pr$
 www.example.pro	^http://www.example.pro$
@@ -790,7 +790,7 @@ www.example.sk	^http://www.example.sk$
 www.example.sl	^http://www.example.sl$
 www.example.sm	^http://www.example.sm$
 www.example.sn	^http://www.example.sn$
-www.example.so	!^http://www.example.so$
+www.example.so	^http://www.example.so$
 www.example.sr	^http://www.example.sr$
 www.example.st	^http://www.example.st$
 www.example.su	^http://www.example.su$
@@ -833,7 +833,7 @@ www.example.vu	^http://www.example.vu$
 www.example.wf	^http://www.example.wf$
 www.example.ws	^http://www.example.ws$
 www.example.ye	^http://www.example.ye$
-www.example.yt	!^http://www.example.yt$
+www.example.yt	^http://www.example.yt$
 www.example.yu	!^http://www.example.yu$
 www.example.za	^http://www.example.za$
 www.example.zm	^http://www.example.zm$

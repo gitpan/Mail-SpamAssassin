@@ -42,15 +42,25 @@ use re 'taint';
 
 use Mail::SpamAssassin;
 use Mail::SpamAssassin::Logger;
+use Mail::SpamAssassin::Constants qw(:ip);
+use Mail::SpamAssassin::Util qw(untaint_var decode_dns_question_entry);
 
 use Socket;
-use IO::Socket::INET;
 use Errno qw(EADDRINUSE EACCES);
 use Time::HiRes qw(time);
 
-use constant HAS_SOCKET_INET6 => eval { require IO::Socket::INET6; };
-
 our @ISA = qw();
+
+use vars qw($io_socket_module_name);
+BEGIN {
+  if (eval { require IO::Socket::IP }) {
+    $io_socket_module_name = 'IO::Socket::IP';
+  } elsif (eval { require IO::Socket::INET6 }) {
+    $io_socket_module_name = 'IO::Socket::INET6';
+  } elsif (eval { require IO::Socket::INET }) {
+    $io_socket_module_name = 'IO::Socket::INET';
+  }
+}
 
 ###########################################################################
 
@@ -82,52 +92,72 @@ Load the C<Net::DNS::Resolver> object.  Returns 0 if Net::DNS cannot be used,
 sub load_resolver {
   my ($self) = @_;
 
-  if (defined $self->{res}) { return 1; }
+  if ($self->{res}) { return 1; }
   $self->{no_resolver} = 1;
+
   # force only ipv4 if no IO::Socket::INET6 or ipv6 doesn't work
-  # to be safe test both ipv6 and ipv4 addresses in INET6
-  my $force_ipv4 = (!HAS_SOCKET_INET6) || $self->{main}->{force_ipv4} ||
-    !eval {
-      my $sock6 = IO::Socket::INET6->new(
-                                         LocalAddr => "::",
-                                         Proto     => 'udp',
-                                         );
-      if ($sock6) {
-        $sock6->close()  or die "error closing inet6 socket: $!";
-        1;
+  my $force_ipv4 = $self->{main}->{force_ipv4};
+  my $force_ipv6 = $self->{main}->{force_ipv6};
+
+  if (!$force_ipv4 && $io_socket_module_name eq 'IO::Socket::INET') {
+    dbg("dns: socket module for IPv6 support not available");
+    die "Use of IPv6 requested, but not available\n"  if $force_ipv6;
+    $force_ipv4 = 1; $force_ipv6 = 0;
+  }
+  if (!$force_ipv4) {  # test drive IPv6
+    eval {
+      my $sock6;
+      if ($io_socket_module_name) {
+        $sock6 = $io_socket_module_name->new(LocalAddr=>'::', Proto=>'udp');
       }
-    } ||
-    !eval {
-      my $sock6 = IO::Socket::INET6->new(
-                                         LocalAddr => "0.0.0.0",
-                                         PeerAddr => "0.0.0.0",
-					 PeerPort => 53,
-                                         Proto     => 'udp',
-                                         );
-      if ($sock6) {
-        $sock6->close()  or die "error closing inet4 socket: $!";
-        1;
-      }
-    };
+      if ($sock6) { $sock6->close() or warn "error closing socket: $!" }
+      $sock6;
+    } or do {
+      dbg("dns: socket module %s is available, but no host support for IPv6",
+          $io_socket_module_name);
+      die "Use of IPv6 requested, but not available\n"  if $force_ipv6;
+      $force_ipv4 = 1; $force_ipv6 = 0;
+    }
+  }
   
   eval {
     require Net::DNS;
-    # force_v4 is set in new() to avoid error in older versions of Net::DNS that don't have it
-    # other options are set by function calls so a typo or API change will cause an error here
-    $self->{res} = Net::DNS::Resolver->new(force_v4 => $force_ipv4);
-    if (defined $self->{res}) {
+    # force_v4 is set in new() to avoid error in older versions of Net::DNS
+    # that don't have it; other options are set by function calls so a typo
+    # or API change will cause an error here
+    my $res = $self->{res} = Net::DNS::Resolver->new(force_v4 => $force_ipv4);
+    if ($res) {
       $self->{no_resolver} = 0;
       $self->{force_ipv4} = $force_ipv4;
-      $self->{retry} = 1;               # retries for non-backgrounded query
-      $self->{retrans} = 3;   # initial timeout for "non-backgrounded" query run in background
-      $self->{res}->retry(1);           # If it fails, it fails
-      $self->{res}->retrans(0);         # If it fails, it fails
-      $self->{res}->dnsrch(0);          # ignore domain search-list
-      $self->{res}->defnames(0);        # don't append stuff to end of query
-      $self->{res}->tcp_timeout(3);     # timeout of 3 seconds only
-      $self->{res}->udp_timeout(3);     # timeout of 3 seconds only
-      $self->{res}->persistent_tcp(0);  # bug 3997
-      $self->{res}->persistent_udp(0);  # bug 3997
+      $self->{force_ipv6} = $force_ipv6;
+      $self->{retry} = 1;       # retries for non-backgrounded query
+      $self->{retrans} = 3;     # initial timeout for "non-backgrounded"
+                                #   query run in background
+
+      $res->retry(1);           # If it fails, it fails
+      $res->retrans(0);         # If it fails, it fails
+      $res->dnsrch(0);          # ignore domain search-list
+      $res->defnames(0);        # don't append stuff to end of query
+      $res->tcp_timeout(3);     # timeout of 3 seconds only
+      $res->udp_timeout(3);     # timeout of 3 seconds only
+      $res->persistent_tcp(0);  # bug 3997
+      $res->persistent_udp(0);  # bug 3997
+
+      # RFC 6891 (ex RFC 2671): EDNS0, value is a requestor's UDP payload size
+      my $edns = $self->{conf}->{dns_options}->{edns};
+      if ($edns && $edns > 512) {
+        $res->udppacketsize($edns);
+        dbg("dns: EDNS, UDP payload size %d", $edns);
+      }
+
+      # set $res->nameservers for the benefit of plugins which don't use
+      # our send/bgsend infrastructure but rely on Net::DNS::Resolver entirely
+      my @ns_addr_port = $self->available_nameservers();
+      local($1,$2);
+      # drop port numbers, Net::DNS::Resolver can't take them
+      @ns_addr_port = map(/^\[(.*)\]:(\d+)\z/ ? $1 : $_, @ns_addr_port);
+      dbg("dns: nameservers set to %s", join(', ', @ns_addr_port));
+      $res->nameservers(@ns_addr_port);
     }
     1;
   } or do {
@@ -135,7 +165,9 @@ sub load_resolver {
     dbg("dns: eval failed: $eval_stat");
   };
 
-  dbg("dns: no ipv6") if $force_ipv4;
+  dbg("dns: using socket module: %s%s", $io_socket_module_name,
+      $self->{force_ipv4} ? ', forced IPv4' :
+      $self->{force_ipv6} ? ', forced IPv6' : '');
   dbg("dns: is Net::DNS::Resolver available? %s",
       $self->{no_resolver} ? "no" : "yes" );
   if (!$self->{no_resolver} && defined $Net::DNS::VERSION) {
@@ -156,17 +188,153 @@ sub get_resolver {
   return $self->{res};
 }
 
-=item $res->nameservers()
+=item $res->configured_nameservers()
 
-Wrapper for Net::DNS::Resolver->nameservers to get or set list of nameservers
+Get a list of nameservers as configured by dns_server directives
+or as provided by Net::DNS, typically from /etc/resolv.conf
 
 =cut
 
-sub nameservers {
+sub configured_nameservers {
   my $self = shift;
+
   my $res = $self->{res};
-  $self->connect_sock_if_reqd();
-  return $res->nameservers(@_) if $res;
+  my @ns_addr_port;  # list of name servers: [addr]:port entries
+  if ($self->{conf}->{dns_servers}) {  # specified in a config file
+    @ns_addr_port = @{$self->{conf}->{dns_servers}};
+    dbg("dns: servers set by config to: %s", join(', ',@ns_addr_port));
+  } elsif ($res) {  # default as provided by Net::DNS, e.g. /etc/resolv.conf
+    @ns_addr_port = map(untaint_var("[$_]:" . $res->{port}),
+                        @{$res->{nameservers}});
+    dbg("dns: servers obtained from Net::DNS : %s", join(', ',@ns_addr_port));
+  }
+  return @ns_addr_port;
+}
+
+=item $res->available_nameservers()
+
+Get or set a list of currently available nameservers,
+which is typically a known-to-be-good subset of configured nameservers
+
+=cut
+
+sub available_nameservers {
+  my $self = shift;
+
+  if (@_) {
+    $self->{available_dns_servers} = [ @_ ];  # copy
+    dbg("dns: servers set by a caller to: %s",
+         join(', ',@{$self->{available_dns_servers}}));
+  } elsif (!$self->{available_dns_servers}) {
+    # a list of configured name servers: [addr]:port entries
+    $self->{available_dns_servers} = [ $self->configured_nameservers() ];
+  }
+  if ($self->{force_ipv4} || $self->{force_ipv6}) {
+    # filter the list according to a chosen protocol family
+    my $ip4_re = IPV4_ADDRESS;
+    my(@filtered_addr_port);
+    for (@{$self->{available_dns_servers}}) {
+      local($1,$2);
+      /^ \[ (.*) \] : (\d+) \z/xs  or next;
+      my($addr,$port) = ($1,$2);
+      if ($addr =~ /^${ip4_re}\z/o) {
+        push(@filtered_addr_port, $_)  unless $self->{force_ipv6};
+      } elsif ($addr =~ /:.*:/) {
+        push(@filtered_addr_port, $_)  unless $self->{force_ipv4};
+      } else {
+        warn "Unrecognized DNS server specification: $_";
+      }
+    }
+    if (@filtered_addr_port < @{$self->{available_dns_servers}}) {
+      dbg("dns: filtered DNS servers according to protocol family: %s",
+          join(", ",@filtered_addr_port));
+    }
+    @{$self->{available_dns_servers}} = @filtered_addr_port;
+  }
+  die "available_nameservers: No DNS servers available!\n"
+    if !@{$self->{available_dns_servers}};
+  return @{$self->{available_dns_servers}};
+}
+
+sub disable_available_port {
+  my($self, $lport) = @_;
+  if ($lport >= 0 && $lport <= 65535) {
+    my $conf = $self->{conf};
+    if (!defined $conf->{dns_available_portscount}) {
+      $self->pick_random_available_port();  # initialize
+    }
+    if (vec($conf->{dns_available_ports_bitset}, $lport, 1)) {
+      dbg("dns: disabling local port %d", $lport);
+      vec($conf->{dns_available_ports_bitset}, $lport, 1) = 0;
+      $conf->{dns_available_portscount_buckets}->[$lport >> 8] --;
+      $conf->{dns_available_portscount} --;
+    }
+  }
+}
+
+sub pick_random_available_port {
+  my $self = shift;
+  my $port_number;  # resulting port number, or undef if none available
+
+  my $conf = $self->{conf};
+  my $available_portscount = $conf->{dns_available_portscount};
+
+  # initialize when called for the first time or after a config change
+  if (!defined $available_portscount) {
+    my $ports_bitset = $conf->{dns_available_ports_bitset};
+    if (!defined $ports_bitset) {  # ensure it is initialized
+      Mail::SpamAssassin::Conf::set_ports_range(\$ports_bitset, 0, 0, 0);
+      $conf->{dns_available_ports_bitset} = $ports_bitset;
+    }
+    # prepare auxilliary data structure to speed up further free-port lookups;
+    # 256 buckets, each accounting for 256 ports: 8+8 = 16 bit port numbers;
+    # each bucket holds a count of available ports in its range
+    my @bucket_counts = (0) x 256;
+    my $all_zeroes = "\000" x 32;  # one bucket's worth (256) of zeroes
+    my $all_ones   = "\377" x 32;  # one bucket's worth (256) of ones
+    my $ind = 0;
+    $available_portscount = 0;  # number of all available ports
+    foreach my $bucket (0..255) {
+      my $cnt = 0;
+      my $b = substr($ports_bitset, $bucket*32, 32);  # one bucket: 256 bits
+      if  ($b eq $all_zeroes) { $ind += 256 }
+      elsif ($b eq $all_ones) { $ind += 256; $cnt += 256 }
+      else {  # count nontrivial cases the slow way
+        foreach (0..255) { if (vec($ports_bitset, $ind++, 1)) { $cnt++ } }
+      }
+      $available_portscount += $cnt;
+      $bucket_counts[$bucket] = $cnt;
+    }
+    $conf->{dns_available_portscount} = $available_portscount;
+    if ($available_portscount) {
+      $conf->{dns_available_portscount_buckets} = \@bucket_counts;
+    } else {  # save some storage
+      $conf->{dns_available_portscount_buckets} = undef;
+      $conf->{dns_available_ports_bitset} = '';
+    }
+  }
+
+  # find the n-th port number from the ordered set of available port numbers
+  dbg("dns: %d configured local ports for DNS queries", $available_portscount);
+  if ($available_portscount > 0) {
+    my $ports_bitset = $conf->{dns_available_ports_bitset};
+    my $n = int(rand($available_portscount));
+    my $bucket_counts_ref = $conf->{dns_available_portscount_buckets};
+    my $ind = 0;
+    foreach my $bucket (0..255) {
+      # find the bucket containing n-th turned-on bit
+      my $cnt = $bucket_counts_ref->[$bucket];
+      if ($cnt > $n) { last } else { $n -= $cnt; $ind += 256 }
+    }
+    while ($ind <= 65535) {  # scans one bucket, runs at most 256 iterations
+      # find the n-th turned-on bit within the corresponding bucket
+      if (vec($ports_bitset, $ind, 1)) {
+        if ($n <= 0) { $port_number = $ind; last } else { $n-- }
+      }
+      $ind++;
+    }
+  }
+  return $port_number;
 }
 
 =item $res->connect_sock()
@@ -179,65 +347,90 @@ platform-dependent source, as provided by C<Net::DNS>.
 sub connect_sock {
   my ($self) = @_;
 
+  dbg("dns: connect_sock, resolver: %s", $self->{no_resolver} ? "no" : "yes");
   return if $self->{no_resolver};
 
+  $io_socket_module_name
+    or die "No Perl modules for network socket available";
+
   if ($self->{sock}) {
-    $self->{sock}->close()  or die "error closing socket: $!";
+    $self->{sock}->close()
+      or info("connect_sock: error closing socket %s: %s", $self->{sock}, $!);
+    $self->{sock} = undef;
   }
   my $sock;
   my $errno;
 
-  # IO::Socket::INET6 may choose wrong LocalAddr if family is unspecified,
-  # causing EINVAL failure when automatically assigned local IP address
-  # and remote address do not belong to the same address family:
-  use Mail::SpamAssassin::Constants qw(:ip);
-  my $ip64 = IP_ADDRESS;
-  my $ip4 = IPV4_ADDRESS;
-  my $ns = $self->{res}->{nameservers}[0];
-  my $ipv6opt = !($self->{force_ipv4});
+  # list of name servers: [addr]:port entries
+  my @ns_addr_port = $self->available_nameservers();
+  # use the first name server in a list
+  my($ns_addr,$ns_port); local($1,$2);
+  ($ns_addr,$ns_port) = ($1,$2)  if $ns_addr_port[0] =~ /^\[(.*)\]:(\d+)\z/;
 
-  # ensure families of src and dest addresses match (bug 4412 comment 29)
+  # Ensure families of src and dest addresses match (bug 4412 comment 29).
+  # Older IO::Socket::INET6 may choose a wrong LocalAddr if protocol family
+  # is unspecified, causing EINVAL failure when automatically assigned local
+  # IP address and a remote address do not belong to the same address family.
+  # Let's choose a suitable source address if possible.
+  my $ip4_re = IPV4_ADDRESS;
   my $srcaddr;
-  if ($ipv6opt && $ns=~/^${ip64}$/o && $ns!~/^${ip4}$/o) {
-    $srcaddr = "::";
-  } else {
+  if ($self->{force_ipv4}) {
     $srcaddr = "0.0.0.0";
+  } elsif ($self->{force_ipv6}) {
+    $srcaddr = "::";
+  } elsif ($ns_addr =~ /^${ip4_re}\z/o) {
+    $srcaddr = "0.0.0.0";
+  } elsif ($ns_addr =~ /:.*:/) {
+    $srcaddr = "::";
+  } else {  # unrecognized
+    # unspecified address, unspecified protocol family
   }
+  dbg("dns: LocalAddr: %s, name server(s): %s",
+      $srcaddr||'', join(', ',@ns_addr_port));
 
-  dbg("dns: name server: %s, LocalAddr: %s", $ns,$srcaddr);
-
-  # find next available unprivileged port (1024 - 65535)
-  # starting at a random value to spread out use of ports
-  my $port_offset = int(rand(64511));  # 65535 - 1024
-  for (my $i = 0; $i<64511; $i++) {
-    my $lport = 1024 + (($port_offset + $i) % 64511);
-
+  # find a free local random port from a set of declared-to-be-available ports
+  my $lport;
+  my $attempts = 0;
+  for (;;) {
+    $attempts++;
+    $lport = $self->pick_random_available_port();
+    if (!defined $lport) {
+      $lport = 0;
+      dbg("no configured local ports for DNS queries, letting OS choose");
+    }
+    if ($attempts+1 > 50) {  # sanity check
+      warn "could not create a DNS resolver socket in $attempts attempts\n";
+      $errno = 0;
+      last;
+    }
     my %args = (
-        PeerAddr => $ns,
-        PeerPort => $self->{res}->{port},
-        Proto => 'udp',
+        PeerAddr => $ns_addr,
+        PeerPort => $ns_port,
+        LocalAddr => $srcaddr,
         LocalPort => $lport,
         Type => SOCK_DGRAM,
-        LocalAddr => $srcaddr,
+        Proto => 'udp',
     );
+    $sock = $io_socket_module_name->new(%args);
 
-    if ($ipv6opt) {
-      $sock = IO::Socket::INET6->new(%args);
-    } else {
-      $sock = IO::Socket::INET->new(%args);
-    }
-    $errno = $!;
-    if (defined $sock) {  # ok, got it
-      last;
-    } elsif ($! == EADDRINUSE || $! == EACCES) {  # in use, let's try another source port
-      dbg("dns: UDP port %s already in use, trying another port", $lport);
+    last if $sock;  # ok, got it
+
+    # IO::Socket::IP constructor provides full error messages in $@
+    $errno = $io_socket_module_name eq 'IO::Socket::IP' ? $@ : $!;
+
+    if ($! == EADDRINUSE || $! == EACCES) {
+      # in use, let's try another source port
+      dbg("dns: UDP port $lport already in use, trying another port");
+      if ($self->{conf}->{dns_available_portscount} > 100) {  # still abundant
+        $self->disable_available_port($lport);
+      }
     } else {
       warn "error creating a DNS resolver socket: $errno";
       goto no_sock;
     }
   }
-  if (!defined $sock) {
-    warn "cannot create a DNS resolver socket: $errno";
+  if (!$sock) {
+    warn "could not create a DNS resolver socket in $attempts attempts: $errno";
     goto no_sock;
   }
 
@@ -246,14 +439,15 @@ sub connect_sock {
     $bufsiz = $sock->sockopt(Socket::SO_RCVBUF)
       or die "cannot get a resolver socket rx buffer size: $!";
     if ($bufsiz >= 32*1024) {
-      dbg("dns: resolver socket rx buffer size is %d bytes", $bufsiz);
+      dbg("dns: resolver socket rx buffer size is %d bytes, local port %d",
+           $bufsiz, $lport);
     } else {
       $sock->sockopt(Socket::SO_RCVBUF, 32*1024)
         or die "cannot set a resolver socket rx buffer size: $!";
       $newbufsiz = $sock->sockopt(Socket::SO_RCVBUF)
         or die "cannot get a resolver socket rx buffer size: $!";
-      dbg("dns: resolver socket rx buffer size changed from %d to %d bytes",
-          $bufsiz, $newbufsiz);
+      dbg("dns: resolver socket rx buffer size changed from %d to %d bytes, ".
+          "local port %d", $bufsiz, $newbufsiz, $lport);
     }
     1;
   } or do {
@@ -266,7 +460,8 @@ sub connect_sock {
   return;
 
 no_sock:
-  $self->{no_resolver} = 1;
+  undef $self->{sock};
+  undef $self->{sock_as_vec};
 }
 
 sub connect_sock_if_reqd {
@@ -289,52 +484,127 @@ sub get_sock {
 
 ###########################################################################
 
-=item $packet = new_dns_packet ($host, $type, $class)
+=item $packet = new_dns_packet ($domain, $type, $class)
 
 A wrapper for C<Net::DNS::Packet::new()> which traps a die thrown by it.
 
 To use this, change calls to C<Net::DNS::Resolver::bgsend> from:
 
-    $res->bgsend($hostname, $type);
+    $res->bgsend($domain, $type);
 
 to:
 
-    $res->bgsend(Mail::SpamAssassin::DnsResolver::new_dns_packet($hostname, $type, $class));
+    $res->bgsend(Mail::SpamAssassin::DnsResolver::new_dns_packet($domain, $type, $class));
 
 =cut
 
+# implements draft-vixie-dnsext-dns0x20-00
+#
+sub dnsext_dns0x20 {
+  my ($string) = @_;
+  my $rnd;
+  my $have_rnd_bits = 0;
+  my $result = '';
+  for my $ic (unpack("C*",$string)) {
+    if (chr($ic) =~ /^[A-Za-z]\z/) {
+      if ($have_rnd_bits < 1) {
+        # only reveal few bits at a time, hiding most of the accumulator
+        $rnd = int(rand(0x7fffffff)) & 0xff;  $have_rnd_bits = 8;
+      }
+      $ic ^= 0x20  if $rnd & 1;  # flip the 0x20 bit in name if dice says so
+      $rnd = $rnd >> 1;  $have_rnd_bits--;
+    }
+    $result .= chr($ic);
+  }
+  return $result;
+}
+
+# this subroutine mimics the Net::DNS::Resolver::Base::make_query_packet()
+#
 sub new_dns_packet {
-  my ($self, $host, $type, $class) = @_;
+  my ($self, $domain, $type, $class) = @_;
 
   return if $self->{no_resolver};
 
   # construct a PTR query if it looks like an IPv4 address
-  if ((!defined($type) || $type eq 'PTR') && $host =~ /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/) {
-    $host = "$4.$3.$2.$1.in-addr.arpa.";
-    $type = 'PTR';
+  if (!defined($type) || $type eq 'PTR') {
+    local($1,$2,$3,$4);
+    if ($domain =~ /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/) {
+      $domain = "$4.$3.$2.$1.in-addr.arpa.";
+      $type = 'PTR';
+    }
   }
+  $type  = 'A'   if !defined $type;   # a Net::DNS::Packet default
+  $class = 'IN'  if !defined $class;  # a Net::DNS::Packet default
 
-  $self->connect_sock_if_reqd();
   my $packet;
   eval {
-    $packet = Net::DNS::Packet->new($host, $type, $class);
+
+    if (utf8::is_utf8($domain)) {  # since Perl 5.8.1
+      info("dns: new_dns_packet: domain is utf8 flagged: %s", $domain);
+    }
+
+    $domain =~ s/\.*\z/./s;
+    if (length($domain) > 255) {
+      die "domain name longer than 255 bytes\n";
+    } elsif ($domain !~ /^ (?: [^.]{1,63} \. )+ \z/sx) {
+      if ($domain !~ /^ (?: [^.]+ \. )+ \z/sx) {
+        die "a domain name contains a null label\n";
+      } else {
+        die "a label in a domain name is longer than 63 bytes\n";
+      }
+    }
+
+    if ($self->{conf}->{dns_options}->{dns0x20}) {
+      $domain = dnsext_dns0x20($domain);
+    } else {
+      $domain =~ tr/A-Z/a-z/;  # lowercase, limited to plain ASCII
+    }
+
+    # Net::DNS expects RFC 1035 zone format encoding even in its API, silly!
+    # Since 0.68 it also assumes that domain names containing characters
+    # with codes above 0177 imply that IDN translation is to be performed.
+    # Protect also nonprintable characters just in case, ensuring transparency.
+    $domain =~ s{ ( [\000-\037\177-\377\\] ) }
+                { $1 eq '\\' ? "\\$1" : sprintf("\\%03d",ord($1)) }xgse;
+
+    $packet = Net::DNS::Packet->new($domain, $type, $class);
 
     # a bit noisy, so commented by default...
-    #dbg("dns: new DNS packet time=%s host=%s type=%s id=%s",
-    #    time, $host, $type, $packet->id);
+    #dbg("dns: new DNS packet time=%.3f domain=%s type=%s id=%s",
+    #    time, $domain, $type, $packet->id);
     1;
   } or do {
+    # this can if a domain name in a query is invalid, or if a timeout signal
+    # happened to be trapped by this eval, or if Net::DNS signalled an error
     my $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
-    # this can happen if Net::DNS isn't available -- but in this
-    # case this function should never be called!
-    warn "dns: cannot create Net::DNS::Packet, but new_dns_packet() was called: $eval_stat";
+    # resignal if alarm went off
+    die "dns: (1) $eval_stat\n"  if $eval_stat =~ /__alarm__ignore__\(.*\)/s;
+    warn sprintf(
+           "dns: new_dns_packet (domain=%s type=%s class=%s) failed: %s\n",
+           $domain, $type, $class, $eval_stat);
   };
+
+  if ($packet) {
+  # my $udp_payload_size = $self->{res}->udppacketsize;
+    my $udp_payload_size = $self->{conf}->{dns_options}->{edns};
+    if ($udp_payload_size && $udp_payload_size > 512) {
+    # dbg("dns: adding EDNS ext, UDP payload size %d", $udp_payload_size);
+      if ($packet->UNIVERSAL::can('edns')) {  # available since Net::DNS 0.69
+        $packet->edns->size($udp_payload_size);
+      } else {  # legacy mechanism
+        my $optrr = Net::DNS::RR->new(Type => 'OPT', Name => '', TTL => 0,
+                                      Class => $udp_payload_size);
+        $packet->push('additional', $optrr);
+      }
+    }
+  }
 
   return $packet;
 }
 
 # Internal function used only in this file
-## compute an unique ID for a packet to match the query to the reply
+## compute a unique ID for a packet to match the query to the reply
 ## It must use only data that is returned unchanged by the nameserver.
 ## Argument is a Net::DNS::Packet that has a non-empty question section,
 ## return is an (opaque) string that can be used as a hash key
@@ -343,9 +613,11 @@ sub _packet_id {
   my $header = $packet->header;
   my $id = $header->id;
   my @questions = $packet->question;
-  my $ques = $questions[0];
 
-  if (defined $ques) {
+  @questions <= 1
+    or warn "dns: packet has multiple questions: " . $packet->string . "\n";
+
+  if ($questions[0]) {
     # Bug 6232: Net::DNS::Packet::new is not consistent in keeping data in
     # sections of a packet either as original bytes or presentation-encoded:
     # creating a query packet as above in new_dns_packet() keeps label in
@@ -354,28 +626,31 @@ sub _packet_id {
     # Net::DNS::Packet::dn_expand and Net::DNS::wire2presentation in turn.
     # Let's undo the effect of the wire2presentation routine here to make
     # sure the query section of an answer packet matches the query section
-    # in our packet formed by new_dns_packet():
+    # in our packet as formed by new_dns_packet():
     #
-    my $qname = $ques->qname;
-    $qname =~ s/\\([0-9]{3}|.)/length($1)==1 ? $1 : chr($1)/gse;
-    return join '/', $id, $qname, $ques->qtype, $ques->qclass;
+    my($class,$type,$qname) = decode_dns_question_entry($questions[0]);
+    $qname =~ tr/A-Z/a-z/  if !$self->{conf}->{dns_options}->{dns0x20};
+    return join('/', $id, $class, $type, $qname);
 
   } else {
-    # odd.  this should not happen, but clearly some DNS servers
-    # can return something that Net::DNS interprets as having no
-    # question section.  Better support it; just return the
-    # (safe) ID part, along with a text token indicating that
-    # the packet had no question part.
+    # Odd, this should not happen, a DNS servers is supposed to retain
+    # a question section in its reply.  There is a bug in Net::DNS 0.72
+    # and earlier where a signal (e.g. a timeout alarm) during decoding
+    # of a reply packet produces a seemingly valid packet object, but
+    # with missing sections - see [rt.cpan.org #83451] .
     #
-    return $id . "NO_QUESTION_IN_PACKET";
+    # Better support it; just return the (safe) ID part, along with
+    # a text token indicating that the packet had no question part.
+    #
+    return $id . "/NO_QUESTION_IN_PACKET";
   }
 }
 
 ###########################################################################
 
-=item $id = $res->bgsend($host, $type, $class, $cb)
+=item $id = $res->bgsend($domain, $type, $class, $cb)
 
-Quite similar to C<Net::DNS::Resolver::bgsend>, except that when a response
+Quite similar to C<Net::DNS::Resolver::bgsend>, except that when a reply
 packet eventually arrives, and C<poll_responses> is called, the callback
 sub reference C<$cb> will be called.
 
@@ -388,7 +663,7 @@ reply. The third argument is a timestamp (Unix time, floating point), captured
 at the time the packet was collected. It is expected that a closure callback
 be used, like so:
 
-  my $id = $self->{resolver}->bgsend($host, $type, undef, sub {
+  my $id = $self->{resolver}->bgsend($domain, $type, undef, sub {
         my ($reply, $reply_id, $timestamp) = @_;
         $self->got_a_reply ($reply, $reply_id);
       });
@@ -399,18 +674,40 @@ port if the reply id does not match the return value from bgsend.
 =cut
 
 sub bgsend {
-  my ($self, $host, $type, $class, $cb) = @_;
+  my ($self, $domain, $type, $class, $cb) = @_;
   return if $self->{no_resolver};
 
   $self->{send_timed_out} = 0;
 
-  my $pkt = $self->new_dns_packet($host, $type, $class);
+  my $pkt = $self->new_dns_packet($domain, $type, $class);
+  return if !$pkt;  # just bail out, new_dns_packet already reported a failure
 
-  $self->connect_sock_if_reqd();
-  if (!defined($self->{sock}->send($pkt->data, 0))) {
-    warn "dns: sendto() failed: $!";
-    return;
+  my @ns_addr_port = $self->available_nameservers();
+  dbg("dns: bgsend, DNS servers: %s", join(', ',@ns_addr_port));
+  my $n_servers = scalar @ns_addr_port;
+
+  my $ok;
+  for (my $attempts=1; $attempts <= $n_servers; $attempts++) {
+    dbg("dns: attempt %d/%d, trying connect/sendto to %s",
+        $attempts, $n_servers, $ns_addr_port[0]);
+    $self->connect_sock_if_reqd();
+    if ($self->{sock} && defined($self->{sock}->send($pkt->data, 0))) {
+      $ok = 1; last;
+    } else {  # any other DNS servers in a list to try?
+      my $msg = !$self->{sock} ? "unable to connect to $ns_addr_port[0]"
+                               : "sendto() to $ns_addr_port[0] failed: $!";
+      $self->finish_socket();
+      if ($attempts >= $n_servers) {
+        warn "dns: $msg, no more alternatives\n";
+        last;
+      }
+      # try with a next DNS server, rotate the list left
+      warn "dns: $msg, failing over to $ns_addr_port[1]\n";
+      push(@ns_addr_port, shift(@ns_addr_port));
+      $self->available_nameservers(@ns_addr_port);
+    }
   }
+  return if !$ok;
   my $id = $self->_packet_id($pkt);
   dbg("dns: providing a callback for id: $id");
   $self->{id_to_callback}->{$id} = $cb;
@@ -421,7 +718,7 @@ sub bgsend {
 
 =item $nfound = $res->poll_responses()
 
-See if there are any C<bgsend> response packets ready, and return
+See if there are any C<bgsend> reply packets ready, and return
 the number of such packets delivered to their callbacks.
 
 =cut
@@ -436,14 +733,29 @@ sub poll_responses {
   my $rout;
 
   for (;;) {
-    my ($nfound, $timeleft);
-    { my $timer;  # collects timestamp when variable goes out of scope
+    my ($nfound, $timeleft, $eval_stat);
+    eval {  # use eval to catch alarm signal
+      my $timer;  # collects timestamp when variable goes out of scope
       if (!defined($timeout) || $timeout > 0)
         { $timer = $self->{main}->time_method("poll_dns_idle") }
+      $! = 0;
       ($nfound, $timeleft) = select($rout=$rin, undef, undef, $timeout);
-    }
-    if (!defined $nfound || $nfound < 0) {
-      warn "dns: select failed: $!";
+      1;
+    } or do {
+      $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
+    };
+    if (defined $eval_stat) {
+      # most likely due to an alarm signal, resignal if so
+      die "dns: (2) $eval_stat\n"  if $eval_stat =~ /__alarm__ignore__\(.*\)/s;
+      warn "dns: select aborted: $eval_stat\n";
+      return;
+    } elsif (!defined $nfound || $nfound < 0) {
+      if ($!) { warn "dns: select failed: $!\n" }
+      else    { info("dns: select interrupted") }  # shouldn't happen
+      return;
+    } elsif (!$nfound) {
+      if (!defined $timeout) { warn("dns: select returned empty-handed\n") }
+      elsif ($timeout > 0) { dbg("dns: select timed out %.3f s", $timeout) }
       return;
     }
 
@@ -452,27 +764,63 @@ sub poll_responses {
     last  if $nfound == 0;
 
     my $packet = $self->{res}->bgread($self->{sock});
-    my $err = $self->{res}->errorstring;
 
-    if (defined $packet &&
-        defined $packet->header &&
-        defined $packet->question &&
-        defined $packet->answer)
-    {
-      my $id = $self->_packet_id($packet);
-
-      my $cb = delete $self->{id_to_callback}->{$id};
-      if (!$cb) {
-        dbg("dns: no callback for id: %s, ignored; packet: %s",
-            $id,  $packet ? $packet->string : "undef" );
+    if (!$packet) {
+      my $dns_err = $self->{res}->errorstring;
+      # resignal if alarm went off
+      die "dns (3) $dns_err\n"  if $dns_err =~ /__alarm__ignore__\(.*\)/s;
+      info("dns: bad dns reply: $dns_err");
+    } else {
+      my $header = $packet->header;
+      if (!$header) {
+        info("dns: dns reply is missing a header section");
       } else {
-        $cb->($packet, $id, $now);
-        $cnt++;
+        my $rcode = $header->rcode;
+        my $packet_id = $header->id;
+        my $id = $self->_packet_id($packet);
+
+        if ($rcode eq 'NOERROR') {  # success
+          # NOERROR, may or may not have answer records
+          dbg("dns: dns reply %s is OK, %d answer records",
+              $packet_id, $header->ancount);
+          if ($header->tc) {  # truncation flag turned on
+            my $edns = $self->{conf}->{dns_options}->{edns} || 512;
+            info("dns: reply to %s truncated (%s), %d answer records", $id,
+                 $edns == 512 ? "EDNS off" : "EDNS $edns bytes",
+                 $header->ancount);
+          }
+        } else {
+          # some failure, e.g. NXDOMAIN, SERVFAIL, FORMERR, REFUSED, ...
+          # btw, one reason for SERVFAIL is an RR signature failure in DNSSEC
+          dbg("dns: dns reply to %s: %s", $id, $rcode);
+        }
+
+        # A hash lookup: the id must match exactly (case-sensitively).
+        # The domain name part of the id was lowercased if dns0x20 is off,
+        # and case-randomized when dns0x20 option is on.
+        #
+        my $cb = delete $self->{id_to_callback}->{$id};
+
+        if ($cb) {
+          $cb->($packet, $id, $now);
+          $cnt++;
+        } else {  # no match, report the problem
+          info("dns: no callback for id %s, ignored; packet: %s",
+               $id,  $packet ? $packet->string : "undef" );
+          # report a likely matching query for diagnostic purposes
+          local $1;
+          if ($id =~ m{^(\d+)/}) {
+            my $dnsid = $1;  # the raw DNS packet id
+            my @matches =
+              grep(m{^\Q$dnsid\E/}, keys %{$self->{id_to_callback}});
+            if (!@matches) {
+              info("dns: no likely matching queries for id %s", $dnsid);
+            } else {
+              info("dns: a likely matching query: %s", join(', ', @matches));
+            }
+          }
+        }
       }
-    }
-    else {
-      dbg("dns: no packet! err=%s packet=%s",
-          $err,  $packet ? $packet->string : "undef" );
     }
   }
 
@@ -500,11 +848,24 @@ sub bgabort {
 
 Emulates C<Net::DNS::Resolver::send()>.
 
+This subroutine is a simple synchronous leftover from SpamAssassin version
+3.3 and does not participate in packet query caching and callback grouping
+as implemented by AsyncLoop::bgsend_and_start_lookup().  As such it should
+be avoided for mainstream usage.
+
 =cut
 
 sub send {
   my ($self, $name, $type, $class) = @_;
   return if $self->{no_resolver};
+
+  # Avoid passing utf8 character strings to DNS, as it has no notion of
+  # character set encodings - encode characters somehow to plain bytes
+  # using some arbitrary encoding (they are normally just 7-bit ascii
+  # characters anyway, just need to get rid of the utf8 flag).  Bug 6959
+  # Most if not all af these come from a SPF plugin.
+  #
+  utf8::encode($name);
 
   my $retrans = $self->{retrans};
   my $retries = $self->{retry};
@@ -517,10 +878,12 @@ sub send {
 
     $timeout = 1 if ($timeout < 1);
     # note nifty use of a closure here.  I love closures ;)
-    $self->bgsend($name, $type, $class, sub {
+    my $id = $self->bgsend($name, $type, $class, sub {
       my ($reply, $reply_id, $timestamp) = @_;
       $answerpkt = $reply; $answerpkt_avail = 1;
     });
+
+    last if !defined $id;  # perhaps a restricted zone or a serious failure
 
     my $now = time;
     my $deadline = $now + $timeout;
@@ -565,8 +928,9 @@ Reset socket when done with it.
 sub finish_socket {
   my ($self) = @_;
   if ($self->{sock}) {
-    $self->{sock}->close()  or die "error closing socket: $!";
-    delete $self->{sock};
+    $self->{sock}->close()
+      or warn "finish_socket: error closing socket $self->{sock}: $!";
+    undef $self->{sock};
   }
 }
 
@@ -605,9 +969,8 @@ sub fhs_to_vec {
 # call Mail::SA::init() instead
 sub reinit_post_fork {
   my ($self) = @_;
-  # and a new socket, so we don't have 5 spamds sharing the same
-  # socket
-  $self->connect_sock();
+  # release parent's socket, don't want all spamds sharing the same socket
+  $self->finish_socket();
 }
 
 1;

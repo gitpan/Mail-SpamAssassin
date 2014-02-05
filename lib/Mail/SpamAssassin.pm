@@ -93,22 +93,33 @@ use vars qw{
   @site_rules_path
 };
 
-$VERSION = "3.003002";      # update after release (same format as perl $])
+$VERSION = "3.004000";      # update after release (same format as perl $])
 #$IS_DEVEL_BUILD = 1;        # change for release versions
 
 # Used during the prerelease/release-candidate part of the official release
 # process. If you hacked up your SA, you should add a version_tag to your .cf
 # files; this variable should not be modified.
-@EXTRA_VERSION = qw();
+@EXTRA_VERSION = qw(rc6);
 
 @ISA = qw();
 
 # SUB_VERSION is now just <yyyy>-<mm>-<dd>
-$SUB_VERSION = (split(/\s+/,'$LastChangedDate: 2011-06-06 23:57:17 +0000 (Mon, 06 Jun 2011) $ updated by SVN'))[1];
+$SUB_VERSION = 'svnunknown';
+if ('$LastChangedDate: 2014-02-05 00:05:04 -0500 (Wed, 05 Feb 2014) $' =~ ':') {
+  # Subversion keyword "$LastChangedDate: 2014-02-05 00:05:04 -0500 (Wed, 05 Feb 2014) $" has been successfully expanded.
+  # Doesn't happen with automated launchpad builds:
+  # https://bugs.launchpad.net/launchpad/+bug/780916
+  $SUB_VERSION = (split(/\s+/,'$LastChangedDate: 2014-02-05 00:05:04 -0500 (Wed, 05 Feb 2014) $ updated by SVN'))[1];
+}
+
 
 if (defined $IS_DEVEL_BUILD && $IS_DEVEL_BUILD) {
-  push(@EXTRA_VERSION,
-       ('r' . qw{$LastChangedRevision: 1132835 $ updated by SVN}[1]));
+  if ('$LastChangedRevision: 1564636 $' =~ ':') {
+    # Subversion keyword "$LastChangedRevision: 1564636 $" has been successfully expanded.
+    push(@EXTRA_VERSION, ('r' . qw{$LastChangedRevision: 1564636 $ updated by SVN}[1]));
+  } else {
+    push(@EXTRA_VERSION, ('r' . 'svnunknown'));
+  }
 }
 
 sub Version {
@@ -227,8 +238,15 @@ override of config files.
 
 =item force_ipv4
 
-If set to 1, DNS tests will not attempt to use IPv6. Use if the existing tests
-for IPv6 availability produce incorrect results or crashes.
+If set to 1, DNS or other network tests will prefer IPv4 and not attempt
+to use IPv6. Use if the existing tests for IPv6 availability produce
+incorrect results or crashes.
+
+=item force_ipv6
+
+For symmetry with force_ipv4: if set to 1, DNS or other network tests
+will prefer IPv6 and not attempt to use IPv4. Some plugins may disregard
+this setting and use whatever protocol family they are comfortable with.
 
 =item require_rules
 
@@ -263,7 +281,7 @@ value will be empty. Currently no built-in tags start with 'NO'. A later
 entry overrides previous one, e.g. ASN,NOASN,ASN,TIMING,NOASN is equivalent
 to TIMING,NOASN.
 
-For backwards compatibility, all tags available as of version 3.2.4 will
+For backward compatibility, all tags available as of version 3.2.4 will
 be available by default (unless disabled by NOtag), even if not requested
 through need_tags option. Future versions may provide new tags conditionally
 available.
@@ -304,6 +322,27 @@ such as Razor, Pyzor and DCC.
 If set, the C<username> attribute will use this as the current user's name.
 Otherwise, the default is taken from the runtime environment (ie. this process'
 effective UID under UNIX).
+
+=item skip_prng_reseeding
+
+If skip_prng_reseeding is set to true, the SpamAssassin library will B<not>
+call srand() to reseed a pseudo-random number generator (PRNG). The srand()
+Perl function should be called during initialization of each child process,
+soon after forking.
+
+Prior to version 3.4.0, calling srand() was handled by the SpamAssassin
+library.
+
+This setting requires the caller to decide when to call srand().
+This choice may be desired to preserve the entropy of a PRNG.  The default
+value of skip_prng_reseeding is false to maintain backward compatibility. 
+
+This option should only be set by a caller if it calls srand() upon spawning
+child processes.  Unless you are certain you need it, leave this setting as
+false.
+
+NOTE: The skip_prng_reseeding feature is implemented in spamd as of 3.4.0
+which allows spamd to call srand() right after forking a child process.
 
 =back
 
@@ -356,7 +395,7 @@ sub new {
   if (!defined $self) { $self = { }; }
   bless ($self, $class);
 
-  # basic backwards compatibility; debug used to be a boolean.
+  # basic backward compatibility; debug used to be a boolean.
   # translate that into 'all', which is what it meant before 3.1.0.
   if ($self->{debug} && $self->{debug} eq '1') {
     $self->{debug} = 'all';
@@ -404,8 +443,6 @@ sub new {
 
   $self->create_locker();
 
-  $self->{resolver} = Mail::SpamAssassin::DnsResolver->new($self);
-
   $self;
 }
 
@@ -449,11 +486,13 @@ sub create_locker {
 
 Parse will return a Mail::SpamAssassin::Message object with just the
 headers parsed.  When calling this function, there are two optional
-parameters that can be passed in: $message is either undef (which will
-use STDIN), a scalar of the entire message, an array reference of the
-message with 1 line per array element, or a file glob which holds the
-entire contents of the message; and $parse_now, which specifies whether
-or not to create the MIME tree at parse time or later as necessary.
+parameters that can be passed in: $message is either undef (which
+will use STDIN), a scalar - a string containing an entire message,
+a reference to such string, an array reference of the message with
+one line per array element, or either a file glob or an IO::File object
+which holds the entire contents of the message;  and $parse_now, which
+specifies whether or not to create a MIME tree at parse time or later
+as necessary.
 
 The I<$parse_now> option, by default, is set to false (0).  This
 allows SpamAssassin to not have to generate the tree of internal
@@ -1499,7 +1538,7 @@ sub finish {
     delete $self->{bayes_scanner};
   }
 
-  $self->{resolver}->finish();
+  $self->{resolver}->finish()  if $self->{resolver};
 
   $self->timer_end("finish");
   %{$self} = ();
@@ -1594,7 +1633,7 @@ sub timer_report {
   foreach my $name (@{$self->{timers_order}}) {
     my $elapsed = $self->{timers}->{$name}->{elapsed} || 0;
     my $pc = $total <= 0 || $elapsed >= $total ? 100 : ($elapsed/$total)*100;
-    my $fmt = $elapsed >= 0.002 ? "%.0f" : "%.2f";
+    my $fmt = $elapsed >= 0.005 ? "%.0f" : $elapsed >= 0.002 ? "%.1f" : "%.2f";
     push @str, sprintf("%s: $fmt (%.1f%%)", $name, $elapsed*1000, $pc);
   }
 
@@ -1609,10 +1648,10 @@ sub init {
 
   # Allow init() to be called multiple times, but only run once.
   if (defined $self->{_initted}) {
-    # If the PID changes, reseed the PRNG and the DNS ID counter
+    # If the PID changes, reseed the PRNG (if permitted) and the DNS ID counter
     if ($self->{_initted} != $$) {
       $self->{_initted} = $$;
-      srand;
+      srand  if !$self->{skip_prng_reseeding};
       $self->{resolver}->reinit_post_fork();
     }
     return;
@@ -1752,6 +1791,9 @@ sub init {
       if ($hf_ref->[1] =~ /_TIMING_/) { $self->timer_enable(); last }
     }
   }
+
+  # should be called only after configuration has been parsed
+  $self->{resolver} = Mail::SpamAssassin::DnsResolver->new($self);
 
   # TODO -- open DNS cache etc. if necessary
 }
@@ -1956,7 +1998,7 @@ sub create_default_prefs {
 
 ###########################################################################
 
-sub expand_name ($) {
+sub expand_name {
   my ($self, $name) = @_;
   my $home = $self->{user_dir} || $ENV{HOME} || '';
 
@@ -1979,7 +2021,7 @@ sub expand_name ($) {
 
 sub sed_path {
   my ($self, $path) = @_;
-  return undef if (!defined $path);
+  return if !defined $path;
 
   if (exists($self->{conf}->{sed_path_cache}->{$path})) {
     return $self->{conf}->{sed_path_cache}->{$path};
@@ -2052,9 +2094,8 @@ sub _get_cf_pre_files_in_dir {
       my $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
       die "_get_cf_pre_files_in_dir error: $eval_stat";
     };
-    return sort { $a cmp $b } @cfs;
-
-    die "oops! $@";     # should never get here
+    @cfs = sort { $a cmp $b } @cfs;
+    return @cfs;
   }
   else {
     opendir(SA_CF_DIR, $dir) or warn "config: cannot opendir $dir: $!\n";
@@ -2114,7 +2155,7 @@ sub find_all_addrs_in_mail {
   my @ret;
   my %done;
 
-  foreach $_ (@addrlist) {
+  foreach (@addrlist) {
     s/^mailto://;       # from Outlook "forwarded" message
     next if defined ($done{$_}); $done{$_} = 1;
     push (@ret, $_);

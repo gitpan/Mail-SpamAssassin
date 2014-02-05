@@ -37,6 +37,8 @@ lib/Mail/SpamAssassin/BayesStore/BDB.pm
 lib/Mail/SpamAssassin/BayesStore/DBM.pm
 lib/Mail/SpamAssassin/BayesStore/MySQL.pm
 lib/Mail/SpamAssassin/BayesStore/PgSQL.pm
+lib/Mail/SpamAssassin/BayesStore/Redis.pm
+lib/Mail/SpamAssassin/Util/TinyRedis.pm
 lib/Mail/SpamAssassin/BayesStore/SDBM.pm
 lib/Mail/SpamAssassin/BayesStore/SQL.pm
 lib/Mail/SpamAssassin/Client.pm
@@ -68,6 +70,7 @@ lib/Mail/SpamAssassin/PerMsgLearner.pm
 lib/Mail/SpamAssassin/PerMsgStatus.pm
 lib/Mail/SpamAssassin/PersistentAddrList.pm
 lib/Mail/SpamAssassin/Plugin.pm
+lib/Mail/SpamAssassin/Plugin/AskDNS.pm
 lib/Mail/SpamAssassin/Plugin/ASN.pm
 lib/Mail/SpamAssassin/Plugin/AWL.pm
 lib/Mail/SpamAssassin/Plugin/AccessDB.pm
@@ -122,10 +125,6 @@ lib/Mail/SpamAssassin/Util/ScopedTimer.pm
 lib/Mail/SpamAssassin/Util/TieOneStringHash.pm
 lib/spamassassin-run.pod
 procmailrc.example
-rules/STATISTICS-set0.txt
-rules/STATISTICS-set1.txt
-rules/STATISTICS-set2.txt
-rules/STATISTICS-set3.txt
 rules/active.list
 rules/init.pre
 rules/languages
@@ -137,6 +136,7 @@ rules/v310.pre
 rules/v312.pre
 rules/v320.pre
 rules/v330.pre
+rules/v340.pre
 sa-awl.raw
 sa-check_spamd.raw
 sa-compile.raw
@@ -214,7 +214,11 @@ sql/userpref_pg.sql
 t/README
 t/SATest.pl
 t/SATest.pm
+t/autolearn.t
+t/autolearn_force.t
+t/autolearn_force_fail.t
 t/basic_lint.t
+t/basic_lint_without_sandbox.t
 t/basic_meta.t
 t/basic_obj_api.t
 t/bayesbdb.t
@@ -348,6 +352,7 @@ t/data/spam/badctype1
 t/data/spam/badctype2
 t/data/spam/badmime.txt
 t/data/spam/badmime2.txt
+t/data/spam/badmime3.txt
 t/data/spam/base64.txt
 t/data/spam/bsmtp
 t/data/spam/bsmtpnull
@@ -396,7 +401,6 @@ t/dcc.t
 t/debug.t
 t/desc_wrap.t
 t/dkim.t
-t/dkim2.t
 t/dnsbl.t
 t/dnsbl_sc_meta.t
 t/duplicates.t
@@ -498,8 +502,6 @@ t/spamd_sql_prefs.t
 t/spamd_ssl.t
 t/spamd_ssl_accept_fail.t
 t/spamd_ssl_tls.t
-t/spamd_ssl_v2.t
-t/spamd_ssl_v23.t
 t/spamd_ssl_v3.t
 t/spamd_stop.t
 t/spamd_symbols.t
@@ -537,3 +539,5 @@ t/uribl_domains_only.t
 t/data/spam/dnsbl_ipsonly.eml
 t/uribl_all_types.t
 t/uribl_ips_only.t
+t/dnsbl_subtests.t
+META.json                                Module JSON meta-data (added by MakeMaker)

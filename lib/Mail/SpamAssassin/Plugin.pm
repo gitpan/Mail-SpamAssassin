@@ -506,6 +506,10 @@ to add their own metadata as well.
 
 The C<Mail::SpamAssassin::Message> object for this message.
 
+=item permsgstatus
+
+The C<Mail::SpamAssassin::PerMsgStatus> context object for this scan.
+
 =back
 
 =item $plugin->parsed_metadata ( { options ... } )
@@ -676,7 +680,7 @@ format of:
 NOTE: This data structure has changed since it was originally introduced
 in version 3.0.0.  The values are no longer perl anonymous hashes, they
 are a single string containing the raw token value.  You can test for
-backwards compatibility by checking to see if the value for a key is a
+backward compatibility by checking to see if the value for a key is a
 reference to a perl HASH, for instance:
 
 if (ref($toksref->{$sometokenkey}) eq 'HASH') {...
@@ -869,7 +873,7 @@ Indicate if the call is being made from a command line interface.
 
 =item $plugin->spamd_child_init ()
 
-Called when a new child starts up under spamd.
+Called in each new child process when it starts up under spamd.
 
 =item $plugin->log_scan_result ( { options ... } )
 
@@ -1192,7 +1196,7 @@ Different rule types receive different information by default:
 The configuration file arguments will be passed in after the standard
 arguments.
 
-=head1 BACKWARDS COMPATIBILITY
+=head1 BACKWARD COMPATIBILITY
 
 Note that if you write a plugin and need to determine if a particular
 helper method is supported on C<Mail::SpamAssassin::Plugin>, you

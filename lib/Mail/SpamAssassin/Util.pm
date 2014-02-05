@@ -58,7 +58,9 @@ BEGIN {
   @ISA = qw(Exporter);
   @EXPORT = ();
   @EXPORT_OK = qw(&local_tz &base64_decode &untaint_var &untaint_file_path
-                  &exit_status_str &proc_status_ok &am_running_on_windows);
+                  &exit_status_str &proc_status_ok &am_running_on_windows
+                  &reverse_ip_address &decode_dns_question_entry
+                  &secure_tmpfile &secure_tmpdir);
 }
 
 use Mail::SpamAssassin;
@@ -70,6 +72,7 @@ use File::Spec;
 use File::Basename;
 use Time::Local;
 use Sys::Hostname (); # don't import hostname() into this namespace!
+use NetAddr::IP 4.000;
 use Fcntl;
 use Errno qw(ENOENT EACCES EEXIST);
 use POSIX qw(:sys_wait_h WIFEXITED WIFSIGNALED WIFSTOPPED WEXITSTATUS
@@ -79,6 +82,16 @@ use POSIX qw(:sys_wait_h WIFEXITED WIFSIGNALED WIFSTOPPED WEXITSTATUS
 
 use constant HAS_MIME_BASE64 => eval { require MIME::Base64; };
 use constant RUNNING_ON_WINDOWS => ($^O =~ /^(?:mswin|dos|os2)/oi);
+
+# These are not implemented on windows (see bug 6798 and 6470)
+BEGIN {
+  if (RUNNING_ON_WINDOWS) {
+    *WIFEXITED   = sub { not $_[0] & 127 };
+    *WEXITSTATUS = sub { $_[0] >> 8 };
+    *WIFSIGNALED = sub { ($_[0] & 127) && ($_[0] & 127 != 127) };
+    *WTERMSIG    = sub { $_[0] & 127 };
+  }
+}
 
 ###########################################################################
 
@@ -106,7 +119,7 @@ use constant RUNNING_ON_WINDOWS => ($^O =~ /^(?:mswin|dos|os2)/oi);
         }
       }
     }
-    return undef;
+    return;
   }
 }
 
@@ -268,36 +281,43 @@ sub untaint_hostname {
 #  untaint_var(\%ENV);
 #
 sub untaint_var {
-  no re 'taint';  # override a  "use re 'taint'"  from outer scope
-  local ($_) = @_;
-  return undef unless defined;
-
-  unless (ref) {
+# my $arg = $_[0];  # avoid copying unnecessarily
+  my $r = ref $_[0];
+  if (!$r) {
+    no re 'taint';  # override a  "use re 'taint'"  from outer scope
+    return if !defined $_[0];
     local($1); # avoid Perl taint bug: tainted global $1 propagates taintedness
-    /^(.*)\z/s;
+    $_[0] =~ /^(.*)\z/s;
     return $1;
   }
-  elsif (ref eq 'ARRAY') {
-    $_ = untaint_var($_)  for @{$_};
-    return @{$_} if wantarray;
+  elsif ($r eq 'ARRAY') {
+    my $arg = $_[0];
+    $_ = untaint_var($_)  for @{$arg};
+    return @{$arg} if wantarray;
   }
-  elsif (ref eq 'HASH') {
-    while (my ($k, $v) = each %{$_}) {
-      if (!defined $v && $_ == \%ENV) {
-	delete ${$_}{$k};
-	next;
+  elsif ($r eq 'HASH') {
+    my $arg = $_[0];
+    if ($arg == \%ENV) {  # purge undefs from %ENV, untaint the rest
+      while (my($k, $v) = each %{$arg}) {
+        # It is safe to delete the item most recently returned by each()
+        if (!defined $v) { delete ${$arg}{$k}; next }
+        ${$arg}{untaint_var($k)} = untaint_var($v);
       }
-      ${$_}{untaint_var($k)} = untaint_var($v);
+    } else {
+      while (my($k, $v) = each %{$arg}) {
+        ${$arg}{untaint_var($k)} = untaint_var($v);
+      }
     }
-    return %{$_} if wantarray;
+    return %{$arg} if wantarray;
   }
-  elsif (ref eq 'SCALAR' or ref eq 'REF') {
-    ${$_} = untaint_var(${$_});
+  elsif ($r eq 'SCALAR' || $r eq 'REF') {
+    my $arg = $_[0];
+    ${$arg} = untaint_var(${$arg});
   }
   else {
-    warn "util: can't untaint a " . ref($_) . "!\n";
+    warn "util: can't untaint a $r !\n";
   }
-  return $_;
+  return $_[0];
 }
 
 ###########################################################################
@@ -317,13 +337,11 @@ sub taint_var {
 # append optional mesage (dual-valued errno or a string or a number),
 # returning the resulting string
 #
-sub exit_status_str($;$) {
+sub exit_status_str {
   my($stat,$errno) = @_;
   my $str;
   if (!defined($stat)) {
     $str = '(no status)';
-  } elsif (am_running_on_windows()) { 
-    $str = 'exit (running under Windows, cannot determine exit status)'
   } elsif (WIFEXITED($stat)) {
     $str = sprintf("exit %d", WEXITSTATUS($stat));
   } elsif (WIFSTOPPED($stat)) {
@@ -347,7 +365,7 @@ sub exit_status_str($;$) {
 # check errno to be 0 and a process exit status to be in the list of success
 # status codes, returning true if both are ok, and false otherwise
 #
-sub proc_status_ok($;$@) {
+sub proc_status_ok {
   my($exit_status,$errno,@success) = @_;
   my $ok = 0;
   if ((!defined $errno || $errno == 0) && WIFEXITED($exit_status)) {
@@ -457,7 +475,7 @@ sub parse_rfc822_date {
     $dd = $1; $mon = lc($2); $yyyy = $3;
   } else {
     dbg("util: time cannot be parsed: $date");
-    return undef;
+    return;
   }
 
   # handle two and three digit dates as specified by RFC 2822
@@ -545,7 +563,7 @@ sub parse_rfc822_date {
   } or do {
     my $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
     dbg("util: time cannot be parsed: $date, $yyyy-$mmm-$dd $hh:$mm:$ss, $eval_stat");
-    return undef;
+    return;
   };
 
   if ($tzoff =~ /([-+])(\d\d)(\d\d)$/)	# convert to seconds difference
@@ -783,9 +801,8 @@ sub extract_ipv4_addr_from_string {
     if (defined $1) { return $1; }
   }
 
-  # ignore native IPv6 addresses; currently we have no way to deal with
-  # these if we could extract them, as the DNSBLs don't provide a way
-  # to query them!  TODO, eventually, once IPv6 spam starts to appear ;)
+  # ignore native IPv6 addresses;
+  # TODO, eventually, once IPv6 spam starts to appear ;)
   return;
 }
 
@@ -863,7 +880,58 @@ sub ips_match_in_24_mask {
 
 ###########################################################################
 
+# Given a quad-dotted IPv4 address or an IPv6 address, reverses the order
+# of its bytes (IPv4) or nibbles (IPv6), joins them with dots, producing
+# a string suitable for reverse DNS lookups. Returns undef in case of a
+# syntactically invalid IP address.
+#
+sub reverse_ip_address {
+  my ($ip) = @_;
+
+  my $revip;
+  local($1,$2,$3,$4);
+  if ($ip =~ /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\z/) {
+    $revip = "$4.$3.$2.$1";
+  } elsif ($ip !~ /:/ || $ip !~ /^[0-9a-fA-F:.]{2,}\z/) {  # triage
+    # obviously unrecognized syntax
+  } elsif (!NetAddr::IP->can('full6')) {  # since NetAddr::IP 4.010
+    info("util: version of NetAddr::IP is too old, IPv6 not supported");
+  } else {
+    # looks like an IPv6 address, let NetAddr::IP check the details
+    my $ip_obj = NetAddr::IP->new6($ip);
+    if (defined $ip_obj) {  # valid IPv6 address
+      # RFC 5782 section 2.4.
+      $revip = lc $ip_obj->network->full6;  # string in a canonical form
+      $revip =~ s/://g;
+      $revip = join('.', reverse split(//,$revip));
+    }
+  }
+  return $revip;
+}
+
+###########################################################################
+
 sub my_inet_aton { unpack("N", pack("C4", split(/\./, $_[0]))) }
+
+###########################################################################
+
+sub decode_dns_question_entry {
+  # decodes a Net::DNS::Packet->question entry,
+  # returning a triple: class, type, label
+  #
+  my $q = $_[0];
+  my $qname = $q->qname;
+
+  # Bug 6959, Net::DNS flags a domain name in a query section as utf8, while
+  # still keeping it "RFC 1035 zone file format"-encoded, silly and harmful
+  utf8::encode($qname) if utf8::is_utf8($qname);  # since Perl 5.8.1
+
+  local $1;
+  # Net::DNS provides a query in encoded RFC 1035 zone file format, decode it!
+  $qname =~ s{ \\ ( [0-9]{3} | [^0-9] ) }
+             { length($1)==1 ? $1 : $1 <= 255 ? chr($1) : "\\$1" }xgse;
+  return ($q->qclass, $q->qtype, $qname);
+}
 
 ###########################################################################
 
@@ -1017,17 +1085,13 @@ If it cannot open a file after 20 tries, it returns C<undef>.
 sub secure_tmpfile {
   my $tmpdir = untaint_file_path($ENV{'TMPDIR'} || File::Spec->tmpdir());
 
-  if (!$tmpdir) {
-    # Note: we would prefer to keep this fatal, as not being able to
-    # find a writable tmpdir is a big deal for the calling code too.
-    # That would be quite a psychotic case, also.
-    warn "util: cannot find a temporary directory, set TMP or TMPDIR in environment";
-    return;
-  }
+  defined $tmpdir && $tmpdir ne ''
+    or die "util: cannot find a temporary directory, set TMP or TMPDIR in environment";
 
-  my ($reportfile, $tmpfile);
-  my $umask = umask 077;
+  opendir(my $dh, $tmpdir) or die "Could not open directory $tmpdir: $!";
+  closedir $dh or die "Error closing directory $tmpdir: $!";
 
+  my ($reportfile, $tmpfh);
   for (my $retries = 20; $retries > 0; $retries--) {
     # we do not rely on the obscurity of this name for security,
     # we use a average-quality PRG since this is all we need
@@ -1037,33 +1101,34 @@ sub secure_tmpfile {
 
     # instead, we require O_EXCL|O_CREAT to guarantee us proper
     # ownership of our file, read the open(2) man page
-    if (sysopen($tmpfile, $reportfile, O_RDWR|O_CREAT|O_EXCL, 0600)) {
-      binmode $tmpfile  or die "cannot set $reportfile to binmode: $!";
+    if (sysopen($tmpfh, $reportfile, O_RDWR|O_CREAT|O_EXCL, 0600)) {
+      binmode $tmpfh  or die "cannot set $reportfile to binmode: $!";
       last;
     }
-
-    if ($!{EEXIST}) {
-      # it is acceptable if $tmpfile already exists, try another
-      next;
-    }
-    
-    # error, maybe "out of quota" or "too many open files" (bug 4017)
-    warn "util: secure_tmpfile failed to create file '$reportfile': $!\n";
+    my $errno = $!;
 
     # ensure the file handle is not semi-open in some way
-    if ($tmpfile) {
-      close $tmpfile  or info("error closing $reportfile: $!");
+    if ($tmpfh) {
+      if (! close $tmpfh) {
+       info("error closing $reportfile: $!");
+       undef $tmpfh;
+      }
     }
+
+    # it is acceptable if $tmpfh already exists, try another
+    next if $errno == EEXIST;
+
+    # error, maybe "out of quota", "too many open files", "Permission denied"
+    # (bug 4017); makes no sense retrying
+    die "util: failed to create a temporary file '$reportfile': $errno";
   }
 
-  umask $umask;
-
-  if (!$tmpfile) {
-    warn "util: secure_tmpfile failed to create file, giving up";
-    return;	# undef
+  if (!$tmpfh) {
+    warn "util: secure_tmpfile failed to create a temporary file, giving up";
+    return;
   }
 
-  return ($reportfile, $tmpfile);
+  return ($reportfile, $tmpfh);
 }
 
 =item my ($dirpath) = secure_tmpdir();
@@ -1129,20 +1194,22 @@ sub uri_to_domain {
   # Javascript is not going to help us, so return.
   return if ($uri =~ /^javascript:/i);
 
-  $uri =~ s,#.*$,,gs;			# drop fragment
-  $uri =~ s#^[a-z]+:/{0,2}##gsi;	# drop the protocol
-  $uri =~ s,^[^/]*\@,,gs;		# username/passwd
+  $uri =~ s{\#.*$}{}gs;			# drop fragment
+  $uri =~ s{^[a-z]+:/{0,2}}{}gsi;	# drop the protocol
+  $uri =~ s{^[^/]*\@}{}gs;		# username/passwd
 
   # strip path and CGI params.  note: bug 4213 shows that "&" should
   # *not* be likewise stripped here -- it's permitted in hostnames by
   # some common MUAs!
-  $uri =~ s,[/\?].*$,,gs;              
+  $uri =~ s{[/?].*$}{}gs;              
 
-  $uri =~ s,:\d*$,,gs;			# port, bug 4191: sometimes the # is missing
+  $uri =~ s{:\d*$}{}gs;		# port, bug 4191: sometimes the # is missing
 
   # skip undecoded URIs if the encoded bits shouldn't be.
   # we'll see the decoded version as well.  see url_encode()
   return if $uri =~ /\%(?:2[1-9a-fA-F]|[3-6][0-9a-fA-F]|7[0-9a-eA-E])/;
+
+  my $host = $uri;  # unstripped/full domain name
 
   # keep IPs intact
   if ($uri !~ /^\d+\.\d+\.\d+\.\d+$/) { 
@@ -1154,8 +1221,8 @@ sub uri_to_domain {
         (Mail::SpamAssassin::Util::RegistrarBoundaries::is_domain_valid($uri));
   }
   
-  # $uri is now the domain only
-  return lc $uri;
+  # $uri is now the domain only, optionally return unstripped host name
+  return !wantarray ? lc $uri : (lc $uri, lc $host);
 }
 
 sub uri_list_canonify {
@@ -1332,7 +1399,7 @@ sub first_date {
     my $time = parse_rfc822_date($string);
     return $time if defined($time) && $time;
   }
-  return undef;
+  return;
 }
 
 sub receive_date {
@@ -1580,9 +1647,9 @@ sub regexp_remove_delimiters {
   my $delim;
   if (!defined $re || $re eq '') {
     warn "cannot remove delimiters from null regexp";
-    return undef;   # invalid
+    return;  # invalid
   }
-  elsif ($re =~ s/^m{//) {              # m{foo/bar}
+  elsif ($re =~ s/^m\{//) {             # m{foo/bar}
     $delim = '}';
   }
   elsif ($re =~ s/^m\(//) {             # m(foo/bar)
@@ -1649,7 +1716,7 @@ sub avoid_db_file_locking_bug {
     my $stat_errn = stat($file) ? 0 : 0+$!;
     next if $stat_errn == ENOENT;
 
-    dbg("Berkeley DB bug work-around: cleaning tmp file $file");
+    dbg("util: Berkeley DB bug work-around: cleaning tmp file $file");
     unlink($file) or warn "cannot remove Berkeley DB tmp file $file: $!\n";
   }
 }

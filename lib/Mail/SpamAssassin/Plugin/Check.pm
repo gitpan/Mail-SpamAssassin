@@ -262,7 +262,7 @@ sub run_rbl_eval_tests {
     my $score = $pms->{conf}->{scores}->{$rulename};
     next unless $score;
 
-    $pms->{test_log_msgs} = ();        # clear test state
+    %{$pms->{test_log_msgs}} = ();        # clear test state
 
     my ($function, @args) = @{$test};
 
@@ -271,6 +271,7 @@ sub run_rbl_eval_tests {
       $result = $pms->$function($rulename, @args);  1;
     } or do {
       my $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
+      die "rules: $eval_stat\n"  if $eval_stat =~ /__alarm__ignore__/;
       warn "rules: failed to run $rulename RBL test, skipping:\n".
            "\t($eval_stat)\n";
       $pms->{rule_errors}++;
@@ -298,7 +299,7 @@ sub run_generic_tests {
 
   my $ruletype = $opts{type};
   dbg("rules: running $ruletype tests; score so far=".$pms->{score});
-  $pms->{test_log_msgs} = ();        # clear test state
+  %{$pms->{test_log_msgs}} = ();        # clear test state
 
   my $conf = $pms->{conf};
   my $doing_user_rules = $conf->{want_rebuild_for_type}->{$opts{consttype}};
@@ -347,6 +348,8 @@ sub run_generic_tests {
       $opts{post_loop_body}->($self, $pms, $conf, %nopts);
     }
 
+   # dbg("rules: generated matching code:\n".$self->{evalstr});
+
     $self->flush_evalstr($pms, 'run_generic_tests');
     $self->free_ruleset_source($pms, $ruletype, $priority);
 
@@ -383,7 +386,7 @@ EOT
 
     dbg("rules: run_generic_tests - compiling eval code: %s, priority %s",
         $ruletype, $priority);
-  # dbg("rules: eval code to compile: $evalstr");
+  # dbg("rules: eval code to compile: %s", $evalstr);
     my $eval_result;
     { my $timer = $self->{main}->time_method('compile_gen');
       $eval_result = eval($evalstr);
@@ -425,6 +428,7 @@ sub begin_evalstr_chunk {
 package $package_name;
 sub $chunk_methodname {
   my \$self = shift;
+  my \$hits = 0;
 EOT
   $evalstr .= '  '.$_  for @{$self->{evalstr_chunk_prefix}};
   $self->{evalstr} = $evalstr;
@@ -446,7 +450,7 @@ sub flush_evalstr {
   $self->end_evalstr_chunk($pms);
   dbg("rules: flush_evalstr (%s) compiling %d chars of %s",
       $caller_name, $self->{evalstr_l}, $chunk_methodname);
-# dbg("rules: %s", $self->{evalstr});
+# dbg("rules: eval code(2): %s", $self->{evalstr});
   my $eval_result;
   { my $timer = $self->{main}->time_method('compile_gen');
     $eval_result = eval($self->{evalstr});
@@ -542,10 +546,11 @@ sub do_meta_tests {
     foreach my $token (@tokens) {
 
       # Numbers can't be rule names
-      if ($token =~ /^(?:\W+|[+-]?\d+(?:\.\d+)?)$/) {
+    # if ($token =~ /^(?:\W+|[+-]?\d+(?:\.\d+)?)$/) {
+      if ($token !~ /^[A-Za-z_][A-Za-z0-9_]*\z/s) {  # faster
         $meta{$rulename} .= "$token ";
       }
-      else {
+      else {  # token is a rule name
         # the " || 0" formulation is to avoid "use of uninitialized value"
         # warnings; this is better than adding a 0 to a hash for every
         # rule referred to in a meta...
@@ -629,11 +634,11 @@ sub do_meta_tests {
 
     # If there are any rules left, we can't solve the dependencies so complain
     my %metas = map { $_ => 1 } @metas; # keep a small cache for fast lookups
-    foreach $rulename (@metas) {
+    foreach my $rulename_t (@metas) {
       $pms->{rule_errors}++; # flag to --lint that there was an error ...
       my $msg =
-          "rules: excluding meta test $rulename, unsolved meta dependencies: " .
-              join(", ", grep($metas{$_}, @{ $rule_deps{$rulename} }));
+          "rules: excluding meta test $rulename_t, unsolved meta dependencies: " .
+              join(", ", grep($metas{$_}, @{ $rule_deps{$rulename_t} }));
       if ($self->{main}->{lint_rules}) {
         warn $msg."\n";
       }
@@ -760,6 +765,7 @@ sub do_head_tests {
           my $ifwhile = 'if';
           my $hitdone = '';
           my $matchg = '';
+          my $whlimit = '';
 
           my $matching_string_unavailable = 0;
           my $expr;
@@ -771,10 +777,13 @@ sub do_head_tests {
             if (! ($op eq '=~' || $op eq '!~') ) { # not a pattern matching op.
               $matching_string_unavailable = 1;
             } elsif ( ($conf->{tflags}->{$rulename}||'') =~ /\bmultiple\b/ ) {
-              $posline = 'pos $hval = 0;';
+              $posline = 'pos $hval = 0; $hits = 0;';
               $ifwhile = 'while';
               $hitdone = 'last';
               $matchg = 'g';
+              my ($max) = ($pms->{conf}->{tflags}->{$rulename}||'') =~ /\bmaxhits=(\d+)\b/;
+              $max = untaint_var($max);
+              $whlimit = ' && $hits++ < '.$max if $max;
             }
             $expr = '$hval ' . $op . ' ' . $pat . $matchg;
           }
@@ -783,7 +792,7 @@ sub do_head_tests {
           if ($scoresptr->{q{'.$rulename.'}}) {
             '.$posline.'
             '.$self->hash_line_for_rule($pms, $rulename).'
-            '.$ifwhile.' ('.$expr.') {
+            '.$ifwhile.' ('.$expr.$whlimit.') {
               $self->got_hit(q{'.$rulename.'}, "", ruletype => "header");
               '.$self->hit_rule_plugin_code($pms, $rulename, "header", $hitdone,
                                             $matching_string_unavailable).'
@@ -814,27 +823,36 @@ sub do_body_tests {
   {
     my ($self, $pms, $conf, $rulename, $pat, %opts) = @_;
     $pat = untaint_var($pat);  # presumably checked
-    my $sub;
+    my $sub = '';
+    if (would_log('dbg', 'rules-all') == 2) {
+      $sub .= '
+      dbg("rules-all: running body rule %s", q{'.$rulename.'});
+      ';
+    }
     if (($conf->{tflags}->{$rulename}||'') =~ /\bmultiple\b/)
     {
       # support multiple matches
       $loopid++;
-      $sub = '
+      my ($max) = ($pms->{conf}->{tflags}->{$rulename}||'') =~ /\bmaxhits=(\d+)\b/;
+      $max = untaint_var($max);
+      $sub .= '
+      $hits = 0;
       body_'.$loopid.': foreach my $l (@_) {
         pos $l = 0;
         '.$self->hash_line_for_rule($pms, $rulename).'
-        while ($l =~ '.$pat.'g) { 
+        while ($l =~ '.$pat.'g'. ($max? ' && $hits++ < '.$max:'') .') { 
           $self->got_hit(q{'.$rulename.'}, "BODY: ", ruletype => "body"); 
           '. $self->hit_rule_plugin_code($pms, $rulename, 'body',
 					 "last body_".$loopid) . '
         }
+        '. ($max? 'last body_'.$loopid.' if $hits > '. $max .';':'') .'
       }
       ';
     }
     else {
       # omitting the "pos" call, "body_loopid" label, use of while()
       # instead of if() etc., shaves off 8 perl OPs.
-      $sub = '
+      $sub .= '
       foreach my $l (@_) {
         '.$self->hash_line_for_rule($pms, $rulename).'
         if ($l =~ '.$pat.') { 
@@ -887,22 +905,31 @@ sub do_uri_tests {
   {
     my ($self, $pms, $conf, $rulename, $pat, %opts) = @_;
     $pat = untaint_var($pat);  # presumably checked
-    my $sub;
+    my $sub = '';
+    if (would_log('dbg', 'rules-all') == 2) {
+      $sub .= '
+      dbg("rules-all: running uri rule %s", q{'.$rulename.'});
+      ';
+    }
     if (($conf->{tflags}->{$rulename}||'') =~ /\bmultiple\b/) {
       $loopid++;
-      $sub = '
+      my ($max) = ($pms->{conf}->{tflags}->{$rulename}||'') =~ /\bmaxhits=(\d+)\b/;
+      $max = untaint_var($max);
+      $sub .= '
+      $hits = 0;
       uri_'.$loopid.': foreach my $l (@_) {
         pos $l = 0;
         '.$self->hash_line_for_rule($pms, $rulename).'
-        while ($l =~ '.$pat.'g) { 
+        while ($l =~ '.$pat.'g'. ($max? ' && $hits++ < '.$max:'') .') { 
            $self->got_hit(q{'.$rulename.'}, "URI: ", ruletype => "uri");
            '. $self->hit_rule_plugin_code($pms, $rulename, "uri",
 					  "last uri_".$loopid) . '
         }
+        '. ($max? 'last uri_'.$loopid.' if $hits > '. $max .';':'') .'
       }
       ';
     } else {
-      $sub = '
+      $sub .= '
       foreach my $l (@_) {
         '.$self->hash_line_for_rule($pms, $rulename).'
         if ($l =~ '.$pat.') { 
@@ -955,25 +982,34 @@ sub do_rawbody_tests {
   {
     my ($self, $pms, $conf, $rulename, $pat, %opts) = @_;
     $pat = untaint_var($pat);  # presumably checked
-    my $sub;
+    my $sub = '';
+    if (would_log('dbg', 'rules-all') == 2) {
+      $sub .= '
+      dbg("rules-all: running rawbody rule %s", q{'.$rulename.'});
+      ';
+    }
     if (($pms->{conf}->{tflags}->{$rulename}||'') =~ /\bmultiple\b/)
     {
       # support multiple matches
       $loopid++;
-      $sub = '
+      my ($max) = ($pms->{conf}->{tflags}->{$rulename}||'') =~ /\bmaxhits=(\d+)\b/;
+      $max = untaint_var($max);
+      $sub .= '
+      $hits = 0;
       rawbody_'.$loopid.': foreach my $l (@_) {
         pos $l = 0;
         '.$self->hash_line_for_rule($pms, $rulename).'
-        while ($l =~ '.$pat.'g) { 
+        while ($l =~ '.$pat.'g'. ($max? ' && $hits++ < '.$max:'') .') { 
            $self->got_hit(q{'.$rulename.'}, "RAW: ", ruletype => "rawbody");
            '. $self->hit_rule_plugin_code($pms, $rulename, "rawbody",
 					  "last rawbody_".$loopid) . '
         }
+        '. ($max? 'last rawbody_'.$loopid.' if $hits > '. $max .';':'') .'
       }
       ';
     }
     else {
-      $sub = '
+      $sub .= '
       foreach my $l (@_) {
         '.$self->hash_line_for_rule($pms, $rulename).'
         if ($l =~ '.$pat.') { 
@@ -1033,11 +1069,15 @@ sub do_full_tests {
   {
     my ($self, $pms, $conf, $rulename, $pat, %opts) = @_;
     $pat = untaint_var($pat);  # presumably checked
+    my ($max) = ($pms->{conf}->{tflags}->{$rulename}||'') =~ /\bmaxhits=(\d+)\b/;
+    $max = untaint_var($max);
     $self->add_evalstr($pms, '
       if ($scoresptr->{q{'.$rulename.'}}) {
         pos $$fullmsgref = 0;
         '.$self->hash_line_for_rule($pms, $rulename).'
-        while ($$fullmsgref =~ '.$pat.'g) {
+        dbg("rules-all: running full rule %s", q{'.$rulename.'});
+        $hits = 0;
+        while ($$fullmsgref =~ '.$pat.'g'. ($max? ' && $hits++ < '.$max:'') .') {
           $self->got_hit(q{'.$rulename.'}, "FULL: ", ruletype => "full");
           '. $self->hit_rule_plugin_code($pms, $rulename, "full", "last") . '
         }
@@ -1121,7 +1161,7 @@ sub run_eval_tests {
       && !$doing_user_rules)
   {
     my $method = "${package_name}::${methodname}";
-  # dbg("rules: run_eval_tests - calling %s", $methodname);
+  # dbg("rules: run_eval_tests - calling previously compiled %s", $method);
     my $t = Mail::SpamAssassin::Timeout->new({ deadline => $master_deadline });
     my $err = $t->run(sub {
       no strict "refs";
@@ -1178,7 +1218,7 @@ sub run_eval_tests {
     $evalstr .= '
     if ($scoresptr->{q#'.$rulename.'#}) {
       $rulename = q#'.$rulename.'#;
-      $self->{test_log_msgs} = ();
+      %{$self->{test_log_msgs}} = ();
     ';
  
     # only need to set current_rule_name for plugin evals
@@ -1214,6 +1254,7 @@ sub run_eval_tests {
         $result = $self->' . $function . ' (@extraevalargs '. $argstr .' );  1;
       } or do {
         $result = 0;
+        die "rules: $@\n"  if $@ =~ /__alarm__ignore__/;
         $self->handle_eval_rule_errors($rulename);
       };
 
@@ -1268,6 +1309,7 @@ EOT
 
   dbg("rules: run_eval_tests - compiling eval code: %s, priority %s",
        $testtype, $priority);
+# dbg("rules: eval code(3): %s", $evalstr);
   my $eval_result;
   { my $timer = $self->{main}->time_method('compile_eval');
     $eval_result = eval($evalstr);
@@ -1280,7 +1322,7 @@ EOT
   else {
     my $method = "${package_name}::${methodname}";
     push (@TEMPORARY_METHODS, $methodname);
-  # dbg("rules: run_eval_tests - calling %s", $methodname);
+  # dbg("rules: run_eval_tests - calling the just compiled %s", $method);
     my $t = Mail::SpamAssassin::Timeout->new({ deadline => $master_deadline });
     my $err = $t->run(sub {
       no strict "refs";
@@ -1298,9 +1340,11 @@ EOT
 
 sub hash_line_for_rule {
   my ($self, $pms, $rulename) = @_;
-  return sprintf("\n#line 1 \"%s, rule %s,\"",
-                 untaint_var($pms->{conf}->{source_file}->{$rulename}),
-                 $rulename);
+  # using tainted subr. argument may taint the whole expression, avoid
+  my $u = untaint_var($pms->{conf}->{source_file}->{$rulename});
+  return sprintf("\n#line 1 \"%s, rule %s,\"", $u, $rulename);
+# return sprintf("\n#line 1 \"%s, rule %s,\"", $u, $rulename) .
+#        "\ndbg(\"rules: will run %s\", q(".$rulename."));\n";
 }
 
 sub is_user_rule_sub {
@@ -1339,6 +1383,7 @@ sub hit_rule_plugin_code {
   if ($matching_string_unavailable) {
     $match = '"<YES>"'; # nothing better to report, $& is not set by this rule
   } else {
+    # simple, but suffers from 'user data interpreted as a boolean', Bug 6360
     $match = '($' . '&' . '|| "negative match")';
   }
 

@@ -53,6 +53,7 @@ use strict;
 use warnings;
 use re 'taint';
 
+use Errno qw(ENOENT);
 use Time::HiRes qw(time);
 
 use Mail::SpamAssassin::Constants qw(:sa);
@@ -77,6 +78,181 @@ use vars qw{
 
 ###########################################################################
 
+use vars qw( %common_tags );
+
+BEGIN {
+  %common_tags = (
+
+    YESNO => sub {
+      my $pms = shift;
+      $pms->_get_tag_value_for_yesno(@_);
+    },
+  
+    YESNOCAPS => sub {
+      my $pms = shift;
+      uc $pms->_get_tag_value_for_yesno(@_);
+    },
+
+    SCORE => sub {
+      my $pms = shift;
+      $pms->_get_tag_value_for_score(@_);
+    },
+
+    HITS => sub {
+      my $pms = shift;
+      $pms->_get_tag_value_for_score(@_);
+    },
+
+    REQD => sub {
+      my $pms = shift;
+      $pms->_get_tag_value_for_required_score(@_);
+    },
+
+    VERSION => \&Mail::SpamAssassin::Version,
+
+    SUBVERSION => sub { $Mail::SpamAssassin::SUB_VERSION },
+
+    RULESVERSION => sub {
+      my $pms = shift;
+      my $conf = $pms->{conf};
+      my @fnames;
+      @fnames =
+        keys %{$conf->{update_version}}  if $conf->{update_version};
+      @fnames = sort @fnames  if @fnames > 1;
+      join(',', map($conf->{update_version}{$_}, @fnames));
+    },
+
+    HOSTNAME => sub {
+      my $pms = shift;
+      $pms->{conf}->{report_hostname} ||
+        Mail::SpamAssassin::Util::fq_hostname();
+    },
+
+    REMOTEHOSTNAME => sub {
+      my $pms = shift;
+      $pms->{tag_data}->{'REMOTEHOSTNAME'} || "localhost";
+    },
+
+    REMOTEHOSTADDR => sub {
+      my $pms = shift;
+      $pms->{tag_data}->{'REMOTEHOSTADDR'} || "127.0.0.1";
+    },
+
+    LASTEXTERNALIP => sub {
+      my $pms = shift;
+      my $lasthop = $pms->{relays_external}->[0];
+      $lasthop ? $lasthop->{ip} : '';
+    },
+
+    LASTEXTERNALRDNS => sub {
+      my $pms = shift;
+      my $lasthop = $pms->{relays_external}->[0];
+      $lasthop ? $lasthop->{rdns} : '';
+    },
+
+    LASTEXTERNALHELO => sub {
+      my $pms = shift;
+      my $lasthop = $pms->{relays_external}->[0];
+      $lasthop ? $lasthop->{helo} : '';
+    },
+
+    CONTACTADDRESS => sub {
+      my $pms = shift;
+      $pms->{conf}->{report_contact};
+    },
+
+    BAYES => sub {
+      my $pms = shift;
+      defined $pms->{bayes_score} ? sprintf("%3.4f", $pms->{bayes_score})
+                                   : "0.5";
+    },
+
+    DATE => \&Mail::SpamAssassin::Util::time_to_rfc822_date,
+
+    STARS => sub {
+      my $pms = shift;
+      my $arg = (shift || "*");
+      my $length = int($pms->{score});
+      $length = 50 if $length > 50;
+      $arg x $length;
+    },
+
+    AUTOLEARN => sub {
+      my $pms = shift;
+      $pms->get_autolearn_status();
+    },
+
+    AUTOLEARNSCORE => sub {
+      my $pms = shift;
+      $pms->get_autolearn_points();
+    },
+
+    TESTS => sub {
+      my $pms = shift;
+      my $arg = (shift || ',');
+      join($arg, sort(@{$pms->{test_names_hit}})) || "none";
+    },
+
+    SUBTESTS => sub {
+      my $pms = shift;
+      my $arg = (shift || ',');
+      join($arg, sort(@{$pms->{subtest_names_hit}})) || "none";
+    },
+
+    TESTSSCORES => sub {
+      my $pms = shift;
+      my $arg = (shift || ",");
+      my $line = '';
+      foreach my $test (sort @{$pms->{test_names_hit}}) {
+        my $score = $pms->{conf}->{scores}->{$test};
+        $score = '0'  if !defined $score;
+        $line .= $arg  if $line ne '';
+        $line .= $test . "=" . $score;
+      }
+      $line ne '' ? $line : 'none';
+    },
+
+    PREVIEW => sub {
+      my $pms = shift;
+      $pms->get_content_preview();
+    },
+
+    REPORT => sub {
+      my $pms = shift;
+      "\n" . ($pms->{tag_data}->{REPORT} || "");
+    },
+
+    HEADER => sub {
+      my $pms = shift;
+      my $hdr = shift;
+      return if !$hdr;
+      $pms->get($hdr,undef);
+    },
+
+    TIMING => sub {
+      my $pms = shift;
+      $pms->{main}->timer_report();
+    },
+
+    ADDEDHEADERHAM => sub {
+      my $pms = shift;
+      $pms->_get_added_headers('headers_ham');
+    },
+
+    ADDEDHEADERSPAM => sub {
+      my $pms = shift;
+      $pms->_get_added_headers('headers_spam');
+    },
+
+    ADDEDHEADER => sub {
+      my $pms = shift;
+      $pms->_get_added_headers(
+                $pms->{is_spam} ? 'headers_spam' : 'headers_ham');
+    },
+
+  );
+}
+
 sub new {
   my $class = shift;
   $class = ref($class) || $class;
@@ -86,7 +262,7 @@ sub new {
     'main'              => $main,
     'msg'               => $msg,
     'score'             => 0,
-    'test_logs'         => '',
+    'test_log_msgs'     => { },
     'test_names_hit'    => [ ],
     'subtest_names_hit' => [ ],
     'spamd_result_log_items' => [ ],
@@ -96,6 +272,7 @@ sub new {
     'rule_errors'       => 0,
     'disable_auto_learning' => 0,
     'auto_learn_status' => undef,
+    'auto_learn_force_status' => undef,
     'conf'              => $main->{conf},
     'async'             => Mail::SpamAssassin::AsyncLoop->new($main),
     'master_deadline'   => $msg->{master_deadline},  # dflt inherited from msg
@@ -137,6 +314,12 @@ sub new {
   $self;
 }
 
+sub DESTROY {
+  my ($self) = shift;
+  local $@;
+  eval { $self->delete_fulltext_tmpfile() };  # Bug 5808
+}
+
 ###########################################################################
 
 =item $status->check ()
@@ -168,6 +351,12 @@ sub check_timed {
   $self->{body_only_points} = 0;
   $self->{head_only_points} = 0;
   $self->{score} = 0;
+
+  # clear NetSet cache before every check to prevent it growing too large
+  foreach my $nset_name (qw(internal_networks trusted_networks msa_networks)) {
+    my $netset = $self->{conf}->{$nset_name};
+    $netset->ditch_cache()  if $netset;
+  }
 
   $self->{main}->call_plugins ("check_start", { permsgstatus => $self });
 
@@ -265,14 +454,30 @@ sub learn_timed {
     return;
   }
 
-  my $isspam = $self->{main}->call_plugins ("autolearn_discriminator", {
+  my ($isspam, $force_autolearn, $force_autolearn_names, $arrayref);
+  $arrayref = $self->{main}->call_plugins ("autolearn_discriminator", {
       permsgstatus => $self
     });
+
+  $isspam = $arrayref->[0];
+  $force_autolearn = $arrayref->[1];
+  $force_autolearn_names = $arrayref->[2];
+
+  #AUTOLEARN_FORCE FLAG INFORMATION
+  if (defined $force_autolearn and $force_autolearn > 0) {
+    $self->{auto_learn_force_status} = "yes";
+    if (defined $force_autolearn_names) {
+      $self->{auto_learn_force_status} .= " ($force_autolearn_names)";
+     }
+  } else {
+    $self->{auto_learn_force_status} = "no";
+  }
 
   if (!defined $isspam) {
     $self->{auto_learn_status} = 'no';
     return;
   }
+
 
   my $timer = $self->{main}->time_method("learn");
 
@@ -373,6 +578,43 @@ sub get_body_only_points {
   return $self->{body_only_points};
 }
 
+=item $score = $status->get_autolearn_force_status()
+
+Return whether a message's score included any rules that are flagged as 
+autolearn_force.
+  
+=cut
+
+sub get_autolearn_force_status {
+  my ($self) = @_;
+  $self->_get_autolearn_points();
+  return $self->{autolearn_force};
+} 
+
+=item $rule_names = $status->get_autolearn_force_names()
+
+Return a list of comma separated list of rule names if a message's 
+score included any rules that are flagged as autolearn_force.
+  
+=cut
+
+sub get_autolearn_force_names {
+  my ($self) = @_;
+  my ($names);
+
+  $self->_get_autolearn_points();
+  $names = $self->{autolearn_force_names};
+ 
+  if (defined $names) { 
+    #remove trailing comma
+    $names =~ s/,$//;
+  } else {
+    $names = "";
+  }
+
+  return $names;
+}
+
 sub _get_autolearn_points {
   my ($self) = @_;
 
@@ -403,6 +645,7 @@ sub _get_autolearn_points {
   $self->{learned_points} = 0;
   $self->{body_only_points} = 0;
   $self->{head_only_points} = 0;
+  $self->{autolearn_force} = 0;
 
   foreach my $test (@{$self->{test_names_hit}}) {
     # According to the documentation, noautolearn, userconf, and learn
@@ -418,17 +661,28 @@ sub _get_autolearn_points {
         $self->{learned_points} += $self->{conf}->{scoreset}->[$orig_scoreset]->{$test};
 	next;
       }
+    
+      #IF ANY RULES ARE AUTOLEARN FORCE, SET THAT FLAG  
+      if ($tflags->{$test} =~ /\bautolearn_force\b/) {
+        $self->{autolearn_force}++;
+        #ADD RULE NAME TO LIST
+        $self->{autolearn_force_names}.="$test,";
+      }
     }
 
-    # ignore tests with 0 score in this scoreset
-    next if ($scores->{$test} == 0);
+    # ignore tests with 0 score (or undefined) in this scoreset
+    next if !$scores->{$test};
 
-    # Go ahead and add points to the proper locations
-    if (!$self->{conf}->maybe_header_only ($test)) {
-      $self->{body_only_points} += $scores->{$test};
-    }
-    if (!$self->{conf}->maybe_body_only ($test)) {
+    # Go ahead and add points to the proper locations 
+    # Changed logic because in testing, I was getting both head and body. Bug 5503
+    if ($self->{conf}->maybe_header_only ($test)) {
       $self->{head_only_points} += $scores->{$test};
+      dbg("learn: auto-learn: adding head_only points $scores->{$test}");
+    } elsif ($self->{conf}->maybe_body_only ($test)) {
+      $self->{body_only_points} += $scores->{$test};
+      dbg("learn: auto-learn: adding body_only points $scores->{$test}");
+    } else {
+      dbg("learn: auto-learn: not considered head or body scores: $scores->{$test}");
     }
 
     $points += $scores->{$test};
@@ -539,11 +793,20 @@ After a mail message has been checked, this method can be called.  It will
 return one of the following strings depending on whether the mail was
 auto-learned or not: "ham", "no", "spam", "disabled", "failed", "unavailable".
 
+It also returns is flagged with auto_learn_force, it will also include the status
+and the rules hit.  For example: "autolearn_force=yes (AUTOLEARNTEST_BODY)"
+
 =cut
 
 sub get_autolearn_status {
   my ($self) = @_;
-  return ($self->{auto_learn_status} || "unavailable");
+  my ($status) = $self->{auto_learn_status} || "unavailable";
+
+  if (defined $self->{auto_learn_force_status}) {
+    $status .= " autolearn_force=".$self->{auto_learn_force_status};
+  }
+
+  return $status;
 }
 
 ###########################################################################
@@ -703,7 +966,7 @@ sub _fixup_report_line_endings {
   }
 }
 
-sub _get_added_headers($) {
+sub _get_added_headers {
   my ($self, $which) = @_;
   my $str = '';
   # use string appends to put this back together -- I finally benchmarked it.
@@ -1029,8 +1292,6 @@ sub _replace_tags {
 
   # default to leaving the original string in place, if we cannot find
   # a tag for it (bug 4793)
-  my $t;
-  my $v;
   local($1,$2,$3);
   $text =~ s{(_(\w+?)(?:\((.*?)\))?_)}{
         my $full = $1;
@@ -1040,7 +1301,8 @@ sub _replace_tags {
           # Bug 6278: break infinite recursion through _get_added_headers and
           # _get_tag on an attempt to use such tag in add_header template
         } else {
-          $result = $self->_get_tag($tag,$3);
+          $result = $self->get_tag_raw($tag,$3);
+          $result = join(' ',@$result)  if ref $result eq 'ARRAY';
         }
         defined $result ? $result : $full;
       }ge;
@@ -1052,35 +1314,144 @@ sub _replace_tags {
 
 # public API for plugins
 
+=item $status->action_depends_on_tags($tags, $code, @args)
+
+Enqueue the supplied subroutine reference C<$code>, to become runnable when
+all the specified tags become available. The C<$tags> may be a simple
+scalar - a tag name, or a listref of tag names. The subroutine C<&$code>
+when called will be passed a C<permessagestatus> object as its first argument,
+followed by the supplied (optional) list C<@args> .
+
+=cut
+
+sub action_depends_on_tags {
+  my($self, $tags, $code, @args) = @_;
+
+  ref $code eq 'CODE'
+    or die "action_depends_on_tags: argument must be a subroutine ref";
+
+  # tag names on which the given action depends
+  my @dep_tags = !ref $tags ? uc $tags : map(uc($_),@$tags);
+
+  # @{$self->{tagrun_subs}}            list of all submitted subroutines
+  # @{$self->{tagrun_actions}{$tag}}   bitmask of action indices blocked by tag
+  # $self->{tagrun_tagscnt}[$action_ind]  count of tags still pending
+
+  # store action details, obtain its index
+  push(@{$self->{tagrun_subs}}, [$code,@args]);
+  my $action_ind = $#{$self->{tagrun_subs}};
+
+  # list dependency tag names which are not already satistied
+  my @blocking_tags =
+    grep(!defined $self->{tag_data}{$_} || $self->{tag_data}{$_} eq '',
+         @dep_tags);
+
+  $self->{tagrun_tagscnt}[$action_ind] = scalar @blocking_tags;
+  $self->{tagrun_actions}{$_}[$action_ind] = 1  for @blocking_tags;
+
+  if (@blocking_tags) {
+    dbg("check: tagrun - action %s blocking on tags %s",
+        $action_ind, join(', ',@blocking_tags));
+  } else {
+    dbg("check: tagrun - tag %s was ready, action %s runnable immediately: %s",
+        join(', ',@dep_tags), $action_ind, join(', ',$code,@args));
+    &$code($self, @args);
+  }
+}
+
+# tag_is_ready() will be called by set_tag(), indicating that a given
+# tag just received its value, possibly unblocking an action routine
+# as declared by action_depends_on_tags().
+#
+# Well-behaving plugins should call set_tag() once when a tag is fully
+# assembled and ready. Multiple calls to set the same tag value are handled
+# gracefully, but may result in premature activation of a pending action.
+# Setting tag values by plugins should not be done directly but only through
+# the public API set_tag(), otherwise a pending action release may be missed.
+#
+sub tag_is_ready {
+  my($self, $tag) = @_;
+  $tag = uc $tag;
+
+  if (would_log('dbg', 'check')) {
+    my $tag_val = $self->{tag_data}{$tag};
+    dbg("check: tagrun - tag %s is now ready, value: %s",
+         $tag, !defined $tag_val ? '<UNDEF>'
+               : ref $tag_val ne 'ARRAY' ? $tag_val
+               : 'ARY:[' . join(',',@$tag_val) . ']' );
+  }
+  if (ref $self->{tagrun_actions}{$tag}) {  # any action blocking on this tag?
+    my $action_ind = 0;
+    foreach my $action_pending (@{$self->{tagrun_actions}{$tag}}) {
+      if ($action_pending) {
+        $self->{tagrun_actions}{$tag}[$action_ind] = 0;
+        if ($self->{tagrun_tagscnt}[$action_ind] <= 0) {
+          # should not happen, warn and ignore
+          warn "tagrun error: count for $action_ind is ".
+                $self->{tagrun_tagscnt}[$action_ind]."\n";
+        } elsif (! --($self->{tagrun_tagscnt}[$action_ind])) {
+          my($code,@args) = @{$self->{tagrun_subs}[$action_ind]};
+          dbg("check: tagrun - tag %s unblocking the action %s: %s",
+              $tag, $action_ind, join(', ',$code,@args));
+          &$code($self, @args);
+        }
+      }
+      $action_ind++;
+    }
+  }
+}
+
+# debugging aid: show actions that are still pending, waiting for their
+# tags to receive a value
+#
+sub report_unsatisfied_actions {
+  my($self) = @_;
+  my @tags;
+  @tags = keys %{$self->{tagrun_actions}}  if ref $self->{tagrun_actions};
+  for my $tag (@tags) {
+    my @pending_actions = grep($self->{tagrun_actions}{$tag}[$_],
+                               (0 .. $#{$self->{tagrun_actions}{$tag}}));
+    dbg("check: tagrun - tag %s is still blocking action %s",
+        $tag, join(', ', @pending_actions))  if @pending_actions;
+  }
+}
+
 =item $status->set_tag($tagname, $value)
 
-Set a template tag, as used in C<add_header>, report templates, etc. This API
-is intended for use by plugins.   Tag names will be converted to an
-all-uppercase representation internally.
+Set a template tag, as used in C<add_header>, report templates, etc.
+This API is intended for use by plugins.  Tag names will be converted
+to an all-uppercase representation internally.
 
-C<$value> can be a subroutine reference, which will be evaluated each time
-the template is expanded.  Note that perl supports closures, which means
-that variables set in the caller's scope can be accessed inside this C<sub>.
-For example:
+C<$value> can be a simple scalar (string or number), or a reference to an
+array, in which case the public method get_tag will join array elements
+using a space as a separator, returning a single string for backward
+compatibility.
+
+C<$value> can also be a subroutine reference, which will be evaluated
+each time the template is expanded. The first argument passed by get_tag
+to a called subroutine will be a PerMsgStatus object (this module's object),
+followed by optional arguments provided a caller to get_tag.
+
+Note that perl supports closures, which means that variables set in the
+caller's scope can be accessed inside this C<sub>. For example:
 
     my $text = "hello world!";
     $status->set_tag("FOO", sub {
+              my $pms = shift;
               return $text;
             });
 
-See C<Mail::SpamAssassin::Conf>'s C<TEMPLATE TAGS> section for more details on
-how template tags are used.
+See C<Mail::SpamAssassin::Conf>'s C<TEMPLATE TAGS> section for more details
+on how template tags are used.
 
 C<undef> will be returned if a tag by that name has not been defined.
 
 =cut
 
 sub set_tag {
-  my $self = shift;
-  my $tag  = uc shift;
-  my $val  = shift;
-
-  $self->{tag_data}->{$tag} = $val;
+  my($self,$tag,$val) = @_;
+  $self->{tag_data}->{uc $tag} = $val;
+  $self->tag_is_ready($tag);
 }
 
 # public API for plugins
@@ -1098,8 +1469,51 @@ C<undef> will be returned if a tag by that name has not been defined.
 =cut
 
 sub get_tag {
-  # expose this previously-private API
-  return shift->_get_tag(uc shift);
+  my($self, $tag, @args) = @_;
+
+  return if !defined $tag;
+  $tag = uc $tag;
+  my $data;
+  if (exists $common_tags{$tag}) {
+    # tag data from traditional pre-defined tag subroutines
+    $data = $common_tags{$tag};
+    $data = $data->($self,@args)  if ref $data eq 'CODE';
+    $data = join(' ',@$data)  if ref $data eq 'ARRAY';
+    $data = ""  if !defined $data;
+  } elsif (exists $self->{tag_data}->{$tag}) {
+    # tag data comes from $self->{tag_data}->{TAG}, typically from plugins
+    $data = $self->{tag_data}->{$tag};
+    $data = $data->($self,@args)  if ref $data eq 'CODE';
+    $data = join(' ',@$data)  if ref $data eq 'ARRAY';
+    $data = ""  if !defined $data;
+  }
+  return $data;
+}
+
+=item $string = $status->get_tag_raw($tagname, @args)
+
+Similar to C<get_tag>, but keeps a tag name unchanged (does not uppercase it),
+and does not convert arrayref tag values into a single string.
+
+=cut
+
+sub get_tag_raw {
+  my($self, $tag, @args) = @_;
+
+  return if !defined $tag;
+  my $data;
+  if (exists $common_tags{$tag}) {
+    # tag data from traditional pre-defined tag subroutines
+    $data = $common_tags{$tag};
+    $data = $data->($self,@args)  if ref $data eq 'CODE';
+    $data = ""  if !defined $data;
+  } elsif (exists $self->{tag_data}->{$tag}) {
+    # tag data comes from $self->{tag_data}->{TAG}, typically from plugins
+    $data = $self->{tag_data}->{$tag};
+    $data = $data->($self,@args)  if ref $data eq 'CODE';
+    $data = ""  if !defined $data;
+  }
+  return $data;
 }
 
 ###########################################################################
@@ -1153,148 +1567,29 @@ sub _get_tag_value_for_yesno {
 }
 
 sub _get_tag_value_for_score {
-  #$pad parameter never used.  removed.
-  my ($self) = @_;
+  my ($self, $pad) = @_;
 
   my $score  = sprintf("%2.1f", $self->{score});
   my $rscore = $self->_get_tag_value_for_required_score();
 
   #Change due to bug 6419 to use Util function for consistency with spamd
   #and PerMessageStatus
-  return Mail::SpamAssassin::Util::get_tag_value_for_score($score, $rscore, $self->{is_spam});
+  $score = Mail::SpamAssassin::Util::get_tag_value_for_score($score, $rscore, $self->{is_spam});
+
+  #$pad IS PROVIDED BY THE _SCORE(PAD)_ tag
+  if (defined $pad && $pad =~ /^(0+| +)$/) {
+    my $count = length($1) + 3 - length($score);
+    $score = (substr($pad, 0, $count) . $score) if $count > 0;
+  }
+  return $score;
+
 }
 
 sub _get_tag_value_for_required_score {
-  my $self  = shift;
+  my $self = shift;
   return sprintf("%2.1f", $self->{conf}->{required_score});
 }
 
-sub _get_tag {
-  my $self = shift;
-  my $tag = shift;
-  my %tags;
-
-  # tag data also comes from $self->{tag_data}->{TAG}
-
-  $tag = "" unless defined $tag; # can be "0", so use a defined test
-
-  %tags = ( YESNO     => sub {    $self->_get_tag_value_for_yesno(@_) },
-  
-            YESNOCAPS => sub { uc $self->_get_tag_value_for_yesno(@_) },
-
-            SCORE => sub { $self->_get_tag_value_for_score(shift) },
-            HITS  => sub { $self->_get_tag_value_for_score(shift) },
-
-            REQD  => sub { $self->_get_tag_value_for_required_score() },
-
-            VERSION => \&Mail::SpamAssassin::Version,
-
-            SUBVERSION => sub { $Mail::SpamAssassin::SUB_VERSION },
-
-            HOSTNAME => sub {
-	      $self->{conf}->{report_hostname} ||
-	      Mail::SpamAssassin::Util::fq_hostname();
-	    },
-
-	    REMOTEHOSTNAME => sub {
-	      $self->{tag_data}->{'REMOTEHOSTNAME'} || "localhost";
-	    },
-	    REMOTEHOSTADDR => sub {
-	      $self->{tag_data}->{'REMOTEHOSTADDR'} || "127.0.0.1";
-	    },
-
-            LASTEXTERNALIP => sub {
-              my $lasthop = $self->{relays_external}->[0];
-              $lasthop ? $lasthop->{ip} : '';
-            },
-
-            LASTEXTERNALRDNS => sub {
-              my $lasthop = $self->{relays_external}->[0];
-              $lasthop ? $lasthop->{rdns} : '';
-            },
-
-            LASTEXTERNALHELO => sub {
-              my $lasthop = $self->{relays_external}->[0];
-              $lasthop ? $lasthop->{helo} : '';
-            },
-
-            CONTACTADDRESS => sub { $self->{conf}->{report_contact} },
-
-            BAYES => sub {
-              defined($self->{bayes_score}) ?
-                        sprintf("%3.4f", $self->{bayes_score}) : "0.5"
-            },
-
-            DATE => \&Mail::SpamAssassin::Util::time_to_rfc822_date,
-
-            STARS => sub {
-              my $arg = (shift || "*");
-              my $length = int($self->{score});
-              $length = 50 if $length > 50;
-              $arg x $length;
-            },
-
-            AUTOLEARN => sub { $self->get_autolearn_status() },
-
-            AUTOLEARNSCORE => sub { $self->get_autolearn_points() },
-
-            TESTS => sub {
-              my $arg = (shift || ',');
-              join($arg, sort(@{$self->{test_names_hit}})) || "none";
-            },
-
-            SUBTESTS => sub {
-              my $arg = (shift || ',');
-              join($arg, sort(@{$self->{subtest_names_hit}})) || "none";
-            },
-
-            TESTSSCORES => sub {
-              my $arg = (shift || ",");
-              my $line = '';
-              foreach my $test (sort @{$self->{test_names_hit}}) {
-                if (!$line) {
-                  $line .= $test . "=" . $self->{conf}->{scores}->{$test};
-                } else {
-                  $line .= $arg . $test . "=" . $self->{conf}->{scores}->{$test};
-                }
-              }
-              $line ? $line : 'none';
-            },
-
-            PREVIEW => sub { $self->get_content_preview() },
-
-            REPORT => sub { "\n" . ($self->{tag_data}->{REPORT} || "") },
-
-	    HEADER => sub {
-	      my $hdr = shift || return;
-	      $self->get($hdr,undef);
-	    },
-
-            TIMING => sub { $self->{main}->timer_report() },
-
-            ADDEDHEADERHAM => sub { $self->_get_added_headers('headers_ham') },
-
-            ADDEDHEADERSPAM=> sub { $self->_get_added_headers('headers_spam') },
-
-            ADDEDHEADER => sub {
-              $self->_get_added_headers(
-                        $self->{is_spam} ? 'headers_spam' : 'headers_ham');
-            },
-
-          );
-
-  my $data;
-  if (exists $tags{$tag}) {
-    $data = $tags{$tag};
-    $data = $data->(@_)  if ref $data eq 'CODE';
-    $data = ""  if !defined $data;
-  } elsif (exists $self->{tag_data}->{$tag}) {
-    $data = $self->{tag_data}->{$tag};
-    $data = $data->(@_)  if ref $data eq 'CODE';
-    $data = ""  if !defined $data;
-  }
-  return $data;
-}
 
 ###########################################################################
 
@@ -1314,6 +1609,8 @@ sub finish {
   $self->{main}->call_plugins ("per_msg_finish", {
 	  permsgstatus => $self
 	});
+
+  $self->report_unsatisfied_actions;
 
   # Delete out all of the members of $self.  This will remove any direct
   # circular references and let the memory get reclaimed while also being more
@@ -1367,11 +1664,11 @@ sub extract_message_metadata {
     $self->{$item} = $self->{msg}->{metadata}->{$item};
   }
 
-  $self->{tag_data}->{RELAYSTRUSTED} = $self->{relays_trusted_str};
-  $self->{tag_data}->{RELAYSUNTRUSTED} = $self->{relays_untrusted_str};
-  $self->{tag_data}->{RELAYSINTERNAL} = $self->{relays_internal_str};
-  $self->{tag_data}->{RELAYSEXTERNAL} = $self->{relays_external_str};
-  $self->{tag_data}->{LANGUAGES} = $self->{msg}->get_metadata("X-Languages");
+  $self->set_tag('RELAYSTRUSTED',   $self->{relays_trusted_str});
+  $self->set_tag('RELAYSUNTRUSTED', $self->{relays_untrusted_str});
+  $self->set_tag('RELAYSINTERNAL',  $self->{relays_internal_str});
+  $self->set_tag('RELAYSEXTERNAL',  $self->{relays_external_str});
+  $self->set_tag('LANGUAGES', $self->{msg}->get_metadata("X-Languages"));
 
   # This should happen before we get called, but just in case.
   if (!defined $self->{msg}->{metadata}->{html}) {
@@ -1430,9 +1727,11 @@ C<header_name> does not exist.
 Appending C<:raw> to the header name will inhibit decoding of quoted-printable
 or base-64 encoded strings.
 
-Appending C<:addr> to the header name will cause everything except
-the first email address to be removed from the header.  For example,
-all of the following will result in "example@foo":
+Appending a modifier C<:addr> to a header field name will cause everything
+except the first email address to be removed from the header field.  It is
+mainly applicable to header fields 'From', 'Sender', 'To', 'Cc' along with
+their 'Resent-*' counterparts, and the 'Return-Path'. For example, all of
+the following will result in "example@foo":
 
 =over 4
 
@@ -1452,9 +1751,12 @@ all of the following will result in "example@foo":
 
 =back
 
-Appending C<:name> to the header name will cause everything except
-the first display name to be removed from the header.  For example,
-all of the following will result in "Foo Blah"
+Appending a modifier C<:name> to a header field name will cause everything
+except the first display name to be removed from the header field. It is
+mainly applicable to header fields containing a single mail address: 'From',
+'Sender', along with their 'Resent-From' and 'Resent-Sender' counterparts.
+For example, all of the following will result in "Foo Blah". One level of
+single quotes is stripped too, as it is often seen.
 
 =over 4
 
@@ -1648,10 +1950,11 @@ sub _get {
       $result =~ s/,.*$//;
     }
     elsif ($getname) {
-      # Get the real name out of the header
+      # Get the display name out of the header
       # All of these should result in "Foo Blah":
       #
       # jm@foo (Foo Blah)
+      # (Foo Blah) jm@foo
       # jm@foo (Foo Blah), jm@bar
       # display: jm@foo (Foo Blah), jm@bar ;
       # Foo Blah <jm@foo>
@@ -1659,8 +1962,23 @@ sub _get {
       # "'Foo Blah'" <jm@foo>
       #
       local $1;
-      $result =~ s/^[\'\"]*(.*?)[\'\"]*\s*<.+>\s*$/$1/g
-	  or $result =~ s/^.+\s\((.*?)\)\s*$/$1/g; # jm@foo (Foo Blah)
+      # does not handle mailbox-list or address-list well, to be improved
+      if ($result =~ /^ \s* (.*?) \s* < [^<>]* >/sx) {
+        $result = $1;  # display-name, RFC 5322
+        # name-addr    = [display-name] angle-addr
+        # display-name = phrase
+        # phrase       = 1*word / obs-phrase
+        # word         = atom / quoted-string
+        # obs-phrase   = word *(word / "." / CFWS)
+        $result =~ s{ " ( (?: [^"\\] | \\. )* ) " }
+                { my $s=$1; $s=~s{\\(.)}{$1}gs; $s }gsxe;
+      } elsif ($result =~ /^ [^(,]*? \( (.*?) \) /sx) {  # legacy form
+        # nested comments are not handled, to be improved
+        $result = $1;
+      } else {  # no display name
+        $result = '';
+      }
+      $result =~ s/^ \s* ' \s* (.*?) \s* ' \s* \z/$1/sx;
     }
   }
   return $result;
@@ -1695,7 +2013,7 @@ sub get {
 # The goals are to find URIs in plain text spam that are intended to be clicked on or copy/pasted, but
 # ignore random strings that might look like URIs, for example in uuencoded files, and to ignore
 # URIs that spammers might seed in spam in ways not visible or clickable to add work to spam filters.
-# When we extract a domain and look it up in an RBL, an FP on decding that the text is a URI is not much
+# When we extract a domain and look it up in an RBL, an FP on deciding that the text is a URI is not much
 # of a problem, as the only cost is an extra RBL lookup. The same FP is worse if the URI is used in matching rule
 # because it could lead to a rule FP, as in bug 5780 with WIERD_PORT matching random uuencoded strings.
 # The principles of the following code are 1) if ThunderBird or Outlook Express would linkify a string,
@@ -1781,6 +2099,7 @@ sub get_uri_list {
   }
 
   $self->{uri_list} = \@uris;
+# $self->set_tag('URILIST', @uris == 1 ? $uris[0] : \@uris)  if @uris;
 
   return @uris;
 }
@@ -1819,6 +2138,9 @@ C<anchor_text> is an array of the anchor text (text between <a> and
 
 C<domains> is a hash of the domains found in the canonified URIs.
 
+C<hosts> is a hash of unstripped hostnames found in the canonified URIs
+as hash keys, with their domain part stored as a value of each hash entry.
+
 =cut
 
 sub get_uri_detail_list {
@@ -1836,14 +2158,19 @@ sub get_uri_detail_list {
   # do this so we're sure metadata->html is setup
   my %parsed = map { $_ => 'parsed' } $self->_get_parsed_uri_list();
 
+
+  # This parses of DKIM for URIs disagrees with documentation and bug 6700 votes to disable
+  # this functionality
+  # 2013-01-07
+
   # Look for the domain in DK/DKIM headers
-  my $dk = join(" ", grep {defined} ( $self->get('DomainKey-Signature',undef),
-                                      $self->get('DKIM-Signature',undef) ));
-  while ($dk =~ /\bd\s*=\s*([^;]+)/g) {
-    my $dom = $1;
-    $dom =~ s/\s+//g;
-    $parsed{$dom} = 'domainkeys';
-  }
+  #my $dk = join(" ", grep {defined} ( $self->get('DomainKey-Signature',undef),
+  #                                    $self->get('DKIM-Signature',undef) ));
+  #while ($dk =~ /\bd\s*=\s*([^;]+)/g) {
+  #  my $dom = $1;
+  #  $dom =~ s/\s+//g;
+  #  $parsed{$dom} = 'domainkeys';
+  #}
 
   # get URIs from HTML parsing
   # use the metadata version since $self->{html} may not be setup
@@ -1859,10 +2186,14 @@ sub get_uri_detail_list {
     $info->{cleaned} = \@tmp;
 
     foreach (@tmp) {
-      my $domain = Mail::SpamAssassin::Util::uri_to_domain($_);
-      if ($domain && !$info->{domains}->{$domain}) {
-        $info->{domains}->{$domain} = 1;
-        $self->{uri_domain_count}++;
+      my($domain,$host) = Mail::SpamAssassin::Util::uri_to_domain($_);
+      if (defined $host && $host ne '' && !$info->{hosts}->{$host}) {
+        # unstripped full host name as a key, and its domain part as a value
+        $info->{hosts}->{$host} = $domain;
+        if (defined $domain && $domain ne '' && !$info->{domains}->{$domain}) {
+          $info->{domains}->{$domain} = 1;  # stripped to domain boundary
+          $self->{uri_domain_count}++;
+        }
       }
     }
 
@@ -1871,9 +2202,9 @@ sub get_uri_detail_list {
       foreach my $nuri (@tmp) {
         dbg("uri: cleaned html uri, $nuri");
       }
-      if ($info->{domains}) {
-        foreach my $domain (keys %{$info->{domains}}) {
-          dbg("uri: html domain, $domain");
+      if ($info->{hosts} && $info->{domains}) {
+        for my $host (keys %{$info->{hosts}}) {
+          dbg("uri: html host %s, domain %s", $host, $info->{hosts}->{$host});
         }
       }
     }
@@ -1896,10 +2227,14 @@ sub get_uri_detail_list {
       $info->{cleaned} = \@uris;
 
       foreach (@uris) {
-        my $domain = Mail::SpamAssassin::Util::uri_to_domain($_);
-        if ($domain && !$info->{domains}->{$domain}) {
-          $info->{domains}->{$domain} = 1;
-          $self->{uri_domain_count}++;
+        my($domain,$host) = Mail::SpamAssassin::Util::uri_to_domain($_);
+        if (defined $host && $host ne '' && !$info->{hosts}->{$host}) {
+          # unstripped full host name as a key, and its domain part as a value
+          $info->{hosts}->{$host} = $domain;
+          if (defined $domain && $domain ne '' && !$info->{domains}->{$domain}){
+            $info->{domains}->{$domain} = 1;
+            $self->{uri_domain_count}++;
+          }
         }
       }
     }
@@ -1909,9 +2244,9 @@ sub get_uri_detail_list {
       foreach my $nuri (@uris) {
         dbg("uri: cleaned parsed uri, $nuri");
       }
-      if ($info->{domains}) {
-        foreach my $domain (keys %{$info->{domains}}) {
-          dbg("uri: parsed domain, $domain");
+      if ($info->{hosts} && $info->{domains}) {
+        for my $host (keys %{$info->{hosts}}) {
+          dbg("uri: parsed host %s, domain %s", $host, $info->{hosts}->{$host});
         }
       }
     }
@@ -2115,7 +2450,7 @@ ENDOFEVAL
 #
 # the clearing of the test state is now inlined as:
 #
-# $self->{test_log_msgs} = ();        # clear test state
+# %{$self->{test_log_msgs}} = ();        # clear test state
 #
 # except for this public API for plugin use:
 
@@ -2127,7 +2462,7 @@ Clear test state, including test log messages from C<$status-E<gt>test_log()>.
 
 sub clear_test_state {
     my ($self) = @_;
-    $self->{test_log_msgs} = ();
+    %{$self->{test_log_msgs}} = ();
 }
 
 # internal API, called only by get_hit()
@@ -2184,8 +2519,6 @@ sub _handle_hit {
               $self->_wrap_desc($desc,
                   3+length($rule)+length($score)+length($area), " " x 28),
               ($self->{test_log_msgs}->{LONG} || ''));
-
-    $self->{test_log_msgs} = ();        # clear test logs
 }
 
 sub _wrap_desc {
@@ -2250,7 +2583,7 @@ description is used.
 
 =back
 
-Backwards compatibility: the two mandatory arguments have been part of this API
+Backward compatibility: the two mandatory arguments have been part of this API
 since SpamAssassin 2.x.  The optional I<name=<gt>value> pairs, however, are a
 new addition in SpamAssassin 3.2.0.
 
@@ -2272,7 +2605,10 @@ sub got_hit {
 
   # adding a hit does nothing if we don't have a score -- we probably
   # shouldn't have run it in the first place
-  return unless $score;
+  if (!$score) {
+    %{$self->{test_log_msgs}} = ();
+    return;
+  }
 
   # ensure that rule values always result in an *increase*
   # of $self->{tests_already_hit}->{$rule}:
@@ -2289,6 +2625,7 @@ sub got_hit {
   my $already_hit = $self->{tests_already_hit}->{$rule} || 0;
   # don't count hits multiple times, unless 'tflags multiple' is on
   if ($already_hit && ($tflags_ref->{$rule}||'') !~ /\bmultiple\b/) {
+    %{$self->{test_log_msgs}} = ();
     return;
   }
 
@@ -2308,7 +2645,10 @@ sub got_hit {
   } else {
     $rule_descr = $conf_ref->get_description_for_rule($rule);  # static
   }
-  $rule_descr = $rule  if !defined $rule_descr || $rule_descr eq '';
+  # Bug 6880 Set Rule Description to something that says no rule
+  #$rule_descr = $rule  if !defined $rule_descr || $rule_descr eq '';
+  $rule_descr = "No description available." if !defined $rule_descr || $rule_descr eq '';
+
   $self->_handle_hit($rule,
             $score,
             $area,
@@ -2323,6 +2663,7 @@ sub got_hit {
     }
   }
 
+  %{$self->{test_log_msgs}} = ();  # clear test logs
   return 1;
 }
 
@@ -2331,6 +2672,7 @@ sub got_hit {
 # TODO: this needs API doc
 sub test_log {
   my ($self, $msg) = @_;
+  local $1;
   while ($msg =~ s/^(.{30,48})\s//) {
     $self->_test_log_line ($1);
   }
@@ -2543,10 +2885,14 @@ sub create_fulltext_tmpfile {
   }
 
   my ($tmpf, $tmpfh) = Mail::SpamAssassin::Util::secure_tmpfile();
+  $tmpfh  or die "failed to create a temporary file";
   print $tmpfh $$fulltext  or die "error writing to $tmpf: $!";
   close $tmpfh  or die "error closing $tmpf: $!";
 
   $self->{fulltext_tmpfile} = $tmpf;
+
+  dbg("check: create_fulltext_tmpfile, written %d bytes to file %s",
+      length($$fulltext), $tmpf);
 
   return $self->{fulltext_tmpfile};
 }
@@ -2561,8 +2907,11 @@ temporary file and uncaches the filename.
 sub delete_fulltext_tmpfile {
   my ($self) = @_;
   if (defined $self->{fulltext_tmpfile}) {
-    unlink $self->{fulltext_tmpfile}
-      or die "cannot unlink ".$self->{fulltext_tmpfile}.": $!";
+    if (!unlink $self->{fulltext_tmpfile}) {
+      my $msg = sprintf("cannot unlink %s: %s", $self->{fulltext_tmpfile}, $!);
+      # don't fuss too much if file is missing, perhaps it wasn't even created
+      if ($! == ENOENT) { warn $msg } else { die $msg }
+    }
     $self->{fulltext_tmpfile} = undef;
   }
 }
@@ -2606,6 +2955,42 @@ sub all_from_addrs {
 
   dbg("eval: all '*From' addrs: " . join(" ", @addrs));
   $self->{all_from_addrs} = \@addrs;
+  return @addrs;
+}
+
+=item all_from_addrs_domains
+
+This function returns all the various from addresses in a message using all_from_addrs() 
+and then returns only the domain names.  
+
+=cut
+
+sub all_from_addrs_domains {
+  my ($self) = @_;
+
+  if (exists $self->{all_from_addrs_domains}) { 
+    return @{$self->{all_from_addrs_domains}};
+  }
+
+  #TEST POINT - my @addrs = ("test.voipquotes2.net","test.voipquotes2.co.uk"); 
+  #Start with all the normal from addrs
+  my @addrs = &all_from_addrs($self);
+
+  dbg("eval: all '*From' addrs domains (before): " . join(" ", @addrs));
+
+  #loop through and limit to just the domain with a dummy address
+  for (my $i = 0; $i < scalar(@addrs); $i++) {
+    $addrs[$i] = 'dummy@'.&Mail::SpamAssassin::Util::uri_to_domain($addrs[$i]);
+  }
+
+  #Remove duplicate domains
+  my %addrs = map { $_ => 1 } @addrs;
+  @addrs = keys %addrs;
+
+  dbg("eval: all '*From' addrs domains (after uri to domain): " . join(" ", @addrs));
+
+  $self->{all_from_addrs_domains} = \@addrs;
+
   return @addrs;
 }
 

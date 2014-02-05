@@ -461,7 +461,13 @@ sub try_extraction {
   unlink(<log/test_rules_copy/*.pm>);
   unlink(<log/test_rules_copy/*.cf>);
 
-  open (OUT, ">log/test_rules_copy/00_test.cf") or die "failed to write rule";
+  { # suppress unnecessary warning:
+    #   "Filehandle STDIN reopened as STDOUT only for output"
+    # See https://rt.perl.org/rt3/Public/Bug/Display.html?id=23838
+    no warnings 'io';
+    open (OUT, ">log/test_rules_copy/00_test.cf")
+      or die "failed to write rule";
+  }
   print OUT "
     use_bayes 0     # disable bayes loading
     loadplugin Mail::SpamAssassin::Plugin::Check
@@ -480,7 +486,7 @@ sub try_extraction {
   foreach my $key1 (sort keys %{$conf->{base_orig}->{$ruletype}}) {
     print "INPUT: $key1 $conf->{base_orig}->{$ruletype}->{$key1}\n";
   }
-  my %found = ();
+  my %found;
   foreach my $key (sort keys %{$conf->{base_string}->{$ruletype}}) {
     my $str = "$key:$conf->{base_string}->{$ruletype}->{$key}";
     print "BASES: '$str'\n";

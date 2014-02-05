@@ -2,6 +2,10 @@
 # imported into main for ease of use.
 package main;
 
+# use strict;
+# use warnings;
+# use re 'taint';
+
 use Cwd;
 use Config;
 use File::Basename;
@@ -11,17 +15,42 @@ use File::Spec;
 use POSIX qw(WIFEXITED WIFSIGNALED WIFSTOPPED WEXITSTATUS WTERMSIG WSTOPSIG);
 
 BEGIN {
+  require Exporter;
+  use vars qw(@ISA @EXPORT @EXPORT_OK);
+  @ISA = qw(Exporter);
+
+  use vars qw($have_inet4 $have_inet6 $spamdhost $spamdport);
+  @EXPORT = qw($have_inet4 $have_inet6 $spamdhost $spamdport);
+
   # No spamd test in Windows unless env override says user figured out a way
   # If you want to know why these are vars and no constants, read this thread:
   #   <http://www.mail-archive.com/dev%40perl.apache.org/msg05466.html>
   #  -- mss, 2004-01-13
   our $RUNNING_ON_WINDOWS = ($^O =~ /^(mswin|dos|os2)/oi);
-  our $SKIP_SPAMD_TESTS = ($RUNNING_ON_WINDOWS || ($ENV{'SPAMD_HOST'} && ($ENV{'SPAMD_HOST'} ne '127.0.0.1')));
+  our $SKIP_SPAMD_TESTS =
+        $RUNNING_ON_WINDOWS ||
+        ( $ENV{'SPAMD_HOST'} && !($ENV{'SPAMD_HOST'} eq '127.0.0.1' ||
+                                  $ENV{'SPAMD_HOST'} eq '::1' ||
+                                  $ENV{'SPAMD_HOST'} eq 'localhost') );
   our $NO_SPAMC_EXE;
   our $SKIP_SPAMC_TESTS;
   our $SSL_AVAILABLE;
   our $SKIP_SETUID_NOBODY_TESTS = 0;
   our $SKIP_DNSBL_TESTS = 0;
+
+  $have_inet4 = eval {
+    require IO::Socket::INET;
+    my $sock = IO::Socket::INET->new(LocalAddr => '0.0.0.0', Proto => 'udp');
+    $sock->close or die "error closing inet socket: $!"  if $sock;
+    $sock ? 1 : undef;
+  };
+
+  $have_inet6 = eval {
+    require IO::Socket::INET6;
+    my $sock = IO::Socket::INET6->new(LocalAddr => '::', Proto => 'udp');
+    $sock->close or die "error closing inet6 socket: $!"  if $sock;
+    $sock ? 1 : undef;
+  };
 }
 
 # Set up for testing. Exports (as global vars):
@@ -73,7 +102,9 @@ sub sa_t_init {
   $salearn ||= "$perl_cmd ../sa-learn.raw";
 
   $spamdlocalhost = $ENV{'SPAMD_LOCALHOST'};
-  $spamdlocalhost ||= '127.0.0.1';
+  if (!$spamdlocalhost) {
+    $spamdlocalhost = $have_inet4 || !$have_inet6 ? '127.0.0.1' : '::1';
+  }
   $spamdhost = $ENV{'SPAMD_HOST'};
   $spamdhost ||= $spamdlocalhost;
   $spamdport = $ENV{'SPAMD_PORT'};
@@ -202,8 +233,11 @@ sub probably_unused_spamd_port {
   return 0 if $NO_SPAMD_REQUIRED;
 
   my $port;
-  my @nstat = ();
-  if (open(NSTAT, "netstat -a -n 2>&1 |")) {
+  my @nstat;
+  local $ENV{'PATH'} = '/bin:/usr/bin:/usr/local/bin';  # must not be tainted
+  if (!open(NSTAT, "netstat -a -n 2>&1 |")) {
+    # not too bad if failing on some architecture, with some luck should be alright
+  } else {
     @nstat = grep(/^\s*tcp/i, <NSTAT>);
     close(NSTAT);
   }
@@ -808,7 +842,25 @@ sub read_config {
     shift @ARGV;
     my $k = shift @ARGV;
     my $v = shift @ARGV;
-    $conf{$k} = $v;
+
+    # Override only allows setting one variable.  Some xt tests need to set more
+    # config variables.  Adding : as a delimeter for config variable and value 
+    # parameters
+
+    @k = split (/:/,$k);
+    @v = split (/:/,$v);
+
+    if (scalar(@k) != scalar(@v)) {
+      print "Error: The number of override arguments for variables and values did not match\n!";
+      exit;
+    } else {
+      print "\nProcessing Overrides:\n\n";
+    }
+
+    for (my $i = 0; $i < scalar(@k); $i++) {
+      $conf{$k[$i]} = $v[$i];
+      print "Overriding $k[$i] with value $v[$i]\n";
+    }
   }
   close CF;
 }
@@ -970,10 +1022,50 @@ sub can_use_net_dns_safely {
   # on non-Linux unices as root, due to a bug in Sys::Hostname::Long
   # (which is used by Net::DNS)
 
-  return 1 if eval { require Sys::Hostname::Long; Sys::Hostname::Long->VERSION(1.4) };
   return 1 if ($< != 0);
   return 1 if ($^O =~ /^(linux|mswin|dos|os2)/oi);
+
+  my $has_unsafe_hostname =
+    eval { require Sys::Hostname::Long && Sys::Hostname::Long->VERSION < 1.4 };
+  return 1 if !$has_unsafe_hostname;
+
   return;
+}
+
+sub debug_hash {
+  my ($hash) = @_;
+  my ($string, $key, @keys, @sorted, $i);
+
+  if (uc(ref($hash)) eq "HASH") {
+    foreach $key (keys %$hash) {
+      push (@keys, $key);
+    }
+    @sorted = sort @keys;
+  
+    for ($i=0; $i < scalar(@sorted); $i++) {
+      if (uc(ref($hash->{$sorted[$i]})) eq 'HASH') {
+        $string .= "$sorted[$i] = ".debug_hash($hash->{$sorted[$i]})."\n";
+      } else {
+        $string .= "$sorted[$i] = $hash->{$sorted[$i]}\n";
+      }
+    }
+  } else {
+    warn (uc(ref($hash)) . " is not a HASH\n");
+  }
+  return $string;
+}
+
+sub debug_array {
+  my ($array) = @_;
+
+  my ($string, $i);
+
+  if (uc(ref($array)) eq "ARRAY") {
+    for ($i =0; $i < scalar(@$array); $i++) {
+      $string .= "Array Element $i = $array->[$i]\n";
+    }
+  }
+  return $string;
 }
 
 1;

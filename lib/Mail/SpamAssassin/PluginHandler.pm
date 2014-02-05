@@ -35,12 +35,13 @@ use re 'taint';
 use File::Spec;
 
 use vars qw{
-  @ISA $VERSION @CONFIG_TIME_HOOKS
+  @ISA @CONFIG_TIME_HOOKS
 };
 
 @ISA = qw();
 
-$VERSION = 'bogus';     # avoid CPAN.pm picking up version strings later
+#Removed $VERSION per BUG 6422
+#$VERSION = 'bogus';     # avoid CPAN.pm picking up version strings later
 
 # Normally, the list of active plugins that should be called for a given hook
 # method name is compiled and cached at runtime.  This means that later calls
@@ -207,9 +208,10 @@ sub callback {
       warn "plugin: eval failed: $eval_stat\n";
     };
 
-    if ($ret) {
-      #dbg("plugin: ${plugin}->${methodref} => $ret");
-      $overallret = $ret;
+    if (defined $ret) {
+      # dbg("plugin: ${plugin}->${methodref} => $ret");
+      # we are interested in defined but false results too
+      $overallret = $ret  if $ret || !defined $overallret;
     }
 
     if ($plugin->{_inhibit_further_callbacks}) {
@@ -218,7 +220,6 @@ sub callback {
     }
   }
 
-  $overallret ||= $ret;
   return $overallret;
 }
 

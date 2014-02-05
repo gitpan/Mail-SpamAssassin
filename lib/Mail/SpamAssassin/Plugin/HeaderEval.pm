@@ -68,6 +68,7 @@ sub new {
   $self->register_eval_rule("check_ratware_envelope_from");
   $self->register_eval_rule("gated_through_received_hdr_remover");
   $self->register_eval_rule("received_within_months");
+  $self->register_eval_rule("check_equal_from_domains");
 
   return $self;
 }
@@ -78,10 +79,6 @@ sub compile_now_start {
 
   $self->word_is_in_dictionary("aba");
 }
-
-# sad but true. sort it out, sysadmins!
-my $CCTLDS_WITH_LOTS_OF_OPEN_RELAYS = qr{(?:kr|cn|cl|ar|hk|il|th|tw|sg|za|tr|ma|ua|in|pe|br)};
-my $ROUND_THE_WORLD_RELAYERS = qr{(?:net|com|ca)};
 
 sub check_for_fake_aol_relay_in_rcvd {
   my ($self, $pms) = @_;
@@ -142,7 +139,7 @@ sub check_for_unique_subject_id {
   my ($self, $pms) = @_;
   local ($_);
   $_ = lc $pms->get('Subject');
-  study;
+  study;  # study is a no-op since perl 5.16.0, eliminating related bugs
 
   my $id = 0;
   if (/[-_\.\s]{7,}([-a-z0-9]{4,})$/
@@ -769,11 +766,9 @@ sub _get_received_header_times {
     unshift @received, (shift @local);
   }
 
-  my $rcvd;
-
   if (scalar(@local)) {
     my (@fetchmail_times);
-    foreach $rcvd (@local) {
+    foreach my $rcvd (@local) {
       if ($rcvd =~ m/(\s.?\d+ \S\S\S \d+ \d+:\d+:\d+ \S+)/) {
 	my $date = $1;
         dbg2("eval: trying Received fetchmail header date for real time: $date");
@@ -793,7 +788,7 @@ sub _get_received_header_times {
   }
 
   my (@header_times);
-  foreach $rcvd (@received) {
+  foreach my $rcvd (@received) {
     if ($rcvd =~ m/(\s.?\d+ \S\S\S \d+ \d+:\d+:\d+ \S+)/) {
       my $date = $1;
       dbg2("eval: trying Received header date for real time: $date");
@@ -898,6 +893,7 @@ sub subject_is_all_caps {
 
    $subject =~ s/^\s+//;
    $subject =~ s/\s+$//;
+   $subject =~ s/^(?:(?:Re|Fwd|Fw|Aw|Antwort|Sv):\s*)+//i;  # Bug 6805
    return 0 if $subject !~ /\s/;	# don't match one word subjects
    return 0 if (length $subject < 10);  # don't match short subjects
    $subject =~ s/[^a-zA-Z]//g;		# only look at letters
@@ -976,7 +972,7 @@ sub check_messageid_not_usable {
 
   # Lyris eats message-ids.  also some ezmlm, I think :(
   $_ = $pms->get("List-Unsubscribe");
-  return 1 if (/<mailto:(?:leave-\S+|\S+-unsubscribe)\@\S+>$/);
+  return 1 if (/<mailto:(?:leave-\S+|\S+-unsubscribe)\@\S+>$/i);
 
   # ezmlm again
   if($self->gated_through_received_hdr_remover($pms)) { return 1; }
@@ -1049,6 +1045,33 @@ sub check_ratware_envelope_from {
 
   return 0;
 }
+
+# ADDED FROM BUG 6487
+sub check_equal_from_domains {
+  my ($self, $pms) = @_;
+
+  my $from = $pms->get('From:addr');
+  my $envfrom = $pms->get('EnvelopeFrom:addr');
+
+  local $1;
+  my $fromdomain = '';
+  #Revised regexp from 6487 comment 3
+  $fromdomain = $1  if $from =~ /\@([^@]*)\z/;
+  $fromdomain =~ s/^.+\.([^\.]+\.[^\.]+)$/$1/;
+  return 0 if $fromdomain eq '';
+
+  my $envfromdomain = '';
+  $envfromdomain = $1  if $envfrom =~ /\@([^@]*)\z/;
+  $envfromdomain =~ s/^.+\.([^\.]+\.[^\.]+)$/$1/;
+  return 0 if $envfromdomain eq '';
+
+  dbg("eval: From 2nd level domain: $fromdomain, EnvelopeFrom 2nd level domain: $envfromdomain");
+  
+  return 1 if lc($fromdomain) ne lc($envfromdomain);
+
+  return 0;
+}
+
 
 ###########################################################################
 

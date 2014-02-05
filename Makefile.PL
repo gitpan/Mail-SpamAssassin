@@ -186,7 +186,7 @@ my %makefile = (
         'IO::Zlib'      => 1.04,          # for sa-update
         'Mail::DKIM'    => 0.31,
         'Net::DNS'      => (RUNNING_ON_WINDOWS ? 0.46 : 0.34), # bugs in older revs
-        'NetAddr::IP'   => 4.000,
+        'NetAddr::IP'   => 4.010,
         'Sys::Hostname' => 0,
         'Time::HiRes'   => 0,
         'Time::Local'   => 0,
@@ -343,7 +343,7 @@ foreach my $file (@FILES_THAT_MUST_EXIST) {
     'DB_File' =>                   0,
     'Net::SMTP' =>                 0,
     'Mail::SPF' =>                 0,
-    'IP::Country::Fast' =>         0,
+    'Geo::IP' =>                   0,
     'Razor2::Client::Agent' =>     2.61,
     'Net::Ident' =>                0,
     'IO::Socket::INET6' =>         0,
@@ -1104,6 +1104,7 @@ conf__install:
 	$(PERL) -MFile::Copy -e "copy(q{rules/v312.pre}, q{$(B_CONFDIR)/v312.pre}) unless -f q{$(B_CONFDIR)/v312.pre}"
 	$(PERL) -MFile::Copy -e "copy(q{rules/v320.pre}, q{$(B_CONFDIR)/v320.pre}) unless -f q{$(B_CONFDIR)/v320.pre}"
 	$(PERL) -MFile::Copy -e "copy(q{rules/v330.pre}, q{$(B_CONFDIR)/v330.pre}) unless -f q{$(B_CONFDIR)/v330.pre}"
+	$(PERL) -MFile::Copy -e "copy(q{rules/v340.pre}, q{$(B_CONFDIR)/v340.pre}) unless -f q{$(B_CONFDIR)/v340.pre}"
 
 data__install:
 	-$(MKPATH) $(B_DATADIR)

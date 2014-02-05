@@ -65,6 +65,9 @@ The type of this setting:
  - $CONF_TYPE_HASH_KEY_VALUE: hash key/value pair, like "describe" or tflags
  - $CONF_TYPE_STRINGLIST list of strings, stored as an array
  - $CONF_TYPE_IPADDRLIST list of IP addresses, stored as an array of SA::NetSet
+ - $CONF_TYPE_DURATION a nonnegative time interval in seconds - a numeric value
+                      (float or int), optionally suffixed by a time unit (s, m,
+                      h, d, w), seconds are implied if unit is missing
 
 If this is set, and a 'code' block does not already exist, a 'code' block is
 assigned based on the type.
@@ -77,10 +80,10 @@ value be non-empty, otherwise they'll produce a warning message.
 
 =item code
 
-A subroutine to deal with the setting.  Only used if B<type> is not set.  ONE OF
-B<code> OR B<type> IS REQUIRED.  The arguments passed to the function are
-C<($self, $key, $value, $line)>, where $key is the setting (*not* the command),
-$value is the value string, and $line is the entire line.
+A subroutine to deal with the setting.  ONE OF B<code> OR B<type> IS REQUIRED.
+The arguments passed to the function are C<($self, $key, $value, $line)>,
+where $key is the setting (*not* the command), $value is the value string,
+and $line is the entire line.
 
 There are two special return values that the B<code> subroutine may return
 to signal that there is an error in the configuration:
@@ -90,6 +93,10 @@ that a value be set, but one was not provided.
 
 C<$Mail::SpamAssassin::Conf::INVALID_VALUE> -- this setting requires a value
 from a set of 'valid' values, but the user provided an invalid one.
+
+C<$Mail::SpamAssassin::Conf::INVALID_HEADER_FIELD_NAME> -- this setting
+requires a syntactically valid header field name, but the user provided
+an invalid one.
 
 Any other values -- including C<undef> -- returned from the subroutine are
 considered to mean 'success'.
@@ -215,8 +222,8 @@ sub build_command_luts {
 sub parse {
   my ($self, undef, $scoresonly) = @_; # leave $rules in $_[1]
 
-  $self->{scoresonly} = $scoresonly;
   my $conf = $self->{conf};
+  $self->{scoresonly} = $scoresonly;
 
   # Language selection:
   # See http://www.gnu.org/manual/glibc-2.2.5/html_node/Locale-Categories.html
@@ -260,6 +267,13 @@ sub parse {
     if ($keepmetadata && $line =~ /^\#testrules/) {
       $self->{file_scoped_attrs}->{testrules}++;
       next;
+    }
+
+    # bug 6800: let X-Spam-Checker-Version also show what sa-update we are at
+    if ($line =~ /^\# UPDATE version (\d+)$/) {
+      for ($self->{currentfile}) {  # just aliasing, not a loop
+        $conf->{update_version}{$_} = $1  if defined $_ && $_ ne '(no file)';
+      }
     }
 
     $line =~ s/(?<!\\)#.*$//; # remove comments
@@ -379,7 +393,7 @@ sub parse {
       # "3.0.x" versions:
       ## make sure it's a numeric value
       #$value += 0.0;
-      ## convert 3.000000 -> 3.0, stay backwards compatible ...
+      ## convert 3.000000 -> 3.0, stay backward compatible ...
       #$ver =~ s/^(\d+)\.(\d{1,3}).*$/sprintf "%d.%d", $1, $2/e;
       #$value =~ s/^(\d+)\.(\d{1,3}).*$/sprintf "%d.%d", $1, $2/e;
 
@@ -430,6 +444,13 @@ sub parse {
                         "skipping: $line";
         goto failed_line;
       }
+      elsif ($ret && $ret eq $Mail::SpamAssassin::Conf::INVALID_HEADER_FIELD_NAME)
+      {
+        $parse_error = "config: SpamAssassin failed to parse line, ".
+                       "it does not specify a valid header field name, ".
+                       "skipping: $line";
+        goto failed_line;
+      }
       elsif ($ret && $ret eq $Mail::SpamAssassin::Conf::MISSING_REQUIRED_VALUE)
       {
         $parse_error = "config: SpamAssassin failed to parse line, ".
@@ -477,6 +498,7 @@ failed_line:
 
   $self->lint_check();
   $self->set_default_scores();
+  $self->check_for_missing_descriptions();
 
   delete $self->{scoresonly};
 }
@@ -492,21 +514,28 @@ sub handle_conditional {
   my $bad = 0;
   foreach my $token (@tokens) {
     if ($token =~ /^(?:\W+|[+-]?\d+(?:\.\d+)?)$/) {
-      $eval .= untaint_var($token) . " ";
+      # using tainted subr. argument may taint the whole expression, avoid
+      my $u = untaint_var($token);
+      $eval .= $u . " ";
     }
     elsif ($token eq 'plugin') {
-      # replace with method call
-      $eval .= "\$self->cond_clause_plugin_loaded";
+      # replace with a method call
+      $eval .= '$self->cond_clause_plugin_loaded';
     }
     elsif ($token eq 'can') {
-      # replace with method call
-      $eval .= "\$self->cond_clause_can";
+      # replace with a method call
+      $eval .= '$self->cond_clause_can';
+    }
+    elsif ($token eq 'has') {
+      # replace with a method call
+      $eval .= '$self->cond_clause_has';
     }
     elsif ($token eq 'version') {
       $eval .= $Mail::SpamAssassin::VERSION." ";
     }
     elsif ($token =~ /^\w[\w\:]+$/) { # class name
-      $eval .= '"' . untaint_var($token) . '" ';
+      my $u = untaint_var($token);
+      $eval .= '"' . $u . '" ';
     }
     else {
       $bad++;
@@ -541,15 +570,31 @@ sub cond_clause_plugin_loaded {
 
 sub cond_clause_can {
   my ($self, $method) = @_;
+  $self->cond_clause_can_or_has('can', $method);
+}
+
+sub cond_clause_has {
+  my ($self, $method) = @_;
+  $self->cond_clause_can_or_has('has', $method);
+}
+
+sub cond_clause_can_or_has {
+  my ($self, $fn_name, $method) = @_;
 
   local($1,$2);
-  if ($method =~ /^(.*)::([^:]+)$/) {
+  if (!defined $method) {
+    $self->lint_warn("bad 'if' line, no argument to $fn_name(), ".
+                     "in \"$self->{currentfile}\"", undef);
+  } elsif ($method =~ /^(.*)::([^:]+)$/) {
+    no strict "refs";
     my($module, $meth) = ($1, $2);
-    return UNIVERSAL::can($module, $meth);
+    return 1  if UNIVERSAL::can($module,$meth) &&
+                 ( $fn_name eq 'has' || &{$method}() );
   } else {
-    $self->lint_warn("bad 'if' line, cannot find '::' in can($method), ".
-                "in \"$self->{currentfile}\"", undef);
+    $self->lint_warn("bad 'if' line, cannot find '::' in $fn_name($method), ".
+                     "in \"$self->{currentfile}\"", undef);
   }
+  return;
 }
 
 # Let's do some linting here ...
@@ -599,6 +644,21 @@ sub set_default_scores {
   }
 }
 
+# loop through all the tests and if we are missing a description with debug
+# set, throw a warning except for testing T_ or meta __ rules.
+sub check_for_missing_descriptions {
+  my ($self) = @_;
+  my $conf = $self->{conf};
+
+  while ( my $k = each %{$conf->{tests}} ) {
+    if ($k !~ m/^(?:T_|__)/i) {
+      if ( ! exists $conf->{descriptions}->{$k} ) {
+        dbg("config: warning: no description set for $k");
+      }
+    }
+  }
+}
+
 ###########################################################################
 
 sub setup_default_code_cb {
@@ -632,6 +692,9 @@ sub setup_default_code_cb {
   elsif ($type == $Mail::SpamAssassin::Conf::CONF_TYPE_IPADDRLIST) {
     $cmd->{code} = \&set_ipaddr_list;
   }
+  elsif ($type == $Mail::SpamAssassin::Conf::CONF_TYPE_DURATION) {
+    $cmd->{code} = \&set_duration_value;
+  }
   else {
     warn "config: unknown conf type $type!";
     return 0;
@@ -653,11 +716,28 @@ sub set_numeric_value {
   unless (defined $value && $value !~ /^$/) {
     return $Mail::SpamAssassin::Conf::MISSING_REQUIRED_VALUE;
   }
-  unless ($value =~ /^-?\d+(?:\.\d+)?$/) {
+  unless ($value =~ /^ [+-]? \d+ (?: \. \d* )? \z/sx) {
     return $Mail::SpamAssassin::Conf::INVALID_VALUE;
   }
-  # it is safe to untaint now that we now the syntax is a valid number
-  $conf->{$key} = untaint_var($value) + 0.0;
+  # it is safe to untaint now that we know the syntax is a valid number
+  $conf->{$key} = untaint_var($value) + 0;
+}
+
+sub set_duration_value {
+  my ($conf, $key, $value, $line) = @_;
+
+  local ($1,$2);
+  unless (defined $value && $value !~ /^$/) {
+    return $Mail::SpamAssassin::Conf::MISSING_REQUIRED_VALUE;
+  }
+  unless ($value =~ /^( \+? \d+ (?: \. \d* )? ) (?: \s* ([smhdw]))? \z/sxi) {
+    return $Mail::SpamAssassin::Conf::INVALID_VALUE;
+  }
+  $value = $1;
+  $value *= { s => 1, m => 60, h => 3600,
+              d => 24*3600, w => 7*24*3600 }->{lc $2}  if defined $2;
+  # it is safe to untaint now that we know the syntax is a valid time interval
+  $conf->{$key} = untaint_var($value) + 0;
 }
 
 sub set_bool_value {
@@ -867,7 +947,8 @@ sub finish_parsing {
     # free up stuff we no longer need
     delete $conf->{tests};
     delete $conf->{priority};
-    delete $conf->{test_types};
+    #test_types are needed - see bug 5503
+    #delete $conf->{test_types};
   }
 }
 
@@ -903,11 +984,13 @@ sub _meta_deps_recurse {
   my @tokens = ($rule =~ m/$lexer/g);
 
   # Go through each token in the meta rule
+  my $conf_tests = $conf->{tests};
   foreach my $token (@tokens) {
     # has to be an alpha+numeric token
-    next if ($token =~ /^(?:\W+|[+-]?\d+(?:\.\d+)?)$/);
+  # next if $token =~ /^(?:\W+|[+-]?\d+(?:\.\d+)?)$/;
+    next if $token !~ /^[A-Za-z_][A-Za-z0-9_]*\z/s;  # faster
     # and has to be a rule name
-    next unless exists $conf->{tests}->{$token};
+    next unless exists $conf_tests->{$token};
 
     # add and recurse
     push(@{$deps}, untaint_var($token));
@@ -1141,6 +1224,12 @@ sub add_test {
 
   $conf->{tests}->{$name} = $text;
   $conf->{test_types}->{$name} = $type;
+
+  if ($name =~ /AUTOLEARNTEST/i) {
+     dbg("config: auto-learn: $name has type $type = $conf->{test_types}->{$name} during add_test\n");
+  }
+
+  
   if ($type == $Mail::SpamAssassin::Conf::TYPE_META_TESTS) {
     $conf->{priority}->{$name} ||= 500;
   }
@@ -1207,7 +1296,7 @@ sub is_meta_valid {
   # Go through each token in the meta rule
   foreach my $token (@tokens) {
     # Numbers can't be rule names
-    if ($token =~ /^(?:\W+|[+-]?\d+(?:\.\d+)?)$/) {
+    if ($token !~ /^[A-Za-z_][A-Za-z0-9_]*\z/s) {
       $meta .= "$token ";
     }
     # Zero will probably cause more errors
@@ -1248,19 +1337,19 @@ sub is_regexp_valid {
   my $safere = $re;
   my $mods = '';
   local ($1,$2);
-  if ($re =~ s/^m{//) {
-    $re =~ s/}([a-z]*)$//; $mods = $1;
+  if ($re =~ s/^m\{//) {
+    $re =~ s/\}([a-z]*)\z//; $mods = $1;
   }
   elsif ($re =~ s/^m\(//) {
-    $re =~ s/\)([a-z]*)$//; $mods = $1;
+    $re =~ s/\)([a-z]*)\z//; $mods = $1;
   }
   elsif ($re =~ s/^m<//) {
-    $re =~ s/>([a-z]*)$//; $mods = $1;
+    $re =~ s/>([a-z]*)\z//; $mods = $1;
   }
   elsif ($re =~ s/^m(\W)//) {
-    $re =~ s/\Q$1\E([a-z]*)$//; $mods = $1;
+    $re =~ s/\Q$1\E([a-z]*)\z//; $mods = $1;
   }
-  elsif ($re =~ s/^\/(.*)\/([a-z]*)$/$1/) {
+  elsif ($re =~ s{^/(.*)/([a-z]*)\z}{$1}) {
     $mods = $2;
   }
   else {
@@ -1284,14 +1373,14 @@ sub is_regexp_valid {
 
   # now prepend the modifiers, in order to check if they're valid
   if ($mods) {
-    $re = "(?".$mods.")".$re;
+    $re = "(?" . $mods . ")" . $re;
   }
 
   # note: this MUST use m/...${re}.../ in some form or another, ie.
   # interpolation of the $re variable into a code regexp, in order to test the
   # security of the regexp.  simply using ("" =~ $re) will NOT do that, and
   # will therefore open a hole!
-  if (eval { ("" =~ m#${re}#); 1; }) {
+  if (eval { ("" =~ m{$re}); 1; }) {
     return 1;
   }
   my $err = $@ ne '' ? $@ : "errno=$!";  chomp $err;
@@ -1339,6 +1428,7 @@ sub add_to_addrlist_rcvd {
   my ($self, $listname, $addr, $domain) = @_;
   my $conf = $self->{conf};
 
+  $domain = lc $domain;
   $addr = lc $addr;
   if ($conf->{$listname}->{$addr}) {
     push @{$conf->{$listname}->{$addr}{domain}}, $domain;
@@ -1359,7 +1449,7 @@ sub remove_from_addrlist {
   my $conf = $self->{conf};
 
   foreach my $addr (@addrs) {
-    delete($conf->{$singlelist}->{$addr});
+    delete($conf->{$singlelist}->{lc $addr});
   }
 }
 
@@ -1368,7 +1458,7 @@ sub remove_from_addrlist_rcvd {
   my $conf = $self->{conf};
 
   foreach my $addr (@addrs) {
-    delete($conf->{$listname}->{$addr});
+    delete($conf->{$listname}->{lc $addr});
   }
 }
 

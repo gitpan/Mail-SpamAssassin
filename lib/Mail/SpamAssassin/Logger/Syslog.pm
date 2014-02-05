@@ -39,8 +39,22 @@ use Time::HiRes ();
 use Sys::Syslog qw(:DEFAULT setlogsock);
 use Mail::SpamAssassin::Logger;
 
-use vars qw(@ISA);
+use vars qw(@ISA %prio_map $syslog_open);
 @ISA = ();
+
+BEGIN {
+  # %prio_map maps Logger.pm log level names (warn, error, info, dbg)
+  # into standard Sys::Syslog::syslog() log level names
+  #
+  %prio_map = (dbg => 'debug', debug => 'debug', info => 'info',
+               notice => 'notice', warn => 'warning', warning => 'warning',
+               error => 'err', err => 'err', crit => 'crit', alert => 'alert',
+               emerg => 'emerg');
+
+  # make sure never to hit the CPAN-RT#56826 bug (memory corruption
+  # when closelog() is called twice), fixed in Sys-Syslog 0.28
+  $syslog_open = 0;
+}
 
 sub new {
   my $class = shift;
@@ -54,6 +68,7 @@ sub new {
   $self->{disabled} = 0;
   $self->{consecutive_failures} = 0;
   $self->{failure_threshold} = 10;
+  $self->{SIGPIPE_RECEIVED} = 0;
 
   # parameters
   my %params = @_;
@@ -87,6 +102,7 @@ sub init {
     dbg("logger: opening syslog with $log_socket socket");
     # the next call is required to actually open the socket
     openlog($self->{ident}, 'cons,pid,ndelay', $self->{log_facility});
+    $syslog_open = 1;
     1;
   } or do {
     $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
@@ -105,6 +121,7 @@ sub init {
       setlogsock('inet') or die "setlogsock('inet') failed: $!";
       dbg("logger: opening syslog using inet socket");
       openlog($self->{ident}, 'cons,pid,ndelay', $self->{log_facility});
+      $syslog_open = 1;
       1;
     } or do {
       $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
@@ -128,17 +145,19 @@ sub log_message {
   return if $self->{disabled};
 
   # map level names
-  # info is already info
-  $level = 'debug' if $level eq 'dbg';
-  $level = 'warning' if $level eq 'warn';
-  $level = 'err' if $level eq 'error';
+  $level = $prio_map{$level};
+  if (!defined $level) {  # just in case
+    $level = 'err';
+    $msg = '(bad prio: ' . $_[1] . ') ' . $msg;
+  }
 
   # install a new handler for SIGPIPE -- this signal has been
   # found to occur with syslog-ng after syslog-ng restarts.
   local $SIG{'PIPE'} = sub {
     $self->{SIGPIPE_RECEIVED}++;
     # force a log-close.   trap possible die() calls
-    eval { closelog(); };
+    eval { closelog() } if $syslog_open;
+    $syslog_open = 0;
   };
 
   my $timestamp = '';
@@ -148,17 +167,21 @@ sub log_message {
   }
   $msg = $timestamp . ' ' . $msg  if $timestamp ne '';
 
-  # important: do not call syslog() from the SIGCHLD handler
-  # child_handler().   otherwise we can get into a loop if syslog()
-  # forks a process -- as it does in syslog-ng apparently! (bug 3625)
-  $Mail::SpamAssassin::Logger::LOG_SA{INHIBIT_LOGGING_IN_SIGCHLD_HANDLER} = 1;
+# no longer needed since a patch to bug 6745:
+# # important: do not call syslog() from the SIGCHLD handler
+# # child_handler().   otherwise we can get into a loop if syslog()
+# # forks a process -- as it does in syslog-ng apparently! (bug 3625)
+# $Mail::SpamAssassin::Logger::LOG_SA{INHIBIT_LOGGING_IN_SIGCHLD_HANDLER} = 1;
+
   my $eval_stat;
   eval {
     syslog($level, "%s", $msg); 1;
   } or do {
     $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
   };
-  $Mail::SpamAssassin::Logger::LOG_SA{INHIBIT_LOGGING_IN_SIGCHLD_HANDLER} = 0;
+
+# no longer needed since a patch to bug 6745:
+# $Mail::SpamAssassin::Logger::LOG_SA{INHIBIT_LOGGING_IN_SIGCHLD_HANDLER} = 0;
 
   if (defined $eval_stat) {
     if ($self->check_syslog_sigpipe($msg)) {
@@ -193,8 +216,10 @@ sub check_syslog_sigpipe {
   eval {
     # SIGPIPE received when writing to syslog -- close and reopen
     # the log handle, then try again.
-    closelog();
+    closelog() if $syslog_open;
+    $syslog_open = 0;
     openlog($self->{ident}, 'cons,pid,ndelay', $self->{log_facility});
+    $syslog_open = 1;
     syslog('debug', "%s", "syslog reopened");
     syslog('info', "%s", $msg);
 
@@ -204,7 +229,7 @@ sub check_syslog_sigpipe {
     syslog('info', "%s", $msg);
 
     # if we've received multiple sigpipes, logging is probably still broken.
-    if ($self->{SIGPIPE_RECEIVED} > 1) {
+    if ($self->{SIGPIPE_RECEIVED}) {
       warn "logger: syslog failure: multiple SIGPIPEs received\n";
       $self->{disabled} = 1;
     }
@@ -235,7 +260,8 @@ sub syslog_incr_failure_counter {
 sub close_log {
   my ($self) = @_;
 
-  closelog();
+  closelog() if $syslog_open;
+  $syslog_open = 0;
 }
 
 1;

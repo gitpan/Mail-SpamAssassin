@@ -63,10 +63,10 @@ use vars qw(@ISA);
 Creates a Mail::SpamAssassin::Message object.  Takes a hash reference
 as a parameter.  The used hash key/value pairs are as follows:
 
-C<message> is either undef (which will use STDIN), a scalar of the
-entire message, an array reference of the message with 1 line per array
-element, and either a file glob or IO::File object which holds the entire
-contents of the message.
+C<message> is either undef (which will use STDIN), a scalar - a string
+containing an entire message, a reference to such string, an array reference
+of the message with one line per array element, or either a file glob
+or an IO::File object which holds the entire contents of the message.
 
 Note: The message is expected to generally be in RFC 2822 format, optionally
 including an mbox message separator line (the "From " line) as the first line.
@@ -144,8 +144,20 @@ sub new {
       defined $nread  or die "error reading: $!";
       @message = split(/^/m, $raw_str, -1);
 
-      dbg("message: empty message read")  if $raw_str eq '';
+      if ($raw_str eq '') {
+        dbg("message: empty message read");
+      } elsif (length($raw_str) > 128*1024) {
+        # ditch rarely used large chunks of allocated memory, Bug 6514
+        #   http://www.perlmonks.org/?node_id=803515
+        # about 97% of mail messages are below 128 kB,
+        # about 98% of mail messages are below 256 kB (2010 statistics)
+        # dbg("message: deallocating %.2f MB", length($raw_str)/1024/1024);
+        undef $raw_str;
+      }
     }
+  }
+  elsif (ref $message eq 'SCALAR') {
+    @message = split(/^/m, $$message, -1);
   }
   elsif (ref $message) {
     dbg("message: Input is a reference of unknown type!");
@@ -196,8 +208,8 @@ sub new {
 
   # bug 4363
   # Check to see if we should do CRLF instead of just LF
-  # For now, just check the first header and do whatever it does
-  if (@message && $message[0] =~ /\015\012/) {
+  # For now, just check the first and last line and do whatever it does
+  if (@message && ($message[0] =~ /\015\012/ || $message[-1] =~ /\015\012/)) {
     $self->{line_ending} = "\015\012";
     dbg("message: line ending changed to CRLF");
   }
@@ -281,15 +293,30 @@ sub new {
   # will get modified below
   $self->{'pristine_body'} = join('', @message);
 
-  # CRLF -> LF
+  # pristine_body_length is currently used by an eval test check_body_length.  
+  # Possible To-Do: Base the length on the @message array later down?
+  # Or a different copy of the message post decoding?
+  if ($self->{suppl_attrib} && defined $self->{suppl_attrib}{body_size}) {
+    # optional info provided by a caller; should reflect the original
+    # message body size if provided, and as such it may differ from the
+    # $self->{pristine_body} size, e.g. when the caller passed a truncated
+    # message to SpamAssassin, or when counting line-endings differently
+    $self->{'pristine_body_length'} = $self->{suppl_attrib}{body_size};
+  } else {
+    $self->{'pristine_body_length'} = length($self->{'pristine_body'});
+  }
+
+  # CRLF -> LF  (but avoid expensive operation unless necessary)
   # also merge multiple blank lines into a single one
+  my $squash_crlf = $self->{line_ending} eq "\015\012";
   my $start;
   # iterate over lines in reverse order
   for (my $cnt=$#message; $cnt>=0; $cnt--) {
-    $message[$cnt] =~ s/\015\012/\012/;
+    $message[$cnt] =~ s/\015\012/\012/  if $squash_crlf;
 
     # line is blank
-    if ($message[$cnt] !~ /\S/) {
+    if ($message[$cnt] =~ /^\s*$/) {
+      # /^\s*$/ is about 5% faster then !/\S/, but still expensive here
       if (!defined $start) {
         $start=$cnt;
       }
@@ -312,6 +339,24 @@ sub new {
   my ($boundary);
   ($self->{'type'}, $boundary) = Mail::SpamAssassin::Util::parse_content_type($self->header('content-type'));
   dbg("message: main message type: ".$self->{'type'});
+
+#  dbg("message: \$message[0]: \"" . $message[0] . "\"");
+
+  # bug 6845: if main message type is multipart and the message body does not begin with
+  # either a blank line or the boundary (if defined), insert a blank line
+  # to ensure proper parsing - do not consider MIME headers at the beginning of the body
+  # to be part of the message headers.
+  if ($self->{'type'} =~ /^multipart\//i && $#message > 0 && $message[0] =~ /\S/)
+  {
+    if (!defined $boundary || $message[0] !~ /^--\Q$boundary\E/)
+    {
+      dbg("message: Inserting blank line at top of body to ensure correct multipart MIME parsing");
+      unshift(@message, "\012");
+    }
+  }
+
+#  dbg("message: \$message[0]: \"" . $message[0] . "\"");
+#  dbg("message: \$message[1]: \"" . $message[1] . "\"");
 
   # parse queue, simple array of parts to parse:
   # 0: part object, already in the tree
@@ -453,7 +498,7 @@ sub extract_message_metadata {
   my ($self, $permsgstatus) = @_;
 
   # do this only once per message, it can be expensive
-  if ($self->{already_extracted_metadata}) { return; }
+  return  if $self->{already_extracted_metadata};
   $self->{already_extracted_metadata} = 1;
 
   $self->{metadata}->extract ($self, $permsgstatus);
@@ -766,8 +811,10 @@ sub _parse_multipart {
     my $line;
     my $tmp_line = @{$body};
     for ($line=0; $line < $tmp_line; $line++) {
+#     dbg("message: multipart line $line: \"" . $body->[$line] . "\"");
       # specifically look for an opening boundary
-      if ($body->[$line] =~ /^--\Q$boundary\E\s*$/) {
+      if (substr($body->[$line],0,2) eq '--'  # triage
+          && $body->[$line] =~ /^--\Q$boundary\E\s*$/) {
 	# Make note that we found the opening boundary
 	$self->{mime_boundary_state}->{$boundary} = 1;
 
@@ -794,14 +841,32 @@ sub _parse_multipart {
   my $in_body = 0;
   my $header;
   my $part_array;
+  my $found_end_boundary;
 
   my $line_count = @{$body};
   foreach ( @{$body} ) {
     # if we're on the last body line, or we find any boundary marker,
-    # deal with the mime part
-    if ( --$line_count == 0 || (defined $boundary && /^--\Q$boundary\E(?:--)?\s*$/) ) {
+    # deal with the mime part;
+    # a triage before an unlikely-to-match regexp avoids a CPU hotspot
+    $found_end_boundary = defined $boundary && substr($_,0,2) eq '--'
+                          && /^--\Q$boundary\E(?:--)?\s*$/;
+    if ( --$line_count == 0 || $found_end_boundary ) {
       my $line = $_; # remember the last line
 
+      # If at last line and no end boundary found, the line belongs to body
+      # TODO:
+      #  Is $self->{mime_boundary_state}->{$boundary}-- needed here?
+      #  Could "missing end boundary" be a useful rule? Mark it somewhere?
+      #  If SA processed truncated message from amavis etc, this could also
+      #  be hit legimately..
+      if (!$found_end_boundary) {
+        # TODO: This is duplicate code from few pages down below..
+        while (length ($_) > MAX_BODY_LINE_LENGTH) {
+          push (@{$part_array}, substr($_, 0, MAX_BODY_LINE_LENGTH)."\n");
+          substr($_, 0, MAX_BODY_LINE_LENGTH) = '';
+        }
+        push ( @{$part_array}, $_ );
+      }
       # per rfc 1521, the CRLF before the boundary is part of the boundary:
       # NOTE: The CRLF preceding the encapsulation line is conceptually
       # attached to the boundary so that it is possible to have a part
@@ -810,7 +875,7 @@ sub _parse_multipart {
       # CRLFs preceding the encapsulation line, the first of which is part
       # of the preceding body part, and the second of which is part of the
       # encapsulation boundary.
-      if ($part_array) {
+      elsif ($part_array) {
         chomp( $part_array->[-1] );  # trim the CRLF that's part of the boundary
         splice @{$part_array}, -1 if ( $part_array->[-1] eq '' ); # blank line for the boundary only ...
       }
@@ -954,20 +1019,26 @@ sub _parse_normal {
   # up RAM with something we're not going to use?
   #
   if ($msg->{'type'} !~ m@^(?:text/(?:plain|html)$|message\b)@) {
-    my $filepath;
-    ($filepath, $msg->{'raw'}) = Mail::SpamAssassin::Util::secure_tmpfile();
-
-    if ($filepath) {
+    my($filepath, $fh);
+    eval {
+      ($filepath, $fh) = Mail::SpamAssassin::Util::secure_tmpfile();  1;
+    } or do {
+      my $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
+      info("message: failed to create a temp file: %s", $eval_stat);
+    };
+    if ($fh) {
       # The temp file was created, add it to the list of pending deletions
       # we cannot just delete immediately in the POSIX idiom, as this is
       # unportable (to win32 at least)
       push @{$self->{tmpfiles}}, $filepath;
-      $msg->{'raw'}->print(@{$body})  or die "error writing to $filepath: $!";
+      $fh->print(@{$body})  or die "error writing to $filepath: $!";
+      $msg->{'raw'} = $fh;
     }
   }
 
   # if the part didn't get a temp file, go ahead and store the data in memory
-  if (!exists $msg->{'raw'}) {
+  if (!defined $msg->{'raw'}) {
+    dbg("message: storing a body to memory");
     $msg->{'raw'} = $body;
   }
 }
@@ -1163,7 +1234,7 @@ sub split_into_array_of_short_lines {
   my @result;
   foreach my $line (split (/^/m, $_[0])) {
     while (length ($line) > MAX_BODY_LINE_LENGTH) {
-      # try splitting "nicely" so that we don't chop an url in half or
+      # try splitting "nicely" so that we don't chop a url in half or
       # something.  if there's no space, then just split at max length.
       my $length = rindex($line, ' ', MAX_BODY_LINE_LENGTH) + 1;
       $length ||= MAX_BODY_LINE_LENGTH;

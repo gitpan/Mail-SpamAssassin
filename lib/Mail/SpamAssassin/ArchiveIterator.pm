@@ -30,8 +30,8 @@ use Mail::SpamAssassin::Constants qw(:sa);
 use Mail::SpamAssassin::Logger;
 use Mail::SpamAssassin::AICache;
 
-use constant BIG_BYTES => 256*1024;	# 256k is a big email
-use constant BIG_LINES => BIG_BYTES/65;	# 65 bytes/line is a good approximation
+# 256 KiB is a big email, unless stated otherwise
+use constant BIG_BYTES => 256*1024;
 
 use vars qw {
   $MESSAGES
@@ -50,7 +50,7 @@ Mail::SpamAssassin::ArchiveIterator - find and process messages one at a time
 
   my $iter = new Mail::SpamAssassin::ArchiveIterator(
     { 
-      'opt_all'   => 1,
+      'opt_max_size' => 256 * 1024,  # 0 implies no limit
       'opt_cache' => 1,
     }
   );
@@ -90,10 +90,20 @@ optional unless otherwise noted.
 
 =over 4
 
+=item opt_max_size
+
+A value of option I<opt_max_size> determines a limit (number of bytes)
+beyond which a message is considered large and is skipped by ArchiveIterator.
+
+A value 0 implies no size limit, all messages are examined. An undefined
+value implies a default limit of 256 KiB.
+
 =item opt_all
 
-Typically messages over 250k are skipped by ArchiveIterator.  Use this option
-to keep from skipping messages based on size.
+Setting this option to true implicitly sets I<opt_max_size> to 0, i.e.
+no limit of a message size, all messages are processes by ArchiveIterator.
+For compatibility with SpamAssassin versions older than 3.4.0 which
+lacked option I<opt_max_size>.
 
 =item opt_scanprob
 
@@ -168,6 +178,17 @@ Reference to a subroutine which will be called intermittently during
 the 'scan' phase of the mass-check.  No guarantees are made as to
 how frequently this may happen, mind you.
 
+=item opt_from_regex
+
+This setting allows for flexibility in specifying the mbox format From seperator.
+
+It defaults to the regular expression:
+
+/^From \S+  ?(\S\S\S \S\S\S .\d .\d:\d\d:\d\d \d{4}|.\d-\d\d-\d{4}_\d\d:\d\d:\d\d_)/
+
+Some SpamAssassin programs such as sa-learn will use the configuration option 
+'mbox_format_from_regex' to override the default regular expression.
+
 =back
 
 =cut
@@ -190,6 +211,12 @@ sub new {
   $self->{h} = [ ];		# ham, as if you couldn't guess
 
   $self->{access_problem} = 0;
+
+  if ($self->{opt_all}) {
+    $self->{opt_max_size} = 0;
+  } elsif (!defined $self->{opt_max_size}) {
+    $self->{opt_max_size} = BIG_BYTES;
+  }
 
   $self;
 }
@@ -343,14 +370,16 @@ sub _run_file {
     return;
   }
 
-  if ($self->{opt_all}) {
+  my $opt_max_size = $self->{opt_max_size};
+  if (!$opt_max_size) {
     # process any size
   } elsif (!-f _) {
     # must check size while reading
-  } elsif (-s _ > BIG_BYTES) {
+  } elsif (-s _ > $opt_max_size) {
     # skip too-big mails
     # note that -s can only deal with files, it returns 0 on char.spec. STDIN
-    info("archive-iterator: skipping large message\n");
+    info("archive-iterator: skipping large message: ".
+         "file size %d, limit %d bytes", -s _, $opt_max_size);
     close INPUT  or die "error closing input file: $!";
     return;
   }
@@ -362,8 +391,9 @@ sub _run_file {
   my($inbuf,$nread);
   while ( $nread=read(INPUT,$inbuf,16384) ) {
     $len += $nread;
-    if (($len > BIG_BYTES) && !$self->{opt_all}) {
-      info("archive-iterator: skipping large message\n");
+    if ($opt_max_size && $len > $opt_max_size) {
+      info("archive-iterator: skipping large message: read %d, limit %d bytes",
+           $len, $opt_max_size);
       close INPUT  or die "error closing input file: $!";
       return;
     }
@@ -394,14 +424,25 @@ sub _run_mailbox {
     $self->{access_problem} = 1;
     return;
   }
+
+  my $opt_max_size = $self->{opt_max_size};
+  dbg("archive-iterator: _run_mailbox %s, ofs %d, limit %d",
+      $file, $offset, $opt_max_size||0);
+
   seek(INPUT,$offset,0)  or die "cannot reposition file to $offset: $!";
+
+  my $size = 0;
   for ($!=0; <INPUT>; $!=0) {
-    last if (substr($_,0,5) eq "From " && @msg && /^From \S+  ?\S\S\S \S\S\S .\d .\d:\d\d:\d\d \d{4}/);
+    #Changed Regex to use option Per bug 6703
+    last if (substr($_,0,5) eq "From " && @msg && /$self->{opt_from_regex}/o);
+    $size += length($_);
     push (@msg, $_);
 
-    # skip too-big mails
-    if (! $self->{opt_all} && @msg > BIG_LINES) {
-      info("archive-iterator: skipping large message\n");
+    # skip mails that are too big
+    if ($opt_max_size && $size > $opt_max_size) {
+      info("archive-iterator: skipping large message: ".
+           "%d lines, %d bytes, limit %d bytes",
+           scalar @msg, $size, $opt_max_size);
       close INPUT  or die "error closing input file: $!";
       return;
     }
@@ -434,15 +475,23 @@ sub _run_mbx {
     return;
   }
 
+  my $opt_max_size = $self->{opt_max_size};
+  dbg("archive-iterator: _run_mbx %s, ofs %d, limit %d",
+      $file, $offset, $opt_max_size||0);
+
   seek(INPUT,$offset,0)  or die "cannot reposition file to $offset: $!";
     
+  my $size = 0;
   for ($!=0; <INPUT>; $!=0) {
     last if ($_ =~ MBX_SEPARATOR);
+    $size += length($_);
     push (@msg, $_);
 
     # skip mails that are too big
-    if (! $self->{opt_all} && @msg > BIG_LINES) {
-      info("archive-iterator: skipping large message\n");
+    if ($opt_max_size && $size > $opt_max_size) {
+      info("archive-iterator: skipping large message: ".
+           "%d lines, %d bytes, limit %d bytes",
+           scalar @msg, $size, $opt_max_size);
       close INPUT  or die "error closing input file: $!";
       return;
     }
@@ -611,9 +660,19 @@ sub _mail_open {
 
 sub _set_default_message_selection_opts {
   my ($self) = @_;
+ 
   $self->{opt_scanprob} = 1.0 unless (defined $self->{opt_scanprob});
   $self->{opt_want_date} = 1 unless (defined $self->{opt_want_date});
   $self->{opt_cache} = 0 unless (defined $self->{opt_cache});
+  #Changed Regex to include boundaries for Communigate Pro versions (5.2.x and later). per Bug 6413
+  $self->{opt_from_regex} = '^From \S+  ?(\S\S\S \S\S\S .\d .\d:\d\d:\d\d \d{4}|.\d-\d\d-\d{4}_\d\d:\d\d:\d\d_)' unless (defined $self->{opt_from_regex});
+
+  #STRIP LEADING AND TRAILING / FROM REGEX FOR OPTION
+  $self->{opt_from_regex} =~ s/^\///;
+  $self->{opt_from_regex} =~ s/\/$//;
+
+  dbg("archive-iterator: _set_default_message_selection_opts After: Scanprob[$self->{opt_scanprob}], want_date[$self->{opt_want_date}], cache[$self->{opt_cache}], from_regex[$self->{opt_from_regex}]");
+
 }
 
 ############################################################################
@@ -747,7 +806,7 @@ sub _scan_directory {
       warn "archive-iterator: $file is not a plain file or directory: $!";
     }
   }
-  @files = ();  # release storage
+  undef @files;  # release storage
 
   # recurse into directories
   foreach my $dir (@subdirs) {
@@ -908,8 +967,8 @@ sub _scan_mailbox {
 	      $header .= $_;
 	    }
 	  }
-	  if (substr($_,0,5) eq "From " &&
-	      /^From \S+  ?\S\S\S \S\S\S .\d .\d:\d\d:\d\d \d{4}/) {
+          #Changed Regex to use option Per bug 6703
+	  if (substr($_,0,5) eq "From " && /$self->{opt_from_regex}/o) {
 	    $in_header = 1;
 	    $first = $_;
 	    $start = $where;

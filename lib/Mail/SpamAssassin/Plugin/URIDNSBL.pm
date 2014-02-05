@@ -26,10 +26,11 @@ URIDNSBL - look up URLs against DNS blocklists
 
 =head1 DESCRIPTION
 
-This works by analysing message text and HTML for URLs, extracting the
-domain names from those, querying their NS records in DNS, resolving
-the hostnames used therein, and querying various DNS blocklists for
-those IP addresses.  This is quite effective.
+This works by analysing message text and HTML for URLs, extracting host
+names from those, then querying various DNS blocklists for either:
+IP addresses of these hosts (uridnsbl,a) or their nameservers (uridnsbl,ns),
+or domain names of these hosts (urirhsbl), or domain names of their
+nameservers (urinsrhsbl, urifullnsrhsbl).
 
 =head1 USER SETTINGS
 
@@ -83,17 +84,42 @@ used, C<dnsbl_zone> is the zone to look up IPs in, and C<lookuptype>
 is the type of lookup (B<TXT> or B<A>).   Note that you must also
 define a body-eval rule calling C<check_uridnsbl()> to use this.
 
+This works by collecting domain names from URLs and querying DNS
+blocklists with an IP address of host names found in URLs or with
+IP addresses of their name servers, according to tflags as follows.
+
+If the corresponding body rule has a tflag 'a', the DNS blocklist will
+be queried with an IP address of a host found in URLs.
+
+If the corresponding body rule has a tflag 'ns', DNS will be queried
+for name servers (NS records) of a domain name found in URLs, then
+these name server names will be resolved to their IP addresses, which
+in turn will be sent to DNS blocklist.
+
+Tflags directive may specify either 'a' or 'ns' or both flags. In absence
+of any of these two flags, a default is a 'ns', which is compatible with
+pre-3.4 versions of SpamAssassin.
+
+The choice of tflags must correspond to the policy and expected use of
+each DNS blocklist and is normally not a local decision. As an example,
+a blocklist expecting queries resulting from an 'a' tflag is a
+"black_a.txt" ( http://www.uribl.com/datasets.shtml ).
+
 Example:
 
  uridnsbl        URIBL_SBLXBL    sbl-xbl.spamhaus.org.   TXT
  body            URIBL_SBLXBL    eval:check_uridnsbl('URIBL_SBLXBL')
  describe        URIBL_SBLXBL    Contains a URL listed in the SBL/XBL blocklist
+ tflags          URIBL_SBLXBL    net ns
 
 =item uridnssub NAME_OF_RULE dnsbl_zone lookuptype subtest
 
 Specify a DNSBL-style domain lookup with a sub-test.  C<NAME_OF_RULE> is the
 name of the rule to be used, C<dnsbl_zone> is the zone to look up IPs in,
 and C<lookuptype> is the type of lookup (B<TXT> or B<A>).
+
+Tflags 'ns' and 'a' on a corresponding body rule are recognized and have
+the same meaning as in the uridnsbl directive.
 
 C<subtest> is a sub-test to run against the returned data.  The sub-test may
 be in one of the following forms: m, n1-n2, or n/m, where n,n1,n2,m can be
@@ -104,7 +130,8 @@ the specified sub-test as follows:
 for a range n1-n2 the following must be true: (r >= n1 && r <= n2);
 for a n/m form the following must be true: (r & m) == (n & m);
 for a single value in quad-dot form the following must be true: r == n;
-for a single decimal or hex form the following must be true: (r & n) != 0.
+for a single decimal or hex form the following must be true:
+  ((r & n) != 0) && ((r & 0xff000000) == 0x7f000000), i.e. within 127.0.0.0/8
 
 Some typical examples of a sub-test are: 127.0.1.2, 127.0.1.20-127.0.1.39,
 127.0.1.0/255.255.255.0, 0.0.0.16/0.0.0.16, 0x10/0x10, 16, 0x10 .
@@ -153,7 +180,8 @@ the specified sub-test as follows:
 for a range n1-n2 the following must be true: (r >= n1 && r <= n2);
 for a n/m form the following must be true: (r & m) == (n & m);
 for a single value in quad-dot form the following must be true: r == n;
-for a single decimal or hex form the following must be true: (r & n) != 0.
+for a single decimal or hex form the following must be true:
+  ((r & n) != 0) && ((r & 0xff000000) == 0x7f000000), i.e. within 127.0.0.0/8
 
 Some typical examples of a sub-test are: 127.0.1.2, 127.0.1.20-127.0.1.39,
 127.2.3.0/255.255.255.0, 0.0.0.16/0.0.0.16, 0x10/0x10, 16, 0x10 .
@@ -229,6 +257,20 @@ against the named "urirhsbl"/"urirhssub" rule.
 Only URIs containing a non-IP-address "host" component will be matched against
 the named "urirhsbl"/"urirhssub" rule.
 
+=item tflags NAME_OF_RULE ns
+
+The 'ns' flag may be applied to rules corresponding to uridnsbl and uridnssub
+directives. Host names from URLs will be mapped to their name server IP
+addresses (a NS lookup followed by an A lookup), which in turn will be sent
+to blocklists. This is a default when neither 'a' nor 'ns' flags are specified.
+
+=item tflags NAME_OF_RULE a
+
+The 'a' flag may be applied to rules corresponding to uridnsbl and uridnssub
+directives. Host names from URLs will be mapped to their IP addresses, which
+will be sent to blocklists. When both 'ns' and 'a' flags are specified,
+both queries will be performed.
+
 =back
 
 =head1 ADMINISTRATOR SETTINGS
@@ -296,11 +338,12 @@ sub check_uridnsbl {
 # the lookups here!
 sub parsed_metadata {
   my ($self, $opts) = @_;
-  my $scanner = $opts->{permsgstatus};
+  my $pms = $opts->{permsgstatus};
+  my $conf = $pms->{conf};
 
-  return 0  if $scanner->{main}->{conf}->{skip_uribl_checks};
+  return 0  if $conf->{skip_uribl_checks};
 
-  if (!$scanner->is_dns_available()) {
+  if (!$pms->is_dns_available()) {
     $self->{dns_not_available} = 1;
     return 0;
   } else {
@@ -309,51 +352,59 @@ sub parsed_metadata {
     $self->{dns_not_available} = 0;
   }
 
-  $scanner->{'uridnsbl_activerules'} = { };
-  $scanner->{'uridnsbl_hits'} = { };
-  $scanner->{'uridnsbl_seen_domain'} = { };
+  $pms->{'uridnsbl_activerules'} = { };
+  $pms->{'uridnsbl_hits'} = { };
+  $pms->{'uridnsbl_seen_lookups'} = { };
 
   # only hit DNSBLs for active rules (defined and score != 0)
-  $scanner->{'uridnsbl_active_rules_rhsbl'} = { };
-  $scanner->{'uridnsbl_active_rules_rhsbl_ipsonly'} = { };
-  $scanner->{'uridnsbl_active_rules_rhsbl_domsonly'} = { };
-  $scanner->{'uridnsbl_active_rules_nsrhsbl'} = { };
-  $scanner->{'uridnsbl_active_rules_fullnsrhsbl'} = { };
-  $scanner->{'uridnsbl_active_rules_revipbl'} = { };
+  $pms->{'uridnsbl_active_rules_rhsbl'} = { };
+  $pms->{'uridnsbl_active_rules_rhsbl_ipsonly'} = { };
+  $pms->{'uridnsbl_active_rules_rhsbl_domsonly'} = { };
+  $pms->{'uridnsbl_active_rules_nsrhsbl'} = { };
+  $pms->{'uridnsbl_active_rules_fullnsrhsbl'} = { };
+  $pms->{'uridnsbl_active_rules_nsrevipbl'} = { };
+  $pms->{'uridnsbl_active_rules_arevipbl'} = { };
 
-  foreach my $rulename (keys %{$scanner->{conf}->{uridnsbls}}) {
-    next unless ($scanner->{conf}->is_rule_active('body_evals',$rulename));
+  foreach my $rulename (keys %{$conf->{uridnsbls}}) {
+    next unless ($conf->is_rule_active('body_evals',$rulename));
 
-    my $rulecf = $scanner->{conf}->{uridnsbls}->{$rulename};
-    my $tflags = $scanner->{conf}->{tflags}->{$rulename};
+    my $rulecf = $conf->{uridnsbls}->{$rulename};
+    my $tflags = $conf->{tflags}->{$rulename};
     $tflags = ''  if !defined $tflags;
+    my %tfl = map { ($_,1) } split(' ',$tflags);
 
-    if ($rulecf->{is_rhsbl} && $tflags =~ /\b ips_only \b/x) {
-      $scanner->{uridnsbl_active_rules_rhsbl_ipsonly}->{$rulename} = 1;
-    } elsif ($rulecf->{is_rhsbl} && $tflags =~ /\b domains_only \b/x) {
-      $scanner->{uridnsbl_active_rules_rhsbl_domsonly}->{$rulename} = 1;
-    } elsif ($rulecf->{is_rhsbl}) {
-      $scanner->{uridnsbl_active_rules_rhsbl}->{$rulename} = 1;
+    my $is_rhsbl = $rulecf->{is_rhsbl};
+    if (     $is_rhsbl && $tfl{'ips_only'}) {
+      $pms->{uridnsbl_active_rules_rhsbl_ipsonly}->{$rulename} = 1;
+    } elsif ($is_rhsbl && $tfl{'domains_only'}) {
+      $pms->{uridnsbl_active_rules_rhsbl_domsonly}->{$rulename} = 1;
+    } elsif ($is_rhsbl) {
+      $pms->{uridnsbl_active_rules_rhsbl}->{$rulename} = 1;
     } elsif ($rulecf->{is_fullnsrhsbl}) {
-      $scanner->{uridnsbl_active_rules_fullnsrhsbl}->{$rulename} = 1;
+      $pms->{uridnsbl_active_rules_fullnsrhsbl}->{$rulename} = 1;
     } elsif ($rulecf->{is_nsrhsbl}) {
-      $scanner->{uridnsbl_active_rules_nsrhsbl}->{$rulename} = 1;
-    } else {
-      $scanner->{uridnsbl_active_rules_revipbl}->{$rulename} = 1;
+      $pms->{uridnsbl_active_rules_nsrhsbl}->{$rulename} = 1;
+    } else {  # just a plain dnsbl rule (IP based), not a RHS rule (name-based)
+      if ($tfl{'a'}) {  # tflag 'a' explicitly
+        $pms->{uridnsbl_active_rules_arevipbl}->{$rulename} = 1;
+      }
+      if ($tfl{'ns'} || !$tfl{'a'}) {  # tflag 'ns' explicitly, or default
+        $pms->{uridnsbl_active_rules_nsrevipbl}->{$rulename} = 1;
+      }
     }
   }
 
   # get all domains in message
 
   # don't keep dereferencing this
-  my $skip_domains = $scanner->{main}->{conf}->{uridnsbl_skip_domains};
+  my $skip_domains = $conf->{uridnsbl_skip_domains};
   $skip_domains = {}  if !$skip_domains;
 
   # list of hashes to use in order
   my @uri_ordered;
 
   # Generate the full list of html-parsed domains.
-  my $uris = $scanner->get_uri_detail_list();
+  my $uris = $pms->get_uri_detail_list();
 
   # go from uri => info to uri_ordered
   # 0: a
@@ -364,10 +415,10 @@ sub parsed_metadata {
   # 5: a_empty
   while (my($uri, $info) = each %{$uris}) {
     # we want to skip mailto: uris
-    next if ($uri =~ /^mailto:/);
+    next if ($uri =~ /^mailto:/i);
 
-    # no domains were found via this uri, so skip
-    next unless ($info->{domains});
+    # no hosts/domains were found via this uri, so skip
+    next unless ($info->{hosts});
 
     my $entry = 3;
 
@@ -392,48 +443,56 @@ sub parsed_metadata {
       $entry = 4;
     }
 
-    # take the usable domains and add to the ordered list
-    foreach ( keys %{ $info->{domains} } ) {
-      if (exists $skip_domains->{$_}) {
-        dbg("uridnsbl: domain $_ in skip list");
-        next;
+    # take the usable domains and add them to the ordered list
+    while (my($host,$domain) = each( %{$info->{hosts}} )) {
+      if ($skip_domains->{$domain}) {
+        dbg("uridnsbl: domain $domain in skip list, host $host");
+      } else {
+        # use hostname as a key, and drag along the stripped domain name part
+        $uri_ordered[$entry]->{$host} = $domain;
       }
-      $uri_ordered[$entry]->{$_} = 1;
     }
   }
 
-  # at this point, @uri_ordered is an ordered array of uri hashes
+  # at this point, @uri_ordered is an ordered array of hostname hashes
 
-  my %domlist;
-  my $umd = $scanner->{main}->{conf}->{uridnsbl_max_domains};
-  while (keys %domlist < $umd && @uri_ordered) {
+  my %hostlist;  # keys are host names, values are their domain parts
+
+  my $umd = $conf->{uridnsbl_max_domains};
+  while (keys %hostlist < $umd && @uri_ordered) {
     my $array = shift @uri_ordered;
     next unless $array;
 
     # run through and find the new domains in this grouping
-    my @domains = grep(!$domlist{$_}, keys %{$array});
-    next unless @domains;
+    my @hosts = grep(!$hostlist{$_}, keys %{$array});
+    next unless @hosts;
 
-    # the new domains are all useful, just add them in
-    if (keys(%domlist) + @domains <= $umd) {
-      foreach (@domains) {
-        $domlist{$_} = 1;
+    # the new hosts are all useful, just add them in
+    if (keys(%hostlist) + @hosts <= $umd) {
+      foreach my $host (@hosts) {
+        $hostlist{$host} = $array->{$host};
       }
     }
     else {
+      dbg("uridnsbl: more than $umd URIs, picking a subset");
       # trim down to a limited number - pick randomly
-      while (@domains && keys %domlist < $umd) {
-        my $r = int rand (scalar @domains);
-        $domlist{splice (@domains, $r, 1)} = 1;
+      while (@hosts && keys %hostlist < $umd) {
+        my $r = int rand(scalar @hosts);
+        my $picked_host = splice(@hosts, $r, 1);
+        $hostlist{$picked_host} = $array->{$picked_host};
       }
     }
   }
 
+  my @hnames = keys %hostlist;
+  $pms->set_tag('URIHOSTS',
+                @hnames == 1 ? $hnames[0] : \@hnames)  if @hnames;
+  my @dnames = values %hostlist;
+  $pms->set_tag('URIDOMAINS',
+                @dnames == 1 ? $dnames[0] : \@dnames)  if @dnames;
+
   # and query
-  dbg("uridnsbl: domains to query: ".join(' ',keys %domlist));
-  foreach my $dom (keys %domlist) {
-    $self->query_domain ($scanner, $dom);
-  }
+  $self->query_hosts_or_domains($pms, \%hostlist);
 
   return 1;
 }
@@ -472,7 +531,7 @@ sub parse_and_canonicalize_subtest {
         $_ = Mail::SpamAssassin::Util::my_inet_aton($_);  # quad-dot -> number
         $any_quad_dot = 1;
       } else {
-        return undef;
+        return;
       }
     }
     $digested_subtest = defined $n2 ? $n1.$delim.$n2
@@ -503,10 +562,12 @@ sub set_config {
     is_priv => 1,
     code => sub {
       my ($self, $key, $value, $line) = @_;
+      local($1,$2,$3);
       if ($value =~ /^(\S+)\s+(\S+)\s+(\S+)$/) {
         my $rulename = $1;
         my $zone = $2;
         my $type = $3;
+        $zone =~ s/\.\z//;  # strip a redundant trailing dot
         $self->{uridnsbls}->{$rulename} = {
 	  zone => $zone, type => $type,
           is_rhsbl => 0
@@ -532,15 +593,13 @@ sub set_config {
         my $zone = $2;
         my $type = $3;
         my $subrule = $4;
-        $self->{uridnsbls}->{$rulename} = {
-         zone => $zone, type => $type,
-          is_rhsbl => 0, is_subrule => 1
-        };
-        $self->{uridnsbl_subs}->{$zone} ||= { };
+        $zone =~ s/\.\z//;  # strip a redundant trailing dot
         $subrule = parse_and_canonicalize_subtest($subrule);
         defined $subrule or return $Mail::SpamAssassin::Conf::INVALID_VALUE;
-        push(@{$self->{uridnsbl_subs}->{$zone}->{$subrule}->{rulenames}},
-             $rulename);
+        $self->{uridnsbls}->{$rulename} = {
+         zone => $zone, type => $type,
+          is_rhsbl => 0, subtest => $subrule,
+        };
       }
       elsif ($value =~ /^$/) {
         return $Mail::SpamAssassin::Conf::MISSING_REQUIRED_VALUE;
@@ -556,10 +615,12 @@ sub set_config {
     is_priv => 1,
     code => sub {
       my ($self, $key, $value, $line) = @_;
+      local($1,$2,$3);
       if ($value =~ /^(\S+)\s+(\S+)\s+(\S+)$/) {
         my $rulename = $1;
         my $zone = $2;
         my $type = $3;
+        $zone =~ s/\.\z//;  # strip a redundant trailing dot
         $self->{uridnsbls}->{$rulename} = {
 	  zone => $zone, type => $type,
           is_rhsbl => 1
@@ -585,15 +646,13 @@ sub set_config {
         my $zone = $2;
         my $type = $3;
         my $subrule = $4;
-        $self->{uridnsbls}->{$rulename} = {
-	  zone => $zone, type => $type,
-          is_rhsbl => 1, is_subrule => 1
-        };
-        $self->{uridnsbl_subs}->{$zone} ||= { };
+        $zone =~ s/\.\z//;  # strip a redundant trailing dot
         $subrule = parse_and_canonicalize_subtest($subrule);
         defined $subrule or return $Mail::SpamAssassin::Conf::INVALID_VALUE;
-        push(@{$self->{uridnsbl_subs}->{$zone}->{$subrule}->{rulenames}},
-             $rulename);
+        $self->{uridnsbls}->{$rulename} = {
+	  zone => $zone, type => $type,
+          is_rhsbl => 1, subtest => $subrule,
+        };
       }
       elsif ($value =~ /^$/) {
         return $Mail::SpamAssassin::Conf::MISSING_REQUIRED_VALUE;
@@ -609,10 +668,12 @@ sub set_config {
     is_priv => 1,
     code => sub {
       my ($self, $key, $value, $line) = @_;
+      local($1,$2,$3);
       if ($value =~ /^(\S+)\s+(\S+)\s+(\S+)$/) {
         my $rulename = $1;
         my $zone = $2;
         my $type = $3;
+        $zone =~ s/\.\z//;  # strip a redundant trailing dot
         $self->{uridnsbls}->{$rulename} = {
 	  zone => $zone, type => $type,
           is_nsrhsbl => 1
@@ -638,15 +699,13 @@ sub set_config {
         my $zone = $2;
         my $type = $3;
         my $subrule = $4;
-        $self->{uridnsbls}->{$rulename} = {
-	  zone => $zone, type => $type,
-          is_nsrhsbl => 1, is_subrule => 1
-        };
-        $self->{uridnsbl_subs}->{$zone} ||= { };
+        $zone =~ s/\.\z//;  # strip a redundant trailing dot
         $subrule = parse_and_canonicalize_subtest($subrule);
         defined $subrule or return $Mail::SpamAssassin::Conf::INVALID_VALUE;
-        push(@{$self->{uridnsbl_subs}->{$zone}->{$subrule}->{rulenames}},
-             $rulename);
+        $self->{uridnsbls}->{$rulename} = {
+	  zone => $zone, type => $type,
+          is_nsrhsbl => 1, subtest => $subrule,
+        };
       }
       elsif ($value =~ /^$/) {
         return $Mail::SpamAssassin::Conf::MISSING_REQUIRED_VALUE;
@@ -662,10 +721,12 @@ sub set_config {
     is_priv => 1,
     code => sub {
       my ($self, $key, $value, $line) = @_;
+      local($1,$2,$3);
       if ($value =~ /^(\S+)\s+(\S+)\s+(\S+)$/) {
         my $rulename = $1;
         my $zone = $2;
         my $type = $3;
+        $zone =~ s/\.\z//;  # strip a redundant trailing dot
         $self->{uridnsbls}->{$rulename} = {
 	  zone => $zone, type => $type,
           is_fullnsrhsbl => 1
@@ -691,15 +752,13 @@ sub set_config {
         my $zone = $2;
         my $type = $3;
         my $subrule = $4;
-        $self->{uridnsbls}->{$rulename} = {
-	  zone => $zone, type => $type,
-          is_fullnsrhsbl => 1, is_subrule => 1
-        };
-        $self->{uridnsbl_subs}->{$zone} ||= { };
+        $zone =~ s/\.\z//;  # strip a redundant trailing dot
         $subrule = parse_and_canonicalize_subtest($subrule);
         defined $subrule or return $Mail::SpamAssassin::Conf::INVALID_VALUE;
-        push(@{$self->{uridnsbl_subs}->{$zone}->{$subrule}->{rulenames}},
-             $rulename);
+        $self->{uridnsbls}->{$rulename} = {
+	  zone => $zone, type => $type,
+          is_fullnsrhsbl => 1, subtest => $subrule,
+        };
       }
       elsif ($value =~ /^$/) {
         return $Mail::SpamAssassin::Conf::MISSING_REQUIRED_VALUE;
@@ -757,152 +816,168 @@ sub set_config {
 
 # ---------------------------------------------------------------------------
 
-sub query_domain {
-  my ($self, $scanner, $dom) = @_;
+sub query_hosts_or_domains {
+  my ($self, $pms, $hosthash_ref) = @_;
+  my $conf = $pms->{conf};
+  my $seen_lookups = $pms->{'uridnsbl_seen_lookups'};
 
-  #warn "uridnsbl: domain $dom\n";
-  #return;
+  my $rhsblrules = $pms->{uridnsbl_active_rules_rhsbl};
+  my $rhsbliprules = $pms->{uridnsbl_active_rules_rhsbl_ipsonly};
+  my $rhsbldomrules = $pms->{uridnsbl_active_rules_rhsbl_domsonly};
+  my $nsrhsblrules = $pms->{uridnsbl_active_rules_nsrhsbl};
+  my $fullnsrhsblrules = $pms->{uridnsbl_active_rules_fullnsrhsbl};
+  my $nsreviprules = $pms->{uridnsbl_active_rules_nsrevipbl};
+  my $areviprules = $pms->{uridnsbl_active_rules_arevipbl};
 
-  $dom = lc $dom;
-  return if $scanner->{uridnsbl_seen_domain}->{$dom};
-  $scanner->{uridnsbl_seen_domain}->{$dom} = 1;
-  $self->log_dns_result("querying domain $dom");
+  while (my($host,$domain) = each(%$hosthash_ref)) {
+    $domain = lc $domain;  # just in case
+    $host = lc $host;
+    dbg("uridnsbl: considering host=$host, domain=$domain");
+    my $obj = { dom => $domain };
 
-  my $obj = { dom => $dom };
-
-  my $tflags = $scanner->{conf}->{tflags};
-  my $cf = $scanner->{uridnsbl_active_rules_revipbl};
-
-  my ($is_ip, $single_dnsbl);
-  if ($dom =~ /^\d+\.\d+\.\d+\.\d+$/) {
-    my $IPV4_ADDRESS = IPV4_ADDRESS;
-    my $IP_PRIVATE = IP_PRIVATE;
-    # only look up the IP if it is public and valid
-    if ($dom =~ /^$IPV4_ADDRESS$/ && $dom !~ /^$IP_PRIVATE$/) {
-      $self->lookup_dnsbl_for_ip($scanner, $obj, $dom);
-      # and check the IP in RHSBLs too
-      local($1,$2,$3,$4);
-      if ($dom =~ /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/) {
-	$dom = "$4.$3.$2.$1";
-	$single_dnsbl = 1;
-        $is_ip = 1;
+    my ($is_ip, $single_dnsbl);
+    if ($host =~ /^\d+\.\d+\.\d+\.\d+$/) {
+      my $IPV4_ADDRESS = IPV4_ADDRESS;
+      my $IP_PRIVATE = IP_PRIVATE;
+      # only look up the IP if it is public and valid
+      if ($host =~ /^$IPV4_ADDRESS$/o && $host !~ /^$IP_PRIVATE$/o) {
+        my $obj = { dom => $host };
+        $self->lookup_dnsbl_for_ip($pms, $obj, $host);
+        # and check the IP in RHSBLs too
+        local($1,$2,$3,$4);
+        if ($host =~ /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/) {
+          $domain = "$4.$3.$2.$1";
+          $single_dnsbl = 1;
+          $is_ip = 1;
+        }
       }
     }
-  }
-  else {
-    $single_dnsbl = 1;
-  }
-
-  my $rhsblrules = $scanner->{uridnsbl_active_rules_rhsbl};
-  my $rhsbliprules = $scanner->{uridnsbl_active_rules_rhsbl_ipsonly};
-  my $rhsbldomrules = $scanner->{uridnsbl_active_rules_rhsbl_domsonly};
-  my $nsrhsblrules = $scanner->{uridnsbl_active_rules_nsrhsbl};
-  my $fullnsrhsblrules = $scanner->{uridnsbl_active_rules_fullnsrhsbl};
-  my $reviprules = $scanner->{uridnsbl_active_rules_revipbl};
-
-  if ($single_dnsbl) {
-    # look up the domain in the basic RHSBL subset
-    my @rhsbldoms = keys %{$rhsblrules};
-
-    # and add the "domains_only" and "ips_only" subsets as appropriate
-    if ($is_ip) {
-      push @rhsbldoms, keys %{$rhsbliprules};
-    } else {
-      push @rhsbldoms, keys %{$rhsbldomrules};
+    else {
+      $single_dnsbl = 1;
     }
 
-    foreach my $rulename (@rhsbldoms) {
-      my $rulecf = $scanner->{conf}->{uridnsbls}->{$rulename};
-      $self->lookup_single_dnsbl($scanner, $obj, $rulename,
-				 $dom, $rulecf->{zone}, $rulecf->{type});
+    if ($single_dnsbl) {
+      # rule names which look up a domain in the basic RHSBL subset
+      my @rhsblrules = keys %{$rhsblrules};
 
-      # see comment below
-      $scanner->register_async_rule_start($rulename);
+      # and add the "domains_only" and "ips_only" subsets as appropriate
+      if ($is_ip) {
+        push @rhsblrules, keys %{$rhsbliprules};
+      } else {
+        push @rhsblrules, keys %{$rhsbldomrules};
+      }
+
+      foreach my $rulename (@rhsblrules) {
+        my $rulecf = $conf->{uridnsbls}->{$rulename};
+        $self->lookup_single_dnsbl($pms, $obj, $rulename,
+                                   $domain, $rulecf->{zone}, $rulecf->{type});
+
+        # note that these rules are now underway.   important: unless the
+        # rule hits, in the current design, these will not be considered
+        # "finished" until harvest_dnsbl_queries() completes
+        $pms->register_async_rule_start($rulename);
+      }
+
+      # perform NS+A or A queries to look up the domain in the non-RHSBL subset,
+      # but only if there are active reverse-IP-URIBL rules
+      if ($host !~ /^\d+\.\d+\.\d+\.\d+$/) {
+        if ( !$seen_lookups->{'NS:'.$domain} &&
+             (%$nsreviprules || %$nsrhsblrules || %$fullnsrhsblrules) ) {
+          $seen_lookups->{'NS:'.$domain} = 1;
+          $self->lookup_domain_ns($pms, $obj, $domain);
+        }
+        if (%$areviprules && !$seen_lookups->{'A:'.$host}) {
+          $seen_lookups->{'A:'.$host} = 1;
+          my $obj = { dom => $host };
+          $self->lookup_a_record($pms, $obj, $host);
+          $pms->register_async_rule_start($_)  for keys %$areviprules;
+        }
+      }
     }
-
-    # perform NS, A lookups to look up the domain in the non-RHSBL subset,
-    # but only if there are active reverse-IP-URIBL rules
-    if ($dom !~ /^\d+\.\d+\.\d+\.\d+$/ && 
-                (scalar keys %{$reviprules} ||
-                  scalar keys %{$nsrhsblrules} ||
-                  scalar keys %{$fullnsrhsblrules}))
-    {
-      $self->lookup_domain_ns($scanner, $obj, $dom);
-    }
-  }
-
-  # note that these rules are now underway.   important: unless the
-  # rule hits, in the current design, these will not be considered
-  # "finished" until harvest_dnsbl_queries() completes
-  foreach my $rulename (keys %{$reviprules}) {
-    $scanner->register_async_rule_start($rulename);
   }
 }
 
 # ---------------------------------------------------------------------------
 
 sub lookup_domain_ns {
-  my ($self, $scanner, $obj, $dom) = @_;
+  my ($self, $pms, $obj, $dom, $rulename) = @_;
 
-  my $key = "NS:".$dom;
-  return if $scanner->{async}->get_lookup($key);
-
+  my $key = "NS:" . $dom;
+  my $ent = {
+    key => $key, zone => $dom, obj => $obj, type => "URI-NS",
+    rulename => $rulename,
+  };
   # dig $dom ns
-  my $ent = $self->start_lookup($scanner, $dom, 'NS',
-                                $self->res_bgsend($scanner, $dom, 'NS', $key),
-                                $key);
-  $ent->{obj} = $obj;
+  $ent = $pms->{async}->bgsend_and_start_lookup(
+    $dom, 'NS', undef, $ent,
+    sub { my ($ent2,$pkt) = @_;
+          $self->complete_ns_lookup($pms, $ent2, $pkt, $dom) },
+    master_deadline => $pms->{master_deadline} );
+
+  return $ent;
 }
 
 sub complete_ns_lookup {
-  my ($self, $scanner, $ent, $dom) = @_;
+  my ($self, $pms, $ent, $pkt, $dom) = @_;
 
-  my $packet = $ent->{response_packet};
-  my @answer = !defined $packet ? () : $packet->answer;
+  if (!$pkt) {
+    # $pkt will be undef if the DNS query was aborted (e.g. timed out)
+    dbg("uridnsbl: complete_ns_lookup aborted %s", $ent->{key});
+    return;
+  }
+
+  dbg("uridnsbl: complete_ns_lookup %s", $ent->{key});
+  my $conf = $pms->{conf};
+  my @answer = $pkt->answer;
 
   my $IPV4_ADDRESS = IPV4_ADDRESS;
   my $IP_PRIVATE = IP_PRIVATE;
-  my $nsrhsblrules = $scanner->{uridnsbl_active_rules_nsrhsbl};
-  my $fullnsrhsblrules = $scanner->{uridnsbl_active_rules_fullnsrhsbl};
+  my $nsrhsblrules = $pms->{uridnsbl_active_rules_nsrhsbl};
+  my $fullnsrhsblrules = $pms->{uridnsbl_active_rules_fullnsrhsbl};
+  my $seen_lookups = $pms->{'uridnsbl_seen_lookups'};
 
+  my $j = 0;
   foreach my $rr (@answer) {
+    $j++;
     my $str = $rr->string;
     next unless (defined($str) && defined($dom));
-    $self->log_dns_result ("NSs for $dom: $str");
+    dbg("uridnsbl: got($j) NS for $dom: $str");
 
     if ($str =~ /IN\s+NS\s+(\S+)/) {
-      my $nsmatch = $1;
+      my $nsmatch = lc $1;
+      $nsmatch =~ s/\.$//;
       my $nsrhblstr = $nsmatch;
       my $fullnsrhblstr = $nsmatch;
-      $fullnsrhblstr =~ s/\.$//;
 
-      if ($nsmatch =~ /^\d+\.\d+\.\d+\.\d+\.?$/) {
-	$nsmatch =~ s/\.$//;
+      if ($nsmatch =~ /^\d+\.\d+\.\d+\.\d+$/) {
 	# only look up the IP if it is public and valid
-	if ($nsmatch =~ /^$IPV4_ADDRESS$/ && $nsmatch !~ /^$IP_PRIVATE$/) {
-	  $self->lookup_dnsbl_for_ip($scanner, $ent->{obj}, $nsmatch);
+	if ($nsmatch =~ /^$IPV4_ADDRESS$/o && $nsmatch !~ /^$IP_PRIVATE$/o) {
+	  $self->lookup_dnsbl_for_ip($pms, $ent->{obj}, $nsmatch);
 	}
         $nsrhblstr = $nsmatch;
       }
       else {
-	$self->lookup_a_record($scanner, $ent->{obj}, $nsmatch);
+        if (!$seen_lookups->{'A:'.$nsmatch}) {
+          $seen_lookups->{'A:'.$nsmatch} = 1;
+          $self->lookup_a_record($pms, $ent->{obj}, $nsmatch);
+        }
         $nsrhblstr = Mail::SpamAssassin::Util::RegistrarBoundaries::trim_domain($nsmatch);
       }
 
       foreach my $rulename (keys %{$nsrhsblrules}) {
-        my $rulecf = $scanner->{conf}->{uridnsbls}->{$rulename};
-        $self->lookup_single_dnsbl($scanner, $ent->{obj}, $rulename,
+        my $rulecf = $conf->{uridnsbls}->{$rulename};
+        $self->lookup_single_dnsbl($pms, $ent->{obj}, $rulename,
                                   $nsrhblstr, $rulecf->{zone}, $rulecf->{type});
 
-        $scanner->register_async_rule_start($rulename);
+        $pms->register_async_rule_start($rulename);
       }
 
       foreach my $rulename (keys %{$fullnsrhsblrules}) {
-        my $rulecf = $scanner->{conf}->{uridnsbls}->{$rulename};
-        $self->lookup_single_dnsbl($scanner, $ent->{obj}, $rulename,
+        my $rulecf = $conf->{uridnsbls}->{$rulename};
+        $self->lookup_single_dnsbl($pms, $ent->{obj}, $rulename,
                                   $fullnsrhblstr, $rulecf->{zone}, $rulecf->{type});
 
-        $scanner->register_async_rule_start($rulename);
+        $pms->register_async_rule_start($rulename);
       }
     }
   }
@@ -911,29 +986,49 @@ sub complete_ns_lookup {
 # ---------------------------------------------------------------------------
 
 sub lookup_a_record {
-  my ($self, $scanner, $obj, $hname) = @_;
+  my ($self, $pms, $obj, $hname, $rulename) = @_;
 
-  my $key = "A:".$hname;
-  return if $scanner->{async}->get_lookup($key);
-
+  my $key = "A:" . $hname;
+  my $ent = {
+    key => $key, zone => $hname, obj => $obj, type => "URI-A",
+    rulename => $rulename,
+  };
   # dig $hname a
-  my $ent = $self->start_lookup($scanner, $hname, 'A',
-                                $self->res_bgsend($scanner, $hname, 'A', $key),
-                                $key);
-  $ent->{obj} = $obj;
+  $ent = $pms->{async}->bgsend_and_start_lookup(
+    $hname, 'A', undef, $ent,
+    sub { my ($ent2,$pkt) = @_;
+          $self->complete_a_lookup($pms, $ent2, $pkt, $hname) },
+    master_deadline => $pms->{master_deadline} );
+
+  return $ent;
 }
 
 sub complete_a_lookup {
-  my ($self, $scanner, $ent, $hname) = @_;
+  my ($self, $pms, $ent, $pkt, $hname) = @_;
 
-  my $packet = $ent->{response_packet};
-  my @answer = !defined $packet ? () : $packet->answer;
+  if (!$pkt) {
+    # $pkt will be undef if the DNS query was aborted (e.g. timed out)
+    dbg("uridnsbl: complete_a_lookup aborted %s", $ent->{key});
+    return;
+  }
+
+  dbg("uridnsbl: complete_a_lookup %s", $ent->{key});
+  my @answer = $pkt->answer;
+  my $j = 0;
   foreach my $rr (@answer) {
+    $j++;
     my $str = $rr->string;
-    $self->log_dns_result ("A for NS $hname: $str");
+    if (!defined $hname) {
+      warn "complete_a_lookup-1: $j, (hname is undef), $str";
+    } elsif (!defined $str) {
+      warn "complete_a_lookup-2: $j, $hname, (str is undef)";
+      next;
+    }
+    dbg("uridnsbl: complete_a_lookup got(%d) A for %s: %s", $j,$hname,$str);
 
+    local $1;
     if ($str =~ /IN\s+A\s+(\S+)/) {
-      $self->lookup_dnsbl_for_ip($scanner, $ent->{obj}, $1);
+      $self->lookup_dnsbl_for_ip($pms, $ent->{obj}, $1);
     }
   }
 }
@@ -941,182 +1036,150 @@ sub complete_a_lookup {
 # ---------------------------------------------------------------------------
 
 sub lookup_dnsbl_for_ip {
-  my ($self, $scanner, $obj, $ip) = @_;
+  my ($self, $pms, $obj, $ip) = @_;
 
   local($1,$2,$3,$4);
   $ip =~ /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/;
   my $revip = "$4.$3.$2.$1";
 
-  my $tflags = $scanner->{conf}->{tflags};
-  my $cf = $scanner->{uridnsbl_active_rules_revipbl};
-  foreach my $rulename (keys %{$cf}) {
-    my $rulecf = $scanner->{conf}->{uridnsbls}->{$rulename};
+  my $conf = $pms->{conf};
+  my $tflags = $conf->{tflags};
+  my $cfns = $pms->{uridnsbl_active_rules_nsrevipbl};
+  my $cfa  = $pms->{uridnsbl_active_rules_arevipbl};
+  foreach my $rulename (keys %$cfa, keys %$cfns) {
+    my $rulecf = $conf->{uridnsbls}->{$rulename};
 
     # ips_only/domains_only lookups should not act on this kind of BL
-    next if ($tflags->{$rulename} =~ /\b(?:ips_only|domains_only)\b/);
-    
-    $self->lookup_single_dnsbl($scanner, $obj, $rulename,
+    next  if defined $tflags->{$rulename} &&
+             $tflags->{$rulename} =~ /\b(?:ips_only|domains_only)\b/;
+
+    $self->lookup_single_dnsbl($pms, $obj, $rulename,
 			       $revip, $rulecf->{zone}, $rulecf->{type});
   }
 }
 
 sub lookup_single_dnsbl {
-  my ($self, $scanner, $obj, $rulename, $lookupstr, $dnsbl, $qtype) = @_;
+  my ($self, $pms, $obj, $rulename, $lookupstr, $dnsbl, $qtype) = @_;
 
-  my $key = "DNSBL:".$dnsbl.":".$lookupstr;
-  return if $scanner->{async}->get_lookup($key);
-  my $item = $lookupstr.".".$dnsbl;
+  my $key = "DNSBL:" . $lookupstr . ':' . $dnsbl;
+  my $ent = {
+    key => $key, zone => $dnsbl, obj => $obj, type => 'URI-DNSBL',
+    rulename => $rulename,
+  };
+  $ent = $pms->{async}->bgsend_and_start_lookup(
+    $lookupstr.".".$dnsbl, $qtype, undef, $ent,
+    sub { my ($ent2,$pkt) = @_;
+          $self->complete_dnsbl_lookup($pms, $ent2, $pkt) },
+    master_deadline => $pms->{master_deadline} );
 
-  # dig $ip txt
-  my $ent = $self->start_lookup($scanner, $item, 'DNSBL',
-                              $self->res_bgsend($scanner, $item, $qtype, $key),
-                              $key);
-  $ent->{obj} = $obj;
-  $ent->{rulename} = $rulename;
-  $ent->{zone} = $dnsbl;
+  return $ent;
 }
 
 sub complete_dnsbl_lookup {
-  my ($self, $scanner, $ent, $dnsblip) = @_;
+  my ($self, $pms, $ent, $pkt) = @_;
 
-  my $conf = $scanner->{conf};
-  my @subtests;
+  if (!$pkt) {
+    # $pkt will be undef if the DNS query was aborted (e.g. timed out)
+    dbg("uridnsbl: complete_dnsbl_lookup aborted %s %s",
+        $ent->{rulename}, $ent->{key});
+    return;
+  }
+
+  dbg("uridnsbl: complete_dnsbl_lookup %s %s", $ent->{rulename}, $ent->{key});
+  my $conf = $pms->{conf};
+
+  my $zone = $ent->{zone};
+  my $dom = $ent->{obj}->{dom};
   my $rulename = $ent->{rulename};
   my $rulecf = $conf->{uridnsbls}->{$rulename};
 
-  my $packet = $ent->{response_packet};
-  my @answer = !defined $packet ? () : $packet->answer;
-
-  my $uridnsbl_subs = $conf->{uridnsbl_subs}->{$ent->{zone}};
+  my @subtests;
+  my @answer = $pkt->answer;
   foreach my $rr (@answer)
   {
-    next if ($rr->type ne 'A' && $rr->type ne 'TXT');
+    my($rdatastr,$rdatanum);
+    my $rr_type = $rr->type;
 
-    my $dom = $ent->{obj}->{dom};
-    my $rdatastr = $rr->rdatastr;
-    my $rdatanum;
-    if ($rdatastr =~ m/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/) {
-      $rdatanum = Mail::SpamAssassin::Util::my_inet_aton($rdatastr);
+    if ($rr_type eq 'A') {
+      $rdatastr = $rr->rdatastr;
+      if ($rdatastr =~ m/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/) {
+        $rdatanum = Mail::SpamAssassin::Util::my_inet_aton($rdatastr);
+      }
+    } elsif ($rr_type eq 'TXT') {
+      # txtdata returns a non- zone-file-format encoded result, unlike rdatastr;
+      # avoid space-separated RDATA <character-string> fields if possible;
+      # txtdata provides a list of strings in list context since Net::DNS 0.69
+      $rdatastr = join('',$rr->txtdata);
+    } else {
+      next;
     }
 
-    if (!$rulecf->{is_subrule}) {
+    my $subtest = $rulecf->{subtest};
+
+    dbg("uridnsbl: %s . %s -> %s, %s%s",
+        $dom, $zone, $rdatastr, $rulename,
+        !defined $subtest ? '' : ', subtest:'.$subtest);
+
+    my $match;
+    if (!defined $subtest) {
       # this zone is a simple rule, not a set of subrules
       # skip any A record that isn't on 127/8
-      if ($rr->type eq 'A' && $rr->rdatastr !~ /^127\./) {
+      if ($rr_type eq 'A' && $rdatastr !~ /^127\./) {
 	warn("uridnsbl: bogus rr for domain=$dom, rule=$rulename, id=" .
-            $packet->header->id." rr=".$rr->string);
+            $pkt->header->id." rr=".$rr->string);
 	next;
       }
-      $self->got_dnsbl_hit($scanner, $ent, $rdatastr, $dom, $rulename);
+      $match = 1;
+    } elsif ($subtest eq $rdatastr) {
+      $match = 1;
+    } elsif ($subtest =~ m{^ (\d+) (?: ([/-]) (\d+) )? \z}x) {
+      my($n1,$delim,$n2) = ($1,$2,$3);
+      $match =
+        !defined $n2  ? ($rdatanum & $n1) &&                  # mask only
+                          (($rdatanum & 0xff000000) == 0x7f000000)  # 127/8
+      : $delim eq '-' ? $rdatanum >= $n1 && $rdatanum <= $n2  # range
+      : $delim eq '/' ? ($rdatanum & $n2) == ($n1 & $n2)      # value/mask
+      : 0;  
+
+      dbg("uridnsbl: %s . %s -> %s, %s, %08x %s %s",
+          $dom, $zone, $rdatastr, $rulename, $rdatanum,
+          !defined $n2 ? sprintf('& %08x', $n1)
+          : $n1 == $n2 ? sprintf('== %08x', $n1)
+          :              sprintf('%08x%s%08x', $n1,$delim,$n2),
+          $match ? 'match' : 'no');
     }
-    else {
-      local($1,$2,$3);
-      foreach my $subtest (keys (%{$uridnsbl_subs})) {
-        my $match;
-        if ($subtest eq $rdatastr) {
-          $match = 1;
-        } elsif ($subtest =~ m{^ (\d+) (?: ([/-]) (\d+) )? \z}x) {
-          my($n1,$delim,$n2) = ($1,$2,$3);
-          $match =
-            !defined $n2  ? $rdatanum & $n1                       # mask only
-          : $delim eq '-' ? $rdatanum >= $n1 && $rdatanum <= $n2  # range
-          : $delim eq '/' ? ($rdatanum & $n2) == ($n1 & $n2)      # value/mask
-          : 0;  
-        # dbg("uridnsbl: %s %s/%s/%s, %s, %s", $match?'Y':'N', $dom, $rulename,
-        #     join('.',@{$uridnsbl_subs->{$subtest}->{rulenames}}),
-        #     $rdatanum, !defined $n2 ? $n1 : "$n1 $delim $n2");
-        }
-        if ($match) {
-          foreach my $subrulename (@{$uridnsbl_subs->{$subtest}->{rulenames}}) {
-            $self->got_dnsbl_hit($scanner, $ent, $rdatastr, $dom, $subrulename);
-          }
-        }
-      }
-    }
+    $self->got_dnsbl_hit($pms, $ent, $rdatastr, $dom, $rulename) if $match;
   }
 }
 
 sub got_dnsbl_hit {
-  my ($self, $scanner, $ent, $str, $dom, $rulename) = @_;
+  my ($self, $pms, $ent, $str, $dom, $rulename) = @_;
 
   $str =~ s/\s+/  /gs;	# long whitespace => short
   dbg("uridnsbl: domain \"$dom\" listed ($rulename): $str");
 
-  if (!defined $scanner->{uridnsbl_hits}->{$rulename}) {
-    $scanner->{uridnsbl_hits}->{$rulename} = { };
+  if (!defined $pms->{uridnsbl_hits}->{$rulename}) {
+    $pms->{uridnsbl_hits}->{$rulename} = { };
   };
-  $scanner->{uridnsbl_hits}->{$rulename}->{$dom} = 1;
+  $pms->{uridnsbl_hits}->{$rulename}->{$dom} = 1;
 
-  if ($scanner->{uridnsbl_active_rules_revipbl}->{$rulename}
-    || $scanner->{uridnsbl_active_rules_nsrhsbl}->{$rulename}
-    || $scanner->{uridnsbl_active_rules_fullnsrhsbl}->{$rulename}
-    || $scanner->{uridnsbl_active_rules_rhsbl}->{$rulename}
-    || $scanner->{uridnsbl_active_rules_rhsbl_ipsonly}->{$rulename}
-    || $scanner->{uridnsbl_active_rules_rhsbl_domsonly}->{$rulename})
+  if ( $pms->{uridnsbl_active_rules_nsrevipbl}->{$rulename}
+    || $pms->{uridnsbl_active_rules_arevipbl}->{$rulename}
+    || $pms->{uridnsbl_active_rules_nsrhsbl}->{$rulename}
+    || $pms->{uridnsbl_active_rules_fullnsrhsbl}->{$rulename}
+    || $pms->{uridnsbl_active_rules_rhsbl}->{$rulename}
+    || $pms->{uridnsbl_active_rules_rhsbl_ipsonly}->{$rulename}
+    || $pms->{uridnsbl_active_rules_rhsbl_domsonly}->{$rulename})
   {
     # TODO: this needs to handle multiple domain hits per rule
-    $scanner->clear_test_state();
-    my $uris = join (' ', keys %{$scanner->{uridnsbl_hits}->{$rulename}});
-    $scanner->test_log ("URIs: $uris");
-    $scanner->got_hit ($rulename, "");
+    $pms->clear_test_state();
+    my $uris = join (' ', keys %{$pms->{uridnsbl_hits}->{$rulename}});
+    $pms->test_log ("URIs: $uris");
+    $pms->got_hit ($rulename, "");
 
     # note that this rule has completed (since it got at least 1 hit)
-    $scanner->register_async_rule_finish($rulename);
+    $pms->register_async_rule_finish($rulename);
   }
-}
-
-# ---------------------------------------------------------------------------
-
-sub start_lookup {
-  my ($self, $scanner, $zone, $type, $id, $key) = @_;
-
-  my $ent = {
-    key => $key,
-    zone => $zone,  # serves to fetch other per-zone settings
-    type => "URI-".$type,
-    id => $id,
-    completed_callback => sub {
-      my $ent = shift;
-      if (defined $ent->{response_packet}) {  # not aborted or empty
-        $self->completed_lookup_callback ($scanner, $ent);
-      }
-    }
-  };
-  $scanner->{async}->start_lookup($ent, $scanner->{master_deadline});
-  return $ent;
-}
-
-sub completed_lookup_callback {
-  my ($self, $scanner, $ent) = @_;
-  my $type = $ent->{type};
-  my $key = $ent->{key};
-  $key =~ /:(\S+?)$/; my $val = $1;
-
-  if ($type eq 'URI-NS') {
-    $self->complete_ns_lookup ($scanner, $ent, $val);
-  }
-  elsif ($type eq 'URI-A') {
-    $self->complete_a_lookup ($scanner, $ent, $val);
-  }
-  elsif ($type eq 'URI-DNSBL') {
-    $self->complete_dnsbl_lookup ($scanner, $ent, $val);
-  }
-}
-
-# ---------------------------------------------------------------------------
-
-sub res_bgsend {
-  my ($self, $scanner, $host, $type, $key) = @_;
-
-  return $self->{main}->{resolver}->bgsend($host, $type, undef, sub {
-        my ($pkt, $id, $timestamp) = @_;
-        $scanner->{async}->set_response_packet($id, $pkt, $key, $timestamp);
-      });
-}
-
-sub log_dns_result {
-  #my $self = shift;
-  #Mail::SpamAssassin::dbg("uridnsbl: ".join (' ', @_));
 }
 
 # ---------------------------------------------------------------------------
@@ -1125,5 +1188,6 @@ sub log_dns_result {
 #
 sub has_tflags_domains_only { 1 }
 sub has_subtest_for_ranges { 1 }
+sub has_uridnsbl_for_a { 1 }  # uridnsbl rules recognize tflags 'a' and 'ns'
 
 1;

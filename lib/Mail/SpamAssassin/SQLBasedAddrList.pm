@@ -44,7 +44,7 @@ The default table structure looks like this:
 CREATE TABLE awl (
   username varchar(100) NOT NULL default '',
   email varchar(255) NOT NULL default '',
-  ip varchar(16) NOT NULL default '',
+  ip varchar(40) NOT NULL default '',
   count int(11) NOT NULL default '0',
   totscore float NOT NULL default '0',
   signedby varchar(255) NOT NULL default '',
@@ -126,7 +126,7 @@ sub new_checker {
   if (!$main->{conf}->{user_awl_dsn} ||
       !$main->{conf}->{user_awl_sql_table}) {
     dbg("auto-whitelist: sql-based invalid config");
-    return undef;
+    return;
   }
 
   my $dsn    = $main->{conf}->{user_awl_dsn};
@@ -138,7 +138,7 @@ sub new_checker {
   if(!$dbh) {
     info("auto-whitelist: sql-based unable to connect to database (%s) : %s",
          $dsn, DBI::errstr);
-    return undef;
+    return;
   }
 
   dbg("auto-whitelist: sql-based connected to $dsn");

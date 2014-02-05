@@ -18,7 +18,7 @@ if (-e 'test_dir') {            # running from test directory, not ..
 
 use lib '.'; use lib 't';
 use SATest; sa_t_init("rcvd_parser");
-use Test; BEGIN { plan tests => 142 };
+use Test; BEGIN { plan tests => 145 };
 use strict;
 
 # format is:
@@ -53,16 +53,7 @@ my %data = (
   'from pop.vip.sc5.yahoo.com [216.136.173.10] by localhost with POP3 (fetchmail-5.9.13) for pppppppppp@hhhhhhhhh.net (single-drop); Sun, 22 Feb 2004 20:46:25 -0600 (CST)' =>
   '',
 
-  'from rc3.isc.org (rc3.isc.org [IPv6:2001:4f8:3:bb::25])       (using TLSv1 with cipher DHE-RSA-AES256-SHA (256/256 bits))        (No client certificate requested)  by sf1.isc.org (Postfix) with ESMTP id C986F284EE       for <jm@jmason.org>; Sat, 16 Oct 2004 21:30:02 +0000 (UTC) (envelope-from bind-users-bounce@isc.org)' =>
-  '[ ip=2001:4f8:3:bb::25 rdns=rc3.isc.org helo=rc3.isc.org by=sf1.isc.org ident= envfrom=bind-users-bounce@isc.org id=C986F284EE auth= msa=0 ]',
-
-  'from ausisaps301-dmz.aus.amer.dell.com ([143.166.226.16]) (SquirrelMail authenticated user hoolis); by www.penguintowne.org with HTTP; Mon, 22 Mar 2004 12:54:13 -0600 (CST)' =>
-  '',
-
   'from localhost [127.0.0.1] by localhost with IMAP (fetchmail-6.2.4) for zzzz@localhost (single-drop); Mon, 08 Mar 2004 16:02:50 -0800 (PST)' =>
-  '',
-
-  'from 153.90.199.141        (SquirrelMail authenticated user admin); by web1.cs.montana.edu with HTTP;        Thu, 23 Sep 2004 14:35:29 -0600 (MDT)' =>
   '',
 
   'from 156.56.111.196 by blazing.arsecandle.org (envelope-from <gentoo-announce-return-530-rod=arsecandle.org@lists.gentoo.org>, uid 502) with qmail-scanner-1.24 (clamdscan: 0.80/594. f-prot: 4.4.2/3.14.11.  Clear:RC:0(156.56.111.196):.  Processed in 0.288806 secs); 06 Feb 2005 21:11:38 -0000' =>
@@ -413,8 +404,14 @@ my %data = (
   'from gate.jakob.de ([217.145.101.130]:60178 helo=gate2.jakob.de) by vps832469583.serverpool.info (envelope-from <support@verleihshop.de>) with esmtps (TLS-1.0:DHE_RSA_3DES_EDE_CBC_SHA:24) (Exim 4.50) id 1H3KFP-0005pI-08 for dvd@axelcity.de; Sat, 06 Jan 2007 23:42:55 +0100' =>
   '[ ip=217.145.101.130 rdns=gate.jakob.de helo=gate2.jakob.de by=vps832469583.serverpool.info ident= envfrom=support@verleihshop.de intl=0 id=1H3KFP-0005pI-08 auth= msa=0 ]',
 
-  'from dslb-082-083-045-064.pools.arcor-ip.net (EHLO homepc) [82.83.45.64] by mail.gmx.net (mp010) with SMTP; 03 Feb 2007 13:13:47 +0100' =>
-  '[ ip=82.83.45.64 rdns=dslb-082-083-045-064.pools.arcor-ip.net helo=homepc by=mail.gmx.net ident= envfrom= intl=0 id= auth= msa=0 ]',
+  #6877 SMTP 
+  'from stgt-5f70f8a3.pool.mediaWays.net (EHLO user588a01834c) [95.112.248.163] by mail.gmx.net (mp033) with SMTP; 23 Nov 2012 19:06:20 +0100' =>
+  '[ ip=95.112.248.163 rdns=stgt-5f70f8a3.pool.mediaWays.net helo=user588a01834c by=mail.gmx.net ident= envfrom= id= auth=GMX (SMTP / mail.gmx.net) msa=0 ]',
+
+  #6877 HTTP - NO NEW EXEMPTION NEEDED
+  'from 37.5.238.154 by www001.gmx.net with HTTP; Wed, 28 Nov 2012 00:57:41 +0100 (CET)',
+  '[ ip=37.5.238.154 rdns= helo= by=www001.gmx.net ident= envfrom= id= auth=HTTP msa=0 ]',
+
 
   'from [86.122.158.69] by mta2.iomartmail.com; Thu, 2 Aug 2007 21:50:04 -0200' =>
   '[ ip=86.122.158.69 rdns= helo=!86.122.158.69! by=mta2.iomartmail.com ident= envfrom= id= auth= msa=0 ]',
@@ -460,6 +457,23 @@ my %data = (
 
   'from  [140.211.11.9] (HELO example.com) by smtp-gw138.mailanyone.net with esmtp (MailAnyone incSMTP Exim) id f138m939701uh17Yipk65; Fri, 04 Dec 2009 09:15:01 -0600' =>
   '[ ip=140.211.11.9 rdns= helo=example.com by=smtp-gw138.mailanyone.net ident= envfrom= id=f138m939701uh17Yipk65 auth= msa=0 ]',
+
+  'from rc3.isc.org (rc3.isc.org [IPv6:2001:4f8:3:bb::25])       (using TLSv1 with cipher DHE-RSA-AES256-SHA (256/256 bits))        (No client certificate requested)  by sf1.isc.org (Postfix) with ESMTP id C986F284EE       for <jm@jmason.org>; Sat, 16 Oct 2004 21:30:02 +0000 (UTC) (envelope-from bind-users-bounce@isc.org)' =>
+  '[ ip=2001:4f8:3:bb::25 rdns=rc3.isc.org helo=rc3.isc.org by=sf1.isc.org ident= envfrom=bind-users-bounce@isc.org id=C986F284EE auth= msa=0 ]',
+
+  'from 153.90.199.141        (SquirrelMail authenticated user admin); by web1.cs.montana.edu with HTTP;        Thu, 23 Sep 2004 14:35:29 -0600 (MDT)' =>
+  '[ ip=153.90.199.141 rdns= helo= by=web1.cs.montana.edu ident= envfrom= id= auth=HTTP msa=0 ]',
+
+  'from ausisaps301-dmz.aus.amer.dell.com ([143.166.226.16]) (SquirrelMail authenticated user hoolis); by www.penguintowne.org with HTTP; Mon, 22 Mar 2004 12:54:13 -0600 (CST)' =>
+  '[ ip=143.166.226.16 rdns= helo= by=www.penguintowne.org ident= envfrom= id= auth=HTTP msa=0 ]',
+
+  #ADDED PER Bug 6783
+  'from 67.85.219.192 (NaSMail authenticated user john.doe) by webmail.example.com with HTTP; Fri, 30 Mar 2012 12:39:58 +0100 (BST)' => 
+  '[ ip=67.85.219.192 rdns= helo= by=webmail.example.com ident= envfrom= id= auth=HTTP msa=0 ]',
+
+  #ADDED PER Bug 6900
+  'from unknown (HELO ?151.80.38.67?) (myuser@mydomain.it@151.80.38.67) by mail.it-connect.it with SMTP; 28 Jan 2013 21:50:51 +0100' => 
+  '[ ip=151.80.38.67 rdns= helo=?151.80.38.67? by=mail.it-connect.it ident=myuser@mydomain.it envfrom= id= auth= msa=0 ]',
 
 );
 

@@ -8,9 +8,9 @@
 # The ASF licenses this file to you under the Apache License, Version 2.0
 # (the "License"); you may not use this file except in compliance with
 # the License.  You may obtain a copy of the License at:
-# 
+#
 #     http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -37,12 +37,21 @@ use vars qw (
 
 # The list of currently-valid TLDs for the DNS system.
 #
+# When updating domain lists, also modify t/uri_text.t accordingly
+#
 # http://data.iana.org/TLD/tlds-alpha-by-domain.txt
 # Version 2008020601, Last Updated Thu Feb  7 09:07:00 2008 UTC
 # The following have been removed from the list because they are
 # inactive, as can be seen in the Wikipedia articles about them
 # as of 2008-02-08, e.g. http://en.wikipedia.org/wiki/.so_%28domain_name%29
 #     bv gb pm sj so um yt
+#
+# As per bug #6734
+# Re-enable .so .pm .yt in 2012-02-21
+#   http://www.afnic.fr/fr/produits-et-services/autres-domaines-de-premier-niveau/
+#   http://www.iana.org/domains/root/db/so.html
+#
+# Bug 5048: Re-enable .xxx 2012-04-01
 #
 # Remember to also change regexp below when updating!
 
@@ -55,28 +64,28 @@ foreach (qw/
   in info int io iq ir is it je jm jo jobs jp ke kg kh ki km kn kp kr kw
   ky kz la lb lc li lk lr ls lt lu lv ly ma mc md me mg mh mil mk ml mm
   mn mo mobi mp mq mr ms mt mu museum mv mw mx my mz na name nc ne net
-  nf ng ni nl no np nr nu nz om org pa pe pf pg ph pk pl pn pr pro ps
-  pt pw py qa re ro rs ru rw sa sb sc sd se sg sh si sk sl sm sn
+  nf ng ni nl no np nr nu nz om org pa pe pf pg ph pk pl pm pn pr pro ps
+  pt pw py qa re ro rs ru rw sa sb sc sd se sg sh si sk sl sm sn so
   sr st su sv sy sz tc td tel tf tg th tj tk tl tm tn to tp tr travel tt
-  tv tw tz ua ug uk us uy uz va vc ve vg vi vn vu wf ws ye za
+  tv tw tz ua ug uk us uy uz va vc ve vg vi vn vu wf ws xxx ye yt za
   zm zw
-  /) { 
+  /) {
   $VALID_TLDS{$_} = 1;
 }
 
 # %VALID_TLDS as Regexp::List optimized regexp, for use in Plugins etc
 # Paste above list to:
 #  perl -MRegexp::List -e '$/=undef; $_=<>; $r = Regexp::List->new; push @l, $_ for (split); print $r->list2re(@l)'
-# Verified up to date 20110501
+# Verified up to date 20120401
 $VALID_TLDS_RE = qr/
-  (?=[abcdefghijklmnopqrstuvwyz])
+  (?=[abcdefghijklmnopqrstuvwxyz])
   (?:a(?:e(?:ro)?|r(?:pa)?|s(?:ia)?|[cdfgilmnoqtuwxz])|b(?:iz?|[abdefghjmnorstwyz])
-    |c(?:at?|o(?:m|op)?|[cdfghiklmnruvxyz])|d[ejkmoz]|e(?:[cegrst]|d?u)|f[ijkmor]
-    |g(?:[adefghilmnpqrstuwy]|ov)|h[kmnrtu]|i(?:n(?:fo|t)?|[delmoqrst])|j(?:o(?:bs)?|[emp])
-    |k[eghimnprwyz]|l[abcikrstuvy]|m(?:o(?:bi)?|u(?:seum)?|[acdeghkmnpqrstvwxyz]|i?l)
-    |n(?:a(?:me)?|et?|[cfgilopruz])|o(?:m|rg)|p(?:ro?|[aefghklnstwy])|r[eosuw]
-    |s[abcdeghiklmnrtuvyz]|t(?:r(?:avel)?|[cdfghjkmnoptvwz]|e?l)|u[agksyz]
-    |v[aceginu]|w[fs]|z[amw]|qa|ye
+  |c(?:at?|o(?:m|op)?|[cdfghiklmnruvxyz])|d[ejkmoz]|e(?:[cegrst]|d?u)|f[ijkmor]
+  |g(?:[adefghilmnpqrstuwy]|ov)|h[kmnrtu]|i(?:n(?:fo|t)?|[delmoqrst])|j(?:o(?:bs)?|[emp])
+  |k[eghimnprwyz]|l[abcikrstuvy]|m(?:o(?:bi)?|u(?:seum)?|[acdeghkmnpqrstvwxyz]|i?l)
+  |n(?:a(?:me)?|et?|[cfgilopruz])|o(?:m|rg)|p(?:ro?|[aefghklmnstwy])|r[eosuw]
+  |s[abcdeghiklmnortuvyz]|t(?:r(?:avel)?|[cdfghjkmnoptvwz]|e?l)|u[agksyz]
+  |v[aceginu]|w[fs]|y[et]|z[amw]|qa|xxx
   )/ix;
 
 # Two-Level TLDs
@@ -89,6 +98,11 @@ $VALID_TLDS_RE = qr/
 # The freeapp.net site now says that information on the site is obsolete
 # See discussion and sources in comments of bug 5677
 # updated as per bug 5815
+# cleanup in progress per bug 6795 (axb)
+# Unsorted sources:
+# .ua : http://hostmaster.ua
+# .hu : http://www.domain.hu/domain/English/szabalyzat/sld.html
+#
 foreach(qw/
 
   com.ac edu.ac gov.ac mil.ac net.ac org.ac
@@ -115,7 +129,7 @@ foreach(qw/
   com.bm edu.bm gov.bm net.bm org.bm
   com.bn edu.bn net.bn org.bn
   com.bo edu.bo gob.bo gov.bo int.bo mil.bo net.bo org.bo tv.bo
-  adm.br adv.br agr.br am.br arq.br art.br ato.br bio.br bmd.br cim.br cng.br cnt.br com.br coop.br dpn.br ecn.br edu.br eng.br esp.br etc.br eti.br far.br fm.br fnd.br fot.br fst.br g12.br ggf.br gov.br imb.br ind.br inf.br jor.br lel.br mat.br med.br mil.br mus.br net.br nom.br not.br ntr.br odo.br org.br ppg.br pro.br psc.br psi.br qsl.br rec.br slg.br srv.br tmp.br trd.br tur.br tv.br vet.br zlg.br
+  adm.br adv.br agr.br am.br arq.br art.br ato.br bio.br bmd.br cim.br cng.br cnt.br com.br coop.br dpn.br eco.br ecn.br edu.br eng.br esp.br etc.br eti.br far.br fm.br fnd.br fot.br fst.br g12.br ggf.br gov.br imb.br ind.br inf.br jor.br lel.br mat.br med.br mil.br mus.br net.br nom.br not.br ntr.br odo.br org.br ppg.br pro.br psc.br psi.br qsl.br rec.br slg.br srv.br tmp.br trd.br tur.br tv.br vet.br zlg.br
   com.bs net.bs org.bs
   com.bt edu.bt gov.bt net.bt org.bt
   co.bw org.bw
@@ -124,8 +138,9 @@ foreach(qw/
   ab.ca bc.ca gc.ca mb.ca nb.ca nf.ca nl.ca ns.ca nt.ca nu.ca on.ca pe.ca qc.ca sk.ca yk.ca
   co.ck edu.ck gov.ck net.ck org.ck
   ac.cn ah.cn bj.cn com.cn cq.cn edu.cn fj.cn gd.cn gov.cn gs.cn gx.cn gz.cn ha.cn hb.cn he.cn hi.cn hk.cn hl.cn hn.cn jl.cn js.cn jx.cn ln.cn mo.cn net.cn nm.cn nx.cn org.cn qh.cn sc.cn sd.cn sh.cn sn.cn sx.cn tj.cn tw.cn xj.cn xz.cn yn.cn zj.cn
-  arts.co com.co edu.co firm.co gov.co info.co int.co mil.co net.co nom.co org.co rec.co store.co web.co
+  arts.co com.co edu.co firm.co gov.co info.co int.co mil.co net.co nom.co org.co rec.co web.co
   lkd.co.im ltd.co.im plc.co.im
+  co.cm com.cm net.cm
   au.com br.com cn.com de.com eu.com gb.com hu.com no.com qc.com ru.com sa.com se.com uk.com us.com uy.com za.com
   ac.cr co.cr ed.cr fi.cr go.cr or.cr sa.cr
   com.cu edu.cu gov.cu inf.cu net.cu org.cu
@@ -135,7 +150,7 @@ foreach(qw/
   com.dm edu.dm gov.dm net.dm org.dm
   art.do com.do edu.do gob.do gov.do mil.do net.do org.do sld.do web.do
   art.dz asso.dz com.dz edu.dz gov.dz net.dz org.dz pol.dz
-  com.ec edu.ec fin.ec gov.ec info.ec k12.ec med.ec mil.ec net.ec org.ec pro.ec
+  com.ec edu.ec fin.ec gov.ec info.ec k12.ec med.ec mil.ec net.ec org.ec pro.ec gob.ec
   co.ee com.ee edu.ee fie.ee med.ee org.ee pri.ee
   com.eg edu.eg eun.eg gov.eg mil.eg net.eg org.eg sci.eg
   com.er edu.er gov.er ind.er mil.er net.er org.er
@@ -144,7 +159,7 @@ foreach(qw/
   aland.fi
   ac.fj biz.fj com.fj gov.fj id.fj info.fj mil.fj name.fj net.fj org.fj pro.fj school.fj
   ac.fk co.fk com.fk gov.fk net.fk nom.fk org.fk
-  aeroport.fr assedic.fr asso.fr avocat.fr avoues.fr barreau.fr cci.fr chambagri.fr chirurgiens-dentistes.fr com.fr experts-comptables.fr geometre-expert.fr gouv.fr greta.fr huissier-justice.fr medecin.fr nom.fr notaires.fr pharmacien.fr port.fr prd.fr presse.fr tm.fr veterinaire.fr
+  tm.fr asso.fr nom.fr prd.fr presse.fr com.fr gouv.fr
   com.ge edu.ge gov.ge mil.ge net.ge org.ge pvt.ge
   ac.gg alderney.gg co.gg gov.gg guernsey.gg ind.gg ltd.gg net.gg org.gg sark.gg sch.gg
   com.gh edu.gh gov.gh mil.gh org.gh
@@ -158,7 +173,7 @@ foreach(qw/
   com.hn edu.hn gob.hn mil.hn net.hn org.hn
   com.hr from.hr iz.hr name.hr
   adult.ht art.ht asso.ht com.ht coop.ht edu.ht firm.ht gouv.ht info.ht med.ht net.ht org.ht perso.ht pol.ht pro.ht rel.ht shop.ht
-  2000.hu ac.hu agrar.hu bolt.hu casino.hu city.hu co.hu edu.hu erotica.hu erotika.hu film.hu forum.hu games.hu gov.hu hotel.hu info.hu ingatlan.hu jogasz.hu konyvelo.hu lakas.hu media.hu news.hu org.hu priv.hu reklam.hu sex.hu shop.hu sport.hu suli.hu szex.hu tm.hu tozsde.hu utazas.hu video.hu
+  2000.hu agrar.hu bolt.hu casino.hu city.hu co.hu erotica.hu erotika.hu film.hu forum.hu games.hu hotel.hu info.hu ingatlan.hu jogasz.hu konyvelo.hu lakas.hu media.hu news.hu org.hu priv.hu reklam.hu sex.hu shop.hu sport.hu suli.hu szex.hu tm.hu tozsde.hu utazas.hu video.hu
   ac.id co.id go.id mil.id net.id or.id sch.id web.id
   gov.ie
   ac.il co.il gov.il idf.il k12.il muni.il net.il org.il
@@ -197,6 +212,7 @@ foreach(qw/
   edu.mn gov.mn org.mn
   com.mo edu.mo gov.mo net.mo org.mo
   music.mobi weather.mobi
+  co.mp edu.mp gov.mp net.mp org.mp
   com.mt edu.mt gov.mt net.mt org.mt tm.mt uu.mt
   co.mu com.mu
   aero.mv biz.mv com.mv coop.mv edu.mv gov.mv info.mv int.mv mil.mv museum.mv name.mv net.mv org.mv pro.mv
@@ -207,7 +223,7 @@ foreach(qw/
   com.nc net.nc org.nc
   de.net gb.net uk.net
   ac.ng com.ng edu.ng gov.ng net.ng org.ng sch.ng
-  com.ni edu.ni gob.ni net.ni nom.ni org.ni
+  ac.ni biz.ni com.ni edu.ni gob.ni in.ni info.ni int.ni mil.ni net.ni nom.ni org.ni web.ni
   fhs.no folkebibl.no fylkesbibl.no herad.no idrett.no kommune.no mil.no museum.no priv.no stat.no tel.no vgs.no
   com.np edu.np gov.np mil.np net.np org.np
   biz.nr co.nr com.nr edu.nr fax.nr gov.nr info.nr mob.nr mobil.nr mobile.nr net.nr org.nr tel.nr tlf.nr
@@ -220,7 +236,7 @@ foreach(qw/
   ac.pg com.pg net.pg
   com.ph edu.ph gov.ph mil.ph net.ph ngo.ph org.ph
   biz.pk com.pk edu.pk fam.pk gob.pk gok.pk gon.pk gop.pk gos.pk gov.pk net.pk org.pk web.pk
-  agro.pl aid.pl art.pl atm.pl auto.pl bialystok.pl biz.pl com.pl edu.pl gda.pl gdansk.pl gmina.pl gov.pl gsm.pl info.pl katowice.pl krakow.pl lodz.pl lublin.pl mail.pl media.pl miasta.pl mil.pl net.pl ngo.pl nieruchomosci.pl nom.pl olsztyn.pl opole.pl org.pl pc.pl powiat.pl poznan.pl priv.pl realestate.pl rel.pl sex.pl shop.pl sklep.pl slupsk.pl sos.pl szczecin.pl szkola.pl targi.pl tm.pl torun.pl tourism.pl travel.pl turystyka.pl warszawa.pl waw.pl wroc.pl wroclaw.pl za.pl zgora.pl
+  art.pl biz.pl com.pl edu.pl gov.pl info.pl mil.pl net.pl ngo.pl org.pl
   biz.pr com.pr edu.pr gov.pr info.pr isla.pr name.pr net.pr org.pr pro.pr
   cpa.pro law.pro med.pro
   com.ps edu.ps gov.ps net.ps org.ps plo.ps sec.ps
@@ -230,7 +246,7 @@ foreach(qw/
   asso.re com.re nom.re
   arts.ro com.ro firm.ro info.ro nom.ro nt.ro org.ro rec.ro store.ro tm.ro www.ro
   ac.rs co.rs edu.rs gov.rs in.rs org.rs
-  ac.ru adygeya.ru altai.ru amur.ru amursk.ru arkhangelsk.ru astrakhan.ru baikal.ru bashkiria.ru belgorod.ru bir.ru bryansk.ru buryatia.ru cbg.ru chel.ru chelyabinsk.ru chita.ru chukotka.ru chuvashia.ru cmw.ru com.ru dagestan.ru dudinka.ru e-burg.ru edu.ru fareast.ru gov.ru grozny.ru int.ru irkutsk.ru ivanovo.ru izhevsk.ru jamal.ru jar.ru joshkar-ola.ru k-uralsk.ru kalmykia.ru kaluga.ru kamchatka.ru karelia.ru kazan.ru kchr.ru kemerovo.ru khabarovsk.ru khakassia.ru khv.ru kirov.ru kms.ru koenig.ru komi.ru kostroma.ru krasnoyarsk.ru kuban.ru kurgan.ru kursk.ru kustanai.ru kuzbass.ru lipetsk.ru magadan.ru magnitka.ru mari-el.ru mari.ru marine.ru mil.ru mordovia.ru mosreg.ru msk.ru murmansk.ru mytis.ru nakhodka.ru nalchik.ru net.ru nkz.ru nnov.ru norilsk.ru nov.ru novosibirsk.ru nsk.ru omsk.ru orenburg.ru org.ru oryol.ru oskol.ru palana.ru penza.ru perm.ru pp.ru pskov.ru ptz.ru pyatigorsk.ru rnd.ru rubtsovsk.ru ryazan.ru sakhalin.ru samara.ru saratov.ru simbirsk.ru smolensk.ru snz.ru spb.ru stavropol.ru stv.ru surgut.ru syzran.ru tambov.ru tatarstan.ru test.ru tom.ru tomsk.ru tsaritsyn.ru tsk.ru tula.ru tuva.ru tver.ru tyumen.ru udm.ru udmurtia.ru ulan-ude.ru vdonsk.ru vladikavkaz.ru vladimir.ru vladivostok.ru volgograd.ru vologda.ru voronezh.ru vrn.ru vyatka.ru yakutia.ru yamal.ru yaroslavl.ru yekaterinburg.ru yuzhno-sakhalinsk.ru zgrad.ru
+  ac.ru com.ru edu.ru gov.ru int.ru mil.ru net.ru org.ru pp.ru
   ac.rw co.rw com.rw edu.rw gouv.rw gov.rw int.rw mil.rw net.rw
   com.sa edu.sa gov.sa med.sa net.sa org.sa pub.sa sch.sa
   com.sb edu.sb gov.sb net.sb org.sb
@@ -267,7 +283,7 @@ foreach(qw/
   com.ws edu.ws gov.ws net.ws org.ws
   com.ye edu.ye gov.ye mil.ye net.ye org.ye
   ac.za alt.za bourse.za city.za co.za edu.za gov.za law.za mil.za net.za ngo.za nom.za org.za school.za tm.za web.za
-  ac.zm co.zm gov.zm org.zm sch.zm
+  ac.zm co.zm  com.zm edu.zm gov.zm org.zm sch.zm
   ac.zw co.zw gov.zw org.zw
 
  /) {
@@ -278,8 +294,8 @@ foreach(qw/
 # below.
 #
 foreach (qw/
-  ak al ar az ca co ct dc de fl ga gu hi ia id il in ks ky la ma md me mi 
-  mn mo ms mt nc nd ne nh nj nm nv ny oh ok or pa pr ri sc sd tn tx ut va vi 
+  ak al ar az ca co ct dc de fl ga gu hi ia id il in ks ky la ma md me mi
+  mn mo ms mt nc nd ne nh nj nm nv ny oh ok or pa pr ri sc sd tn tx ut va vi
   vt wa wi wv wy
   /) {
   $US_STATES{$_} = 1;
@@ -313,7 +329,7 @@ sub split_domain {
   my $domain = lc shift;
   my $hostname = '';
 
-  if ($domain) {
+  if (defined $domain && $domain ne '') {
     # www..spamassassin.org -> www.spamassassin.org
     $domain =~ tr/././s;
 
@@ -327,32 +343,32 @@ sub split_domain {
 
     while (@domparts > 1) { # go until we find the TLD
       if (@domparts == 4) {
-	if ($domparts[3] eq 'us' &&
-	    (($domparts[0] eq 'pvt' && $domparts[1] eq 'k12') ||
-	     ($domparts[0] =~ /^c[io]$/)))
-	{
+        if ($domparts[3] eq 'us' &&
+            (($domparts[0] eq 'pvt' && $domparts[1] eq 'k12') ||
+             ($domparts[0] =~ /^c[io]$/)))
+        {
           # http://www.neustar.us/policies/docs/rfc_1480.txt
           # "Fire-Dept.CI.Los-Angeles.CA.US"
           # "<school-name>.PVT.K12.<state>.US"
           last if ($US_STATES{$domparts[2]});
-	}
+        }
       }
       elsif (@domparts == 3) {
         # http://www.neustar.us/policies/docs/rfc_1480.txt
-	# demon.co.uk
-	# esc.edu.ar
-	# [^\.]+\.${US_STATES}\.us
-	if ($domparts[2] eq 'us') {
+        # demon.co.uk
+        # esc.edu.ar
+        # [^\.]+\.${US_STATES}\.us
+        if ($domparts[2] eq 'us') {
           last if ($US_STATES{$domparts[1]});
-	}
+        }
         else {
           my $temp = join(".", @domparts);
           last if ($THREE_LEVEL_DOMAINS{$temp});
         }
       }
       elsif (@domparts == 2) {
-	# co.uk, etc.
-	my $temp = join(".", @domparts);
+        # co.uk, etc.
+        my $temp = join(".", @domparts);
         last if ($TWO_LEVEL_DOMAINS{$temp});
       }
       push(@hostname, shift @domparts);
@@ -380,8 +396,8 @@ part, returning just the domain.
 
 Examples:
 
-    "www.foo.com" => "foo.com" 
-    "www.foo.co.uk" => "foo.co.uk" 
+    "www.foo.com" => "foo.com"
+    "www.foo.co.uk" => "foo.co.uk"
 
 =cut
 

@@ -305,7 +305,7 @@ sub untie_db {
     }
   }
 
-  return undef;
+  return;
 }
 
 sub _close_db {
@@ -327,7 +327,7 @@ sub _close_db {
   }
 
   delete $self->{env};
-  return undef;
+  return;
 }
 
 =head2 calculate_expire_delta
@@ -1015,7 +1015,7 @@ sub tok_touch_all {
 public instance (Boolean) cleanup ()
 
 Description:
-This method peroms any cleanup necessary before moving onto the next
+This method perfoms any cleanup necessary before moving onto the next
 operation.
 
 =cut
@@ -1547,7 +1547,7 @@ sub _get {
   if ($status == 0) {
     return $value;
   } elsif ($status == DB_NOTFOUND) {
-    return undef;
+    return;
   } else {
     die "Couldn't get record: $BerkeleyDB::Error";
   }

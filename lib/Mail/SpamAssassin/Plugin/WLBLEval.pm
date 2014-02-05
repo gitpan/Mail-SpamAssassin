@@ -51,14 +51,18 @@ sub new {
   $self->register_eval_rule("check_from_in_default_whitelist");
   $self->register_eval_rule("check_forged_in_default_whitelist");
   $self->register_eval_rule("check_mailfrom_matches_rcvd");
+  $self->register_eval_rule("check_uri_host_listed");
+  # same as: eval:check_uri_host_listed('BLACK') :
+  $self->register_eval_rule("check_uri_host_in_blacklist");
+  # same as: eval:check_uri_host_listed('WHITE') :
+  $self->register_eval_rule("check_uri_host_in_whitelist");
 
   return $self;
 }
 
 sub check_from_in_blacklist {
   my ($self, $pms) = @_;
-  local ($_);
-  foreach $_ ($pms->all_from_addrs()) {
+  foreach ($pms->all_from_addrs()) {
     if ($self->_check_whitelist ($self->{main}->{conf}->{blacklist_from}, $_)) {
       return 1;
     }
@@ -67,8 +71,7 @@ sub check_from_in_blacklist {
 
 sub check_to_in_blacklist {
   my ($self, $pms) = @_;
-  local ($_);
-  foreach $_ ($pms->all_to_addrs()) {
+  foreach ($pms->all_to_addrs()) {
     if ($self->_check_whitelist ($self->{main}->{conf}->{blacklist_to}, $_)) {
       return 1;
     }
@@ -77,8 +80,7 @@ sub check_to_in_blacklist {
 
 sub check_to_in_whitelist {
   my ($self, $pms) = @_;
-  local ($_);
-  foreach $_ ($pms->all_to_addrs()) {
+  foreach ($pms->all_to_addrs()) {
     if ($self->_check_whitelist ($self->{main}->{conf}->{whitelist_to}, $_)) {
       return 1;
     }
@@ -87,8 +89,7 @@ sub check_to_in_whitelist {
 
 sub check_to_in_more_spam {
   my ($self, $pms) = @_;
-  local ($_);
-  foreach $_ ($pms->all_to_addrs()) {
+  foreach ($pms->all_to_addrs()) {
     if ($self->_check_whitelist ($self->{main}->{conf}->{more_spam_to}, $_)) {
       return 1;
     }
@@ -97,8 +98,7 @@ sub check_to_in_more_spam {
 
 sub check_to_in_all_spam {
   my ($self, $pms) = @_;
-  local ($_);
-  foreach $_ ($pms->all_to_addrs()) {
+  foreach ($pms->all_to_addrs()) {
     if ($self->_check_whitelist ($self->{main}->{conf}->{all_spam_to}, $_)) {
       return 1;
     }
@@ -191,8 +191,7 @@ sub check_forged_in_default_whitelist {
 sub _check_from_in_whitelist {
   my ($self, $pms) = @_;
   my $found_match = 0;
-  local ($_);
-  foreach $_ ($pms->all_from_addrs()) {
+  foreach ($pms->all_from_addrs()) {
     if ($self->_check_whitelist ($self->{main}->{conf}->{whitelist_from}, $_)) {
       $pms->{from_in_whitelist} = 1;
       return;
@@ -216,8 +215,7 @@ sub _check_from_in_whitelist {
 sub _check_from_in_default_whitelist {
   my ($self, $pms) = @_;
   my $found_match = 0;
-  local ($_);
-  foreach $_ ($pms->all_from_addrs()) {
+  foreach ($pms->all_from_addrs()) {
     my $wh = $self->_check_whitelist_rcvd ($pms, $self->{main}->{conf}->{def_whitelist_from_rcvd}, $_);
     if ($wh == 1) {
       $pms->{from_in_default_whitelist} = 1;
@@ -314,12 +312,29 @@ sub _check_whitelist_rcvd {
     foreach my $domain (@{$list->{$white_addr}{domain}}) {
       
       if ($addr =~ $regexp) {
+        my $match;
         foreach my $lastunt (@relays) {
-          my $rdns = $lastunt->{lc_rdns};
-          if ($rdns =~ /(?:^|\.)\Q${domain}\E$/i) { 
-            dbg("rules: address $addr matches (def_)whitelist_from_rcvd $list->{$white_addr}{re} ${domain}");
-            return 1;
+          local $1;
+          if ($domain =~ m{^ \[ (.*) \] \z}sx) {  # matching by IP address
+            my($wl_ip, $rly_ip) = ($1, $lastunt->{ip});
+            if (!defined $rly_ip || $rly_ip eq '') {
+              # relay's IP address not provided or unparseable
+            } elsif ($wl_ip =~ /^\d+\.\d+\.\d+\.\d+\z/) {
+              if ($wl_ip eq $rly_ip) { $match = 1; last }  # exact match
+            } elsif ($wl_ip =~ /^[\d\.]+\z/) {  # assume IPv4 classful subnet
+              $wl_ip =~ s/\.*\z/./;  # enforce trailing dot
+              if ($rly_ip =~ /^\Q$wl_ip\E/i) { $match = 1; last }  # subnet
+            }
+            # todo: handle IPv6 and CIDR notation
+          } else {  # match by a rdns name
+            my $rdns = $lastunt->{lc_rdns};
+            if ($rdns =~ /(?:^|\.)\Q${domain}\E$/i) { $match=1; last }
           }
+        }
+        if ($match) {
+          dbg("rules: address %s matches (def_)whitelist_from_rcvd %s %s",
+              $addr, $list->{$white_addr}{re}, $domain);
+          return 1;
         }
         # found address match but no relay match. note as possible forgery
         $found_forged = -1;
@@ -344,7 +359,7 @@ sub _check_whitelist {
   my ($self, $list, $addr) = @_;
   $addr = lc $addr;
   if (defined ($list->{$addr})) { return 1; }
-  study $addr;
+  study $addr;  # study is a no-op since perl 5.16.0, eliminating related bugs
   foreach my $regexp (values %{$list}) {
     if ($addr =~ qr/$regexp/i) {
       dbg("rules: address $addr matches whitelist or blacklist regexp: $regexp");
@@ -353,6 +368,100 @@ sub _check_whitelist {
   }
 
   return 0;
+}
+
+###########################################################################
+
+sub check_uri_host_in_blacklist {
+  my ($self, $pms) = @_;
+  $self->check_uri_host_listed($pms, 'BLACK');
+}
+
+sub check_uri_host_in_whitelist {
+  my ($self, $pms) = @_;
+  $self->check_uri_host_listed($pms, 'WHITE');
+}
+
+sub check_uri_host_listed {
+  my ($self, $pms, $subname) = @_;
+  my $host_enlisted_ref = $self->_check_uri_host_listed($pms);
+  if ($host_enlisted_ref) {
+    my $matched_host = $host_enlisted_ref->{$subname};
+    if ($matched_host) {
+      dbg("rules: uri host enlisted (%s): %s", $subname, $matched_host);
+      $pms->test_log("URI: $matched_host");
+      return 1;
+    }
+  }
+  return 0;
+}
+
+sub _check_uri_host_listed {
+  my ($self, $pms) = @_;
+
+  if ($pms->{'uri_host_enlisted'}) {
+    return $pms->{'uri_host_enlisted'};  # just provide a cached result
+  }
+
+  my $uri_lists_href = $self->{main}{conf}{uri_host_lists};
+  if (!$uri_lists_href || !%$uri_lists_href) {
+    $pms->{'uri_host_enlisted'} = {};  # no URI host lists
+    return $pms->{'uri_host_enlisted'};
+  }
+
+  my %host_enlisted;
+  my @uri_listnames = sort keys %$uri_lists_href;
+  if (would_log("dbg","rules")) {
+    foreach my $nm (@uri_listnames) {
+      dbg("rules: check_uri_host_listed: (%s) %s",
+          $nm, join(', ', map { $uri_lists_href->{$nm}{$_} ? $_ : '!'.$_ }
+                              sort keys %{$uri_lists_href->{$nm}}));
+    }
+  }
+  # obtain a complete list of html-parsed domains
+  my $uris = $pms->get_uri_detail_list();
+  my %seen;
+  while (my($uri,$info) = each %$uris) {
+    next if $uri =~ /^mailto:/i;  # we may want to skip mailto: uris (?)
+    while (my($host,$domain) = each( %{$info->{hosts}} )) {  # typically one
+      next if $seen{$host};
+      $seen{$host} = 1;
+      local($1,$2);
+      my @query_keys;
+      if ($host =~ /^\[(.*)\]\z/) {  # looks like an address literal
+        @query_keys = ( $1 );
+      } elsif ($host =~ /^\d+\.\d+\.\d+\.\d+\z/) {  # IPv4 address
+        @query_keys = ( $host );
+      } elsif ($host ne '') {
+        my($h) = $host;
+        for (;;) {
+          shift @query_keys  if @query_keys > 10;  # sanity limit, keep tail
+          push(@query_keys, $h);  # sub.example.com, example.com, com
+          last if $h !~ s{^([^.]*)\.(.*)\z}{$2}s;
+        }
+      }
+      foreach my $nm (@uri_listnames) {
+        my $match;
+        my $verdict;
+        my $hash_nm_ref = $uri_lists_href->{$nm};
+        foreach my $q (@query_keys) {
+          $verdict = $hash_nm_ref->{$q};
+          if (defined $verdict) {
+            $match = $q eq $host ? $host : "$host ($q)";
+            $match = '!'  if !$verdict;
+            last;
+          }
+        }
+        if (defined $verdict) {
+          $host_enlisted{$nm} = $match  if $verdict;
+          dbg("rules: check_uri_host_listed %s, (%s): %s, search: %s",
+              $uri, $nm, $match, join(', ',@query_keys));
+        }
+      }
+    }
+  }
+  $pms->{'uri_host_enlisted'} = \%host_enlisted;
+  return $pms->{'uri_host_enlisted'};
 }
 
 1;

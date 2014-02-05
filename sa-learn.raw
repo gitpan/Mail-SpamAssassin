@@ -112,6 +112,7 @@ GetOptions(
   'learnprob=f' => \$opt{'learnprob'},
   'randseed=i'  => \$opt{'randseed'},
   'stopafter=i' => \$opt{'stopafter'},
+  'max-size=i'  => \$opt{'max-size'},
 
   'debug|debug-level|D:s' => \$opt{'debug'},
   'help|h|?'        => \$opt{'help'},
@@ -412,7 +413,7 @@ eval {
 
   my $tempfile; # will be defined if stdin -> tempfile
   push(@targets, @ARGV);
-  @targets = ('-') unless @targets;
+  @targets = ('-') unless @targets || $opt{folders};
 
   for(my $elem = 0; $elem <= $#targets; $elem++) {
     # ArchiveIterator doesn't really like STDIN, so if "-" is specified
@@ -455,8 +456,11 @@ eval {
 
   my $iter = new Mail::SpamAssassin::ArchiveIterator(
     {
-      'opt_all' => 0,       # skip messages over 250k
+        # skip messages larger than max-size bytes,
+        # 0 for no limit, undef defaults to 256 KiB
+      'opt_max_size' => $opt{'max-size'},
       'opt_want_date' => 0,
+      'opt_from_regex' => $spamtest->{conf}->{mbox_format_from_regex},
     }
   );
 
@@ -469,7 +473,7 @@ eval {
 
   # if exit_status isn't already set to non-zero, set it to the reverse of the
   # run result (0 is bad, 1+ is good -- the opposite of exit status codes)
-  eval { $exit_status ||= ! $iter->run(@targets); };
+  my $run_ok = eval { $exit_status ||= ! $iter->run(@targets); 1 };
 
   print STDERR "\n" if ($opt{showdots});
   $progress->final() if ($opt{progress} && $progress);
@@ -483,7 +487,7 @@ eval {
     undef $tempfile;
   }
 
-  if ($@) { die $@ unless ( $@ =~ /HITLIMIT/ ); }
+  if (!$run_ok && $@ !~ /HITLIMIT/) { die $@ }
   1;
 } or do {
   my $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
@@ -625,6 +629,8 @@ Options:
  --file                Ignored; historical compatibility
  --mbox                Input sources are in mbox format
  --mbx                 Input sources are in mbx format
+ --max-size <b>        Skip messages larger than b bytes;
+                       defaults to 256 KiB, 0 implies no limit
  --showdots            Show progress using dots
  --progress            Show progress using progress bar
  --no-sync             Skip synchronizing the database and journal

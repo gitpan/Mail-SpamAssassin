@@ -154,7 +154,7 @@ my($msgid,$msgid_hdr) = getimpl->get_msgid($mail);
 
 # $msgid is the generated hash messageid
 # $msgid_hdr is the Message-Id header
-ok($msgid eq 'ce33e4a8bc5798c65428d6018380bae346c7c126@sa_generated');
+ok($msgid eq '4cf5cc4d53b22e94d3e55932a606b18641a54041@sa_generated');
 ok($msgid_hdr eq '9PS291LhupY');
 
 ok(getimpl->{store}->tie_db_writable());
@@ -368,8 +368,8 @@ sub check_examined {
   }
 }
 
-# WARNING! Do not use this as an example, this breaks abstraction and here strictly
-# to help the regression tests.
+# WARNING! Do not use this as an example, this breaks abstraction
+# and is here strictly to help the regression tests.
 sub database_clear_p {
   my ($username, $userid) = @_;
 

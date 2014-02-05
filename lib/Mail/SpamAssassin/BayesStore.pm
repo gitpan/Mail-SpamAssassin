@@ -88,8 +88,8 @@ sub DB_VERSION {
 public instance () read_db_configs ()
 
 Description:
-This method reads any needed config variables from the configuration
-object and then calls the Mail::SpamAssassin::Plugin::Plugin::Bayes read_db_configs method.
+This method reads any needed config variables from the configuration object
+and then calls the Mail::SpamAssassin::Plugin::Bayes read_db_configs method.
 
 =cut
 
@@ -116,6 +116,33 @@ sub read_db_configs {
 
   $self->{bayes}->read_db_configs();
 }
+
+=item prefork_init
+
+public instance (Boolean) prefork_init ()
+
+Description:
+This optional method is called in the parent process shortly before
+forking off child processes.
+
+=cut
+
+# sub prefork_init {
+#   my ($self) = @_;
+# }
+
+=item spamd_child_init
+
+public instance (Boolean) spamd_child_init ()
+
+Description:
+This optional method is called in a child process shortly after being spawned.
+
+=cut
+
+# sub spamd_child_init {
+#   my ($self) = @_;
+# }
 
 =item tie_db_readonly
 
@@ -446,7 +473,7 @@ sub expiry_due {
     return 0 if ($last_expire < 300);
   }
 
-  dbg("bayes: DB expiry: tokens in DB: $ntoks, Expiry max size: ".$self->{expiry_max_db_size}.", Oldest atime: ".$vars[5].", Newest atime: ".$vars[10].", Last expire: ".$vars[4].", Current time: ".time(),'bayes','-1');
+  dbg("bayes: DB expiry: tokens in DB: $ntoks, Expiry max size: ".$self->{expiry_max_db_size}.", Oldest atime: ".$vars[5].", Newest atime: ".$vars[10].", Last expire: ".$vars[4].", Current time: ".time());
 
   my $conf = $self->{bayes}->{main}->{conf};
   if ($ntoks <= 100000 ||			# keep at least 100k tokens
@@ -725,7 +752,7 @@ This method updates the given tokens (C<$token>) access time.
 
 sub tok_touch {
   my ($self, $token, $atime) = @_;
-  die "bayes: tok_touch: not implemanted\n";
+  die "bayes: tok_touch: not implemented\n";
 }
 
 =item tok_touch_all
@@ -741,7 +768,7 @@ atime is < C<$atime>.
 
 sub tok_touch_all {
   my ($self, $tokens, $atime) = @_;
-  die "bayes: tok_touch_all: not implemanted\n";
+  die "bayes: tok_touch_all: not implemented\n";
 }
 
 =item cleanup

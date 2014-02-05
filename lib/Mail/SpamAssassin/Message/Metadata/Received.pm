@@ -37,8 +37,8 @@
 
 # ---------------------------------------------------------------------------
 
-package Mail::SpamAssassin::Message::Metadata::Received;
-1;
+use strict;  # make Test::Perl::Critic happy
+package Mail::SpamAssassin::Message::Metadata::Received; 1;
 
 package Mail::SpamAssassin::Message::Metadata;
 use strict;
@@ -48,13 +48,20 @@ use re 'taint';
 
 use Mail::SpamAssassin::Dns;
 use Mail::SpamAssassin::PerMsgStatus;
-use Mail::SpamAssassin::Util::RegistrarBoundaries;
 use Mail::SpamAssassin::Constants qw(:ip);
 
 # ---------------------------------------------------------------------------
 
 sub parse_received_headers {
   my ($self, $permsgstatus, $msg) = @_;
+
+  my $suppl_attrib = $msg->{suppl_attrib};  # out-of-band info from a caller
+
+  # a caller may assert that a message is coming from inside or from an
+  # authenticated roaming users; this info may not be available in mail
+  # header section, e.g. in case of nonstandard authentication mechanisms
+  my $originating;  # boolean
+  $originating = $suppl_attrib->{originating}  if ref $suppl_attrib;
 
   $self->{relays_trusted} = [ ];
   $self->{num_relays_trusted} = 0;
@@ -190,7 +197,15 @@ sub parse_received_headers {
       } else {
 	# trusted_networks matches?
 	if (!$relay->{auth} && !$trusted->contains_ip($relay->{ip})) {
-	  $in_trusted = 0;
+	  if (!$originating) {
+	    $in_trusted = 0;	# break the trust chain
+	  } else {  # caller asserts a msg was submitted from inside or auth'd
+	    $found_msa = 1;	# let's assume the previous hop was actually
+				# an MSA, and propagate trust from here on
+	    dbg('received-header: originating, '.
+	        '%s and remaining relays will be considered trusted%s',
+	        $relay->{ip}, !$in_internal ? '' : ', but no longer internal');
+	  }
 	  $in_internal = 0;	# if it's not trusted it's not internal
 	} else {
 	  # internal_networks matches?
@@ -384,11 +399,12 @@ sub parse_received_line {
 
   # try to catch authenticated message identifier
   #
-  # with ESMTPA, ESMTPSA, LMTPA, LMTPSA should cover RFC 3848 compliant MTAs
+  # with ESMTPA, ESMTPSA, LMTPA, LMTPSA should cover RFC 3848 compliant MTAs,
+  # UTF8SMTPA and UTF8LMTPA are covered by RFC 4954 and RFC 6531,
   # with ASMTP (Authenticated SMTP) is used by Earthlink, Exim 4.34, and others
   # with HTTP should only be authenticated webmail sessions
   # with HTTPU is used by Communigate Pro with Pronto! webmail interface
-  if (/ by / && / with (ESMTPA|ESMTPSA|LMTPA|LMTPSA|ASMTP|HTTPU?)(?: |$)/i) {
+  if (/ by / && / with ((?:ES|L|UTF8S|UTF8L)MTPS?A|ASMTP|HTTPU?)(?: |;|$)/i) {
     $auth = $1;
   }
   # GMail should use ESMTPSA to indicate that it is in fact authenticated,
@@ -404,6 +420,10 @@ sub parse_received_line {
   elsif (/authenticated/ && /^from .*?(?:\](?: \([^)]*\))?\)|\)\]) .*?\(.*?authenticated.*?\).*? by/) {
     $auth = 'Sendmail';
   }
+  # workaround for GMX, which authenticates users but does not indicate it properly - # SMTP version
+  elsif (/from \S* \((?:HELO|EHLO) (\S*)\) \[(${IP_ADDRESS})\] by (mail\.gmx\.(?:net|com)) \([^\)]+\) with ((?:ESMTP|SMTP))/) {
+    $auth = "GMX ($4 / $3)";
+  }
   # Critical Path Messaging Server
   elsif (/ \(authenticated as /&&/\) by .+ \(\d{1,2}\.\d\.\d{3}(?:\.\d{1,3})?\) \(authenticated as .+\) id /) {
     $auth = 'CriticalPath';
@@ -412,8 +432,8 @@ sub parse_received_line {
   elsif (/\) \(Authenticated sender: \S+\) by \S+ \(Postfix\) with /) {
     $auth = 'Postfix';
   }
-  # Communigate Pro
-  elsif (/CommuniGate Pro SMTP/ && / \(account /) {
+  # Communigate Pro - Bug 6495 adds HTTP as possible transmission method
+  elsif (/CommuniGate Pro (HTTP|SMTP)/ && / \(account /) {
     $auth = 'Communigate';
   }
   # Microsoft Exchange (complete with syntax error)
@@ -429,12 +449,14 @@ sub parse_received_line {
       $envfrom = $1;
     }
 
-    # bug 3236: ignore Squirrelmail injection steps.
     # from 142.169.110.122 (SquirrelMail authenticated user synapse) by
     # mail.nomis80.org with HTTP; Sat, 3 Apr 2004 10:33:43 -0500 (EST)
-    if (/ \(SquirrelMail authenticated user /) {
-      dbg("received-header: ignored SquirrelMail injection: $_");
-      return 0;
+    # Expanded to NaSMail Bug 6783
+    if (/ \((?:SquirrelMail|NaSMail) authenticated user /) {
+      #REVERTING bug 3236 and implementing re: bug 6549
+      if (/(${IP_ADDRESS})\b(?![.-]).{10,80}by (\S+) with HTTP/) {
+        $ip = $1; $by = $2; goto enough;
+      }
     }
 
     # AOL WebMail headers
@@ -855,9 +877,14 @@ sub parse_received_line {
     if (/^(\S+) \((?:HELO|EHLO) ([^\)]*)\) \((\S*@)?\[?(${IP_ADDRESS})\]?\).* by (\S+) /)
     {
       $mta_looked_up_dns = 1;
-      $rdns = $1; $helo = $2; $ident = (defined $3) ? $3 : '';
-      $ip = $4; $by = $5;
-      if ($ident) { $ident =~ s/\@$//; }
+      $rdns = $1; 
+      $helo = $2; 
+      $ident = (defined $3) ? $3 : '';
+      $ip = $4; 
+      $by = $5;
+      if ($ident) { 
+        $ident =~ s/\@$//; 
+      }
       goto enough;
     }
 
@@ -1071,6 +1098,12 @@ sub parse_received_line {
       goto enough;
     }
 
+    # Yahoo Authenticated SMTP; Bug #6535
+    # from itrqtnlnq (lucilleskinner@93.124.107.183 with login) by smtp111.mail.ne1.yahoo.com with SMTP; 17 Jan 2011 08:23:27 -0800 PST
+    if (/^(\S+) \((\S+)@(${IP_ADDRESS}) with login\) by (\S+\.yahoo\.com) with SMTP/) {
+      $helo = $1; $ip = $3; $by = $4; goto enough;
+    }
+
     # a synthetic header, generated internally:
     # Received: X-Originating-IP: 1.2.3.4
     if (/^X-Originating-IP: (\S+)$/) {
@@ -1255,12 +1288,15 @@ enough:
     $rdns = '';		# some MTAs seem to do this
   }
   
-  $ip =~ s/^\[//; $ip =~ s/\]$//;
+  $ip =~ s/^ipv6://i;   # remove "IPv6:" prefix
+  $ip =~ s/^\[//; $ip =~ s/\]\z//;
 
-  $ip =~ s/^ipv6://i;   # remove optional "IPv6:" prefix
+  # IPv6 Scoped Address (RFC 4007, RFC 6874, RFC 3986 "unreserved" charset)
+  $ip =~ s/%[A-Z0-9._~-]*\z//si;  # scoped address? remove <zone_id>
 
   # remove "::ffff:" prefix from IPv4-mapped-in-IPv6 addresses,
-  # so we can treat them as simply IPv4 addresses
+  # so we can treat them simply as IPv4 addresses
+  # (only handles 'alternative form', not 'preferred form' - to be improved)
   $ip =~ s/^0*:0*:(?:0*:)*ffff:(\d+\.\d+\.\d+\.\d+)$/$1/i;
 
   $envfrom =~ s/^\s*<*//gs; $envfrom =~ s/>*\s*$//gs;
