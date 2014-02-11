@@ -99,24 +99,24 @@ $VERSION = "3.004000";      # update after release (same format as perl $])
 # Used during the prerelease/release-candidate part of the official release
 # process. If you hacked up your SA, you should add a version_tag to your .cf
 # files; this variable should not be modified.
-@EXTRA_VERSION = qw(rc6);
+#@EXTRA_VERSION = qw(rc6);
 
 @ISA = qw();
 
 # SUB_VERSION is now just <yyyy>-<mm>-<dd>
 $SUB_VERSION = 'svnunknown';
-if ('$LastChangedDate: 2014-02-05 00:05:04 -0500 (Wed, 05 Feb 2014) $' =~ ':') {
-  # Subversion keyword "$LastChangedDate: 2014-02-05 00:05:04 -0500 (Wed, 05 Feb 2014) $" has been successfully expanded.
+if ('$LastChangedDate: 2014-02-07 02:54:52 -0500 (Fri, 07 Feb 2014) $' =~ ':') {
+  # Subversion keyword "$LastChangedDate: 2014-02-07 02:54:52 -0500 (Fri, 07 Feb 2014) $" has been successfully expanded.
   # Doesn't happen with automated launchpad builds:
   # https://bugs.launchpad.net/launchpad/+bug/780916
-  $SUB_VERSION = (split(/\s+/,'$LastChangedDate: 2014-02-05 00:05:04 -0500 (Wed, 05 Feb 2014) $ updated by SVN'))[1];
+  $SUB_VERSION = (split(/\s+/,'$LastChangedDate: 2014-02-07 02:54:52 -0500 (Fri, 07 Feb 2014) $ updated by SVN'))[1];
 }
 
 
 if (defined $IS_DEVEL_BUILD && $IS_DEVEL_BUILD) {
-  if ('$LastChangedRevision: 1564636 $' =~ ':') {
-    # Subversion keyword "$LastChangedRevision: 1564636 $" has been successfully expanded.
-    push(@EXTRA_VERSION, ('r' . qw{$LastChangedRevision: 1564636 $ updated by SVN}[1]));
+  if ('$LastChangedRevision: 1565566 $' =~ ':') {
+    # Subversion keyword "$LastChangedRevision: 1565566 $" has been successfully expanded.
+    push(@EXTRA_VERSION, ('r' . qw{$LastChangedRevision: 1565566 $ updated by SVN}[1]));
   } else {
     push(@EXTRA_VERSION, ('r' . 'svnunknown'));
   }

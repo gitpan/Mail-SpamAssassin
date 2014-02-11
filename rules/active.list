@@ -1,5 +1,8 @@
 # active ruleset list, automatically generated from http://ruleqa.spamassassin.org/
-# with results from: day 1: axb-8mile axb-coi-bulk axb-generic axb-ham-misc axb-sa-users bb-guenther_fraud bb-jhardin bb-jhardin_fraud bb-jm bb-kmcgrail bb-zmi bernie-fsf bernie-it_batt bpoliakoff grenier jarif kpg-core mas-cps mas-mas zmi; day 2: axb-8mile axb-coi-bulk axb-generic axb-ham-misc axb-sa-users bb-guenther_fraud bb-jhardin bb-jhardin_fraud bb-jm bb-kmcgrail bb-zmi bernie-fsf bernie-it_batt bpoliakoff grenier jarif kpg-core llanga mas-cps mas-mas zmi; day 3: axb-8mile axb-coi-bulk axb-generic axb-ham-misc axb-sa-users bb-guenther_fraud bb-jhardin bb-jhardin_fraud bb-jm bb-kmcgrail bb-zmi bernie-fsf bernie-it_batt bpoliakoff grenier jarif kpg-core llanga mas-cps mas-mas zmi
+# with results from: day 1: axb-8mile axb-coi-bulk axb-generic axb-ham-misc axb-sa-users axb-trash bb-guenther_fraud bb-jhardin bb-jhardin_fraud bb-jm bb-kmcgrail bb-zmi bernie-fsf bernie-it_batt bpoliakoff grenier jarif kpg-core mas-cps mas-mas zmi; day 2: axb-8mile axb-coi-bulk axb-generic axb-ham-misc axb-sa-users axb-trash bernie-fsf bernie-it_batt bpoliakoff grenier jarif kpg-core llanga mas-cps mas-mas zmi; day 3: axb-8mile axb-coi-bulk axb-generic axb-ham-misc axb-sa-users bb-guenther_fraud bb-jhardin bb-jhardin_fraud bb-jm bb-kmcgrail bb-zmi bernie-fsf bernie-it_batt bpoliakoff grenier jarif kpg-core llanga mas-cps mas-mas zmi
+
+# tflags publish
+AC_HTML_NONSENSE_TAGS
 
 # tflags publish
 ADVANCE_FEE_2_NEW_FORM
@@ -155,7 +158,7 @@ DATE_IN_FUTURE_Q_PLUS
 DEAR_BENEFICIARY
 
 # good enough
-DEAR_NOBODY
+DEAR_EMAIL_USER
 
 # good enough
 DEAR_WINNER
@@ -314,9 +317,6 @@ FR_ALMOST_VIAG2
 FSL_CTYPE_WIN1251
 
 # good enough
-FSL_FAKE_GMAIL_RCVD
-
-# good enough
 FSL_FAKE_HOTMAIL_RVCD
 
 # good enough
@@ -386,9 +386,6 @@ HEAD_LONG
 HK_LOTTO
 
 # good enough
-HK_LOTTO_NAME
-
-# good enough
 HK_NAME_DRUGS
 
 # good enough
@@ -410,6 +407,9 @@ HK_NAME_MR_MRS
 HK_SCAM_N1
 
 # good enough
+HK_SCAM_N13
+
+# good enough
 HK_SCAM_N15
 
 # good enough
@@ -419,9 +419,6 @@ HK_SCAM_N2
 HK_SCAM_N3
 
 # good enough
-HK_SCAM_N4
-
-# good enough
 HK_SCAM_N8
 
 # good enough
@@ -429,9 +426,6 @@ HK_SCAM_S15
 
 # good enough
 HK_SCAM_S25
-
-# good enough
-HK_SCAM_S4
 
 # good enough
 HK_SCAM_S7
@@ -452,7 +446,7 @@ KB_FAKED_THE_BAT
 KB_RATWARE_MSGID
 
 # good enough
-LIVEFILESTORE
+KHOP_BIG_TO_CC
 
 # tflags publish
 LOTS_OF_MONEY
@@ -752,16 +746,10 @@ RISK_FREE
 RP_MATCHES_RCVD
 
 # good enough
-SERGIO_SUBJECT_PORN005
-
-# good enough
 SHARE_50_50
 
 # good enough
 SHORT_HELO_AND_INLINE_IMAGE
-
-# good enough
-SINGLE_HEADER_2K
 
 # good enough
 SINGLE_HEADER_3K
@@ -851,7 +839,19 @@ TVD_PH_REC
 TVD_RCVD_IP
 
 # good enough
+BODY_URI_ONLY
+
+# good enough
+DEAR_NOBODY
+
+# good enough
 FSL_MY_NAME_IS
+
+# good enough
+HK_LOTTO_NAME
+
+# good enough
+SINGLE_HEADER_2K
 
 # tflags userconf
 UNPARSEABLE_RELAY
@@ -939,6 +939,9 @@ USER_IN_WHITELIST
 
 # tflags userconf
 USER_IN_WHITELIST_TO
+
+# good enough
+XM_PHPMAILER_FORGED
 
 # good enough
 YOUR_PERMISSION
